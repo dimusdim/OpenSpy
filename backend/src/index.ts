@@ -38,7 +38,8 @@ const satelliteService = new SatelliteService();
 const simulatorService = new SimulatorService(io);
 const extendedService = new ExtendedDataService();
 const gpsJamService = new GPSJamService();
-const webcamsService = new WebcamsService();
+const windyService = new WindyService();
+const webcamsService = new WebcamsService(windyService);
 const infrastructureService = new InfrastructureService();
 const iodaService = new IODAService();
 const oilPricesService = new OilPricesService();
@@ -49,7 +50,6 @@ const acledService = new ACLEDService();
 const airspaceService = new AirspaceService();
 const gfwService = new GFWService();
 const cloudflareService = new CloudflareService();
-const windyService = new WindyService();
 const road511Service = new Road511Service();
 const notamService = new NotamService();
 

@@ -37,3 +37,5 @@ npm-debug.log*
 
 # Misc
 .claude/
+.gstack/
+keys.md

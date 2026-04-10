@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { WindyService } from './windy.service';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -9,19 +10,27 @@ export interface WebcamRecord {
     lat: number;
     lng: number;
     name: string;
-    url: string;        // HLS .m3u8 stream URL
-    source: string;     // 'live-env-streams' | 'caltrans'
+    url: string;        // HLS .m3u8 stream URL (or empty for Windy — uses playerUrl/imageUrl)
+    source: string;     // 'live-env-streams' | 'caltrans' | 'windy'
     quality?: string;
     country?: string;
+    playerUrl?: string; // Windy embed player
+    imageUrl?: string;  // Windy preview image
 }
 
 // ---------------------------------------------------------------------------
-// WebcamsService — aggregates two webcam sources into a unified list
+// WebcamsService — aggregates webcam sources into a unified list
+// Sources: Live-Environment-Streams (GitHub), Caltrans CCTV, Windy API
 // ---------------------------------------------------------------------------
 
 export class WebcamsService {
     private webcams: WebcamRecord[] = [];
     private refreshInterval: ReturnType<typeof setInterval> | null = null;
+    private windyService: WindyService;
+
+    constructor(windyService: WindyService) {
+        this.windyService = windyService;
+    }
 
     // -- Public API ----------------------------------------------------------
 
@@ -44,6 +53,7 @@ export class WebcamsService {
         const results = await Promise.allSettled([
             this.fetchLiveEnvStreams(),
             this.fetchCaltrans(),
+            this.fetchWindyGlobal(),
         ]);
 
         const merged: WebcamRecord[] = [];
@@ -53,6 +63,26 @@ export class WebcamsService {
 
         this.webcams = merged;
         console.log(`[WebcamsService] Total webcams: ${merged.length}`);
+    }
+
+    // Source 3: Windy Webcams API (global, up to 1000 on free tier)
+    private async fetchWindyGlobal(): Promise<WebcamRecord[]> {
+        try {
+            const windyCams = await this.windyService.fetchGlobalWebcams();
+            return windyCams.map((cam) => ({
+                id: `windy-${cam.id}`,
+                lat: cam.lat,
+                lng: cam.lng,
+                name: cam.title || 'Windy Webcam',
+                url: cam.playerUrl || '',
+                source: 'windy',
+                playerUrl: cam.playerUrl,
+                imageUrl: cam.imageUrl,
+            }));
+        } catch (err: any) {
+            console.error('[WebcamsService] Windy global fetch failed:', err.message);
+            return [];
+        }
     }
 
     // Source 1: Live-Environment-Streams GeoJSON from GitHub
