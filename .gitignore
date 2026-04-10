@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Environment files (contain API keys)
+.env
+.env.local
+.env.production
+.env.*.local
+backend/.env
+frontend/.env.local
+
+# Build output
+frontend/.next/
+frontend/out/
+frontend/public/cesium/
+
+# Cache files
+backend/satellites_cache.json
+backend/vessel_types_cache.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+
+# TypeScript
+*.tsbuildinfo
+
+# Misc
+.claude/

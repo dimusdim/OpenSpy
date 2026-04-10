@@ -1,0 +1,13 @@
+{
+  "name": "worldview-command-center",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:frontend\" \"npm run dev:backend\"",
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev:backend": "cd backend && npm run dev",
+    "install:all": "npm i && cd frontend && npm i && cd ../backend && npm i"
+  },
+  "dependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
