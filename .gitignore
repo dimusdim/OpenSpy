@@ -17,6 +17,8 @@ frontend/public/cesium/
 # Cache files
 backend/satellites_cache.json
 backend/vessel_types_cache.json
+backend/spectator_cache.json
+backend/data/
 
 # OS files
 .DS_Store
@@ -35,7 +37,24 @@ npm-debug.log*
 # TypeScript
 *.tsbuildinfo
 
-# Misc
+# DuckDB artifacts
+*.duckdb
+*.duckdb.wal
+
+# Test/iteration icon artifacts
+frontend/src/icons/test-*.svg
+
+# Documentation (local working docs)
+docs/
+
+# Agent config files
+CLAUDE.md
 .claude/
 .gstack/
+
+# Misc
 keys.md
+SOURCES.md
+
+# Marketing materials (not in repo)
+marketing/

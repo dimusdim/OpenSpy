@@ -5,7 +5,8 @@
     "dev": "concurrently \"npm run dev:frontend\" \"npm run dev:backend\"",
     "dev:frontend": "cd frontend && npm run dev",
     "dev:backend": "cd backend && npm run dev",
-    "install:all": "npm i && cd frontend && npm i && cd ../backend && npm i"
+    "install:all": "npm i && cd frontend && npm i && cd ../backend && npm i",
+    "test:smoke": "node tests/smoke-api.mjs"
   },
   "dependencies": {
     "concurrently": "^8.2.2"

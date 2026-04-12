@@ -1,27 +1,30 @@
 version: '3.8'
 services:
   backend:
-    build: 
+    build:
       context: ./backend
       dockerfile: Dockerfile
     ports:
-      - "3001:3001"
+      - "3055:3055"
+    env_file:
+      - ./backend/.env
     environment:
-      - PORT=3001
+      - PORT=3055
     volumes:
       - ./backend:/usr/src/app
       - /usr/src/app/node_modules
-    command: npm run dev
+    command: npx ts-node src/index.ts
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "3000:3000"
+      - "3737:3737"
     environment:
-      - NEXT_PUBLIC_BACKEND_URL=http://localhost:3001
-      - CHOKIDAR_USEPOLLING=true
+      - NEXT_PUBLIC_API_URL=http://localhost:3055
+    env_file:
+      - ./frontend/.env.local
     volumes:
       - ./frontend:/app
       - /app/node_modules
