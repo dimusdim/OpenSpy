@@ -2,18 +2,15 @@ import { useEffect, useRef } from 'react';
 import * as Cesium from 'cesium';
 import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
+import { API_URL } from '../lib/config';
 
-// SVG icon builders for outage markers
-const svgUri = (fill: string, pulse: string) => `data:image/svg+xml,` + encodeURIComponent(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24">` +
-    `<circle cx="12" cy="12" r="10" fill="${pulse}" opacity="0.3"/>` +
-    `<circle cx="12" cy="12" r="6" fill="${fill}" stroke="black" stroke-width="1"/>` +
-    `<path d="M13 3 L10 12 L14 12 L11 21" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>` +
-    `</svg>`
+// Enhanced outage marker icons — pre-built data URIs per severity level.
+const ICON_CRITICAL = `data:image/svg+xml,` + encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 48 48"><circle cx="24" cy="24" r="22" fill="#ef4444" opacity="0.1"/><circle cx="24" cy="24" r="19" fill="#ef4444" opacity="0.15"/><circle cx="24" cy="24" r="22" fill="none" stroke="#ef4444" stroke-width="0.6" opacity="0.3"/><circle cx="24" cy="24" r="19" fill="none" stroke="#ef4444" stroke-width="0.4" opacity="0.4"/><circle cx="24" cy="24" r="15" fill="#991b1b" stroke="#ef4444" stroke-width="1.2"/><circle cx="24" cy="24" r="12" fill="#b91c1c" stroke="#dc2626" stroke-width="0.5"/><polygon points="27,8 19,24 23,24 20,40 32,22 27,22 30,10" fill="#fbbf24" stroke="#f59e0b" stroke-width="0.8"/><polygon points="27,11 21,23 24,23 22,36 30,23 27,23 29,13" fill="#fde68a" opacity="0.4"/><circle cx="17" cy="18" r="0.8" fill="#fbbf24" opacity="0.6"/><circle cx="31" cy="30" r="0.8" fill="#fbbf24" opacity="0.6"/><circle cx="17" cy="30" r="0.6" fill="#fbbf24" opacity="0.4"/><circle cx="31" cy="18" r="0.6" fill="#fbbf24" opacity="0.4"/></svg>`
 );
-
-const ICON_CRITICAL = svgUri('#ef4444', '#dc2626');
-const ICON_WARNING  = svgUri('#f97316', '#ea580c');
+const ICON_WARNING = `data:image/svg+xml,` + encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 48 48"><circle cx="24" cy="24" r="20" fill="#f97316" opacity="0.1"/><circle cx="24" cy="24" r="20" fill="none" stroke="#f97316" stroke-width="0.5" opacity="0.3"/><circle cx="24" cy="24" r="15" fill="#7c2d12" stroke="#f97316" stroke-width="1.2"/><circle cx="24" cy="24" r="12" fill="#9a3412" stroke="#ea580c" stroke-width="0.5"/><polygon points="27,8 19,24 23,24 20,40 32,22 27,22 30,10" fill="#fbbf24" stroke="#f59e0b" stroke-width="0.8"/><polygon points="27,11 21,23 24,23 22,36 30,23 27,23 29,13" fill="#fde68a" opacity="0.4"/><circle cx="18" cy="19" r="0.6" fill="#fbbf24" opacity="0.4"/><circle cx="30" cy="29" r="0.6" fill="#fbbf24" opacity="0.4"/></svg>`
+);
 
 // Subset of country centroids for mapping Cloudflare location codes to coordinates.
 const COUNTRY_CENTROIDS_MINI: Record<string, [number, number]> = {
@@ -40,23 +37,38 @@ const COUNTRY_CENTROIDS_MINI: Record<string, [number, number]> = {
 };
 
 export function useOutagesLayer(viewer: Cesium.Viewer | null) {
-    const isVisible = useTimelineStore(s => s.layers.outages);
+    const isSourceOn = useTimelineStore(s => s.sources.outages);
+    const isVisible = useTimelineStore(s => s.visibility.outages);
+    const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
     const dsRef = useRef<Cesium.CustomDataSource | null>(null);
 
+    // ---- Effect 1: scene lifetime ----
     useEffect(() => {
         if (!viewer) return;
-        let active = true;
-
         const ds = new Cesium.CustomDataSource('outages');
         viewer.dataSources.add(ds);
         dsRef.current = ds;
+        return () => {
+            if (viewer && !viewer.isDestroyed()) {
+                viewer.dataSources.remove(ds);
+            }
+            dsRef.current = null;
+        };
+    }, [viewer]);
+
+    // ---- Effect 2: fetch loop ----
+    useEffect(() => {
+        if (!viewer || !isSourceOn) return;
+        let active = true;
 
         async function fetchOutages() {
+            const ds = dsRef.current;
+            if (!ds) return;
             try {
                 // Fetch both IODA and Cloudflare outage data in parallel
                 const [iodaRes, cfRes] = await Promise.allSettled([
-                    axios.get('http://localhost:3055/api/outages'),
-                    axios.get('http://localhost:3055/api/cloudflare-outages'),
+                    axios.get(`${API_URL}/api/outages`),
+                    axios.get(`${API_URL}/api/cloudflare-outages`),
                 ]);
                 if (!active) return;
 
@@ -183,8 +195,11 @@ export function useOutagesLayer(viewer: Cesium.Viewer | null) {
                 // Cloudflare outages count as warning
                 counts['warning'] = (counts['warning'] || 0) + cfOutages.length;
                 useTimelineStore.getState().setSubtypeCounts('outages' as any, counts);
-            } catch (err) {
-                // Silent fail — will retry next interval
+            } catch (err: any) {
+                // Log but don't bail — the 5-min poll will retry. Surface the
+                // error to the stream-metric store so LayerManager can flag it.
+                console.warn('[Outages] fetch failed:', err?.message || err);
+                useTimelineStore.getState().setStreamMetric('outages', { status: 'error' });
             }
         }
 
@@ -194,14 +209,33 @@ export function useOutagesLayer(viewer: Cesium.Viewer | null) {
         return () => {
             active = false;
             clearInterval(interval);
-            if (viewer && !viewer.isDestroyed()) {
-                viewer.dataSources.remove(ds);
-            }
+            // Keep datasource — Effect 1 owns its lifetime.
         };
-    }, [viewer]);
+    }, [viewer, isSourceOn]);
 
-    // Visibility toggle
+    // ---- Effect 3: layer visibility ----
+    // Effective show = sources && visibility.
     useEffect(() => {
-        if (dsRef.current) dsRef.current.show = isVisible;
-    }, [isVisible]);
+        if (dsRef.current) dsRef.current.show = isSourceOn && isVisible;
+    }, [isSourceOn, isVisible]);
+
+    // ---- Effect 4: per-subtype visibility ----
+    useEffect(() => {
+        if (!dsRef.current) return;
+        dsRef.current.entities.values.forEach(e => {
+            const sub = (e.properties as any)?.subtype?.getValue?.() ?? 'warning';
+            e.show = subtypeVisibility[`outages:${sub}`] !== false;
+        });
+    }, [subtypeVisibility]);
+
+    // ---- Effect 5: source-off scene clear ----
+    useEffect(() => {
+        if (isSourceOn) return;
+        if (dsRef.current) dsRef.current.entities.removeAll();
+        useTimelineStore.getState().setSubtypeCounts('outages' as any, {});
+        useTimelineStore.getState().setStreamMetric('outages', {
+            count: 0,
+            status: 'disabled',
+        });
+    }, [isSourceOn]);
 }

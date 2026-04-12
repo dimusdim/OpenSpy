@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import * as Cesium from 'cesium';
 import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
+import { API_URL } from '../lib/config';
 
 // GPSJam.org H3 hex data — real GNSS interference detected from ADS-B NIC values.
 // Colour encodes interference ratio: high (>=50%) = red, medium (20-50%) = orange, low (<20%) = yellow.
@@ -29,33 +30,61 @@ interface JammingZone {
 }
 
 export function useJammingLayer(viewer: Cesium.Viewer | null) {
-    const isVisible = useTimelineStore(s => s.layers.jamming);
+    // sources.jamming = fetch GPSJam; visibility.jamming = render H3 cells
+    const isSourceOn = useTimelineStore(s => s.sources.jamming);
+    const isVisible = useTimelineStore(s => s.visibility.jamming);
     const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
     const dsRef = useRef<Cesium.CustomDataSource | null>(null);
 
-    // Fetch jamming data from backend REST API
+    // ---- Effect 1: scene lifetime ----
     useEffect(() => {
         if (!viewer) return;
-        let active = true;
-
         const ds = new Cesium.CustomDataSource('jamming');
         viewer.dataSources.add(ds);
         dsRef.current = ds;
+        return () => {
+            if (viewer && !viewer.isDestroyed()) {
+                viewer.dataSources.remove(ds);
+            }
+            dsRef.current = null;
+        };
+    }, [viewer]);
+
+    // ---- Effect 2: fetch loop ----
+    useEffect(() => {
+        if (!viewer || !isSourceOn) return;
+        let active = true;
 
         const fetchJamming = async () => {
+            const ds = dsRef.current;
+            if (!ds) return;
             try {
                 const { data: zones } = await axios.get<JammingZone[]>(
-                    'http://localhost:3055/api/jamming',
+                    `${API_URL}/api/jamming`,
                     { timeout: 30000 }
                 );
-                if (!active || zones.length === 0) return;
+                if (!active) return;
 
-                // Clear previous entities
+                // Always clear first — even on empty payload — so stale
+                // jamming cells from the previous poll don't remain on the
+                // globe when backend returns [].
                 ds.entities.removeAll();
 
                 const counts: Record<string, number> = {};
 
-                for (const z of zones) {
+                if (zones.length === 0) {
+                    useTimelineStore.getState().setSubtypeCounts('jamming' as any, counts);
+                    useTimelineStore.getState().setStreamMetric('jamming', { count: 0, status: 'streaming' });
+                    return;
+                }
+
+                // Chunked build — GPSJam typically returns ~1000 extruded
+                // H3 polygon zones; building them all synchronously is a
+                // noticeable cold-load hitch. Yield every JAMMING_CHUNK_SIZE
+                // entities so input stays responsive.
+                const JAMMING_CHUNK_SIZE = 150;
+                for (let zi = 0; zi < zones.length; zi++) {
+                    const z = zones[zi];
                     counts[z.intensity] = (counts[z.intensity] || 0) + 1;
 
                     const fill = INTENSITY_COLORS[z.intensity] || INTENSITY_COLORS.medium;
@@ -91,6 +120,12 @@ export function useJammingLayer(viewer: Cesium.Viewer | null) {
                             outlineWidth: 1,
                         },
                     });
+
+                    if ((zi + 1) % JAMMING_CHUNK_SIZE === 0 && zi + 1 < zones.length) {
+                        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+                        if (!active) return;
+                        if (!useTimelineStore.getState().sources.jamming) return;
+                    }
                 }
 
                 useTimelineStore.getState().setSubtypeCounts('jamming', counts);
@@ -121,18 +156,17 @@ export function useJammingLayer(viewer: Cesium.Viewer | null) {
         return () => {
             active = false;
             clearInterval(interval);
-            if (viewer && !viewer.isDestroyed()) {
-                viewer.dataSources.remove(ds);
-            }
+            // Keep datasource — Effect 1 owns its lifetime.
         };
-    }, [viewer]);
+    }, [viewer, isSourceOn]);
 
-    // Visibility toggle
+    // ---- Effect 3: layer visibility ----
+    // Effective show = sources && visibility.
     useEffect(() => {
-        if (dsRef.current) dsRef.current.show = isVisible;
-    }, [isVisible]);
+        if (dsRef.current) dsRef.current.show = isSourceOn && isVisible;
+    }, [isSourceOn, isVisible]);
 
-    // Per-subtype visibility (intensity = subtype)
+    // ---- Effect 4: per-subtype visibility ----
     useEffect(() => {
         if (!dsRef.current) return;
         dsRef.current.entities.values.forEach(e => {
@@ -140,4 +174,15 @@ export function useJammingLayer(viewer: Cesium.Viewer | null) {
             e.show = subtypeVisibility[`jamming:${sub}`] !== false;
         });
     }, [subtypeVisibility]);
+
+    // ---- Effect 5: source-off scene clear ----
+    useEffect(() => {
+        if (isSourceOn) return;
+        if (dsRef.current) dsRef.current.entities.removeAll();
+        useTimelineStore.getState().setSubtypeCounts('jamming', {});
+        useTimelineStore.getState().setStreamMetric('jamming', {
+            count: 0,
+            status: 'disabled',
+        });
+    }, [isSourceOn]);
 }
