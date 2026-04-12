@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { Fuel } from 'lucide-react';
+import { API_URL } from '../lib/config';
 
 interface OilQuote {
     price: number;
@@ -22,7 +23,7 @@ export default function OilPricesWidget() {
     useEffect(() => {
         const fetchPrices = async () => {
             try {
-                const res = await fetch('http://localhost:3055/api/oil-prices');
+                const res = await fetch(`${API_URL}/api/oil-prices`);
                 if (res.ok) {
                     const json = await res.json();
                     if (json) setData(json);

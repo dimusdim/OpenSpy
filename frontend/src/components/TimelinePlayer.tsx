@@ -10,7 +10,18 @@ import { twMerge } from 'tailwind-merge';
 const SESSION_START = Date.now() - 2 * 3600 * 1000; // 2h before page load
 
 export default function TimelinePlayer() {
-    const { mode, setMode, currentTime, setCurrentTime, isPlaying, speedMultiplier, setIsPlaying, setSpeedMultiplier } = useTimelineStore();
+    // Individual selectors — whole-store subscription re-renders this
+    // component on every streamMetrics write (constant) and every
+    // currentTime bump from Globe's onTick. Selector-per-field isolates
+    // re-renders to the fields TimelinePlayer actually reads.
+    const mode = useTimelineStore(s => s.mode);
+    const setMode = useTimelineStore(s => s.setMode);
+    const currentTime = useTimelineStore(s => s.currentTime);
+    const setCurrentTime = useTimelineStore(s => s.setCurrentTime);
+    const isPlaying = useTimelineStore(s => s.isPlaying);
+    const speedMultiplier = useTimelineStore(s => s.speedMultiplier);
+    const setIsPlaying = useTimelineStore(s => s.setIsPlaying);
+    const setSpeedMultiplier = useTimelineStore(s => s.setSpeedMultiplier);
 
     const [displayTime, setDisplayTime] = useState<string>('');
     const sliderRef = useRef<HTMLInputElement>(null);

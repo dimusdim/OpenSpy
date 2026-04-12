@@ -4,20 +4,20 @@ import React, { useEffect, useRef, useState } from 'react';
 import * as Cesium from 'cesium';
 import 'cesium/Build/Cesium/Widgets/widgets.css';
 import { useTimelineStore } from '../store/useTimelineStore';
-import { useSatellitesLayer } from '../cesium/useSatellitesLayer';
+import { useSatellitesLayer, satelliteFootprintMetaMap } from '../cesium/useSatellitesLayer';
 import { useDynamicLayers, aircraftMetaMap } from '../cesium/useDynamicLayers';
 import { useOsintLayer } from '../cesium/useOsintLayer';
 import { useJammingLayer } from '../cesium/useJammingLayer';
 import { useBordersLayer } from '../cesium/useBordersLayer';
 import { useFiresLayer, fireMetaMap } from '../cesium/useFiresLayer';
-import { useCablesLayer } from '../cesium/useCablesLayer';
+import { useCablesLayer, cableMetaMap, cableInstanceToLogical } from '../cesium/useCablesLayer';
 import { useWebcamsLayer, webcamMetaMap } from '../cesium/useWebcamsLayer';
-import { useInfrastructureLayer } from '../cesium/useInfrastructureLayer';
-import { usePipelinesLayer } from '../cesium/usePipelinesLayer';
+import { useInfrastructureLayer, infraMetaMap, infraStripInstanceId } from '../cesium/useInfrastructureLayer';
+import { usePipelinesLayer, pipelineMetaMap } from '../cesium/usePipelinesLayer';
 import { useOutagesLayer } from '../cesium/useOutagesLayer';
 import { useTrafficLayer } from '../cesium/useTrafficLayer';
 import { useConflictsLayer } from '../cesium/useConflictsLayer';
-import { useAirspaceLayer } from '../cesium/useAirspaceLayer';
+import { useAirspaceLayer, airspaceMetaMap, airspaceInstanceToLogical } from '../cesium/useAirspaceLayer';
 import { useGFWLayer } from '../cesium/useGFWLayer';
 
 if (typeof window !== 'undefined') {
@@ -55,6 +55,33 @@ export default function Globe() {
             )
         });
 
+        // Rate-limit clock-driven renders to ~1 Hz.
+        //
+        // `requestRenderMode: true` above is the Cesium pattern for "only
+        // render when something changed", but the default
+        // `scene.maximumRenderTimeChange = 0` means ANY change in
+        // simulation time counts as a change — so with `shouldAnimate=true`
+        // the clock advances every animation frame and Cesium re-enters
+        // the full render pipeline (entity visualizer updates, path
+        // rebuilds, sampled property interpolation for every one of
+        // ~4500 dynamic entities) at 60 Hz. That's the primary drag-time
+        // main-thread sink identified in the root-cause audit.
+        //
+        // Setting this to 1.0 means: Cesium requests a new render only
+        // when simulation time has advanced by >=1 second since the last
+        // frame. Camera movements (drag, zoom, tilt) still trigger
+        // immediate renders via their own requestRender calls, so the
+        // globe stays interactive — rotation still feels smooth — we
+        // just stop re-evaluating every dynamic property 60 times a
+        // second when nothing the user cares about has changed.
+        //
+        // Satellites visibly step forward once a second instead of
+        // smoothly interpolating; at orbital speeds the visual drift is
+        // sub-pixel at global zoom and a few pixels at city zoom, well
+        // below the perceptual threshold for a situational-awareness
+        // overlay.
+        v.scene.maximumRenderTimeChange = 1.0;
+
         // 3D geometry (Google / OSM) is loaded reactively by a separate
         // useEffect that watches `tileMode`. We no longer load here.
 
@@ -90,6 +117,8 @@ export default function Globe() {
                         url: wcMeta.url,
                         source: wcMeta.source,
                         country: wcMeta.country,
+                        imageUrl: wcMeta.imageUrl,
+                        playerUrl: wcMeta.playerUrl,
                     });
                     return;
                 }
@@ -97,8 +126,12 @@ export default function Globe() {
                 // Aircraft billboard
                 const acMeta = aircraftMetaMap.get(pickedObject.id);
                 if (acMeta) {
+                    // Show callsign in header, fall back to icao24 if empty
+                    const displayName = acMeta.callsign && acMeta.callsign !== acMeta.icao24
+                        ? `Flight ${acMeta.callsign}`
+                        : `Aircraft ${acMeta.icao24.toUpperCase()}`;
                     useTimelineStore.getState().setSelectedEntityId(pickedObject.id, {
-                        name: `Flight ${acMeta.id}`,
+                        name: displayName,
                         id: pickedObject.id,
                         type: 'Aircraft',
                     });
@@ -116,12 +149,120 @@ export default function Globe() {
                     });
                     return;
                 }
+
+                // Submarine cable (GroundPolylinePrimitive). Multipart cables
+                // come back with an instance id like "cable-foo#2" — map it
+                // back to the logical id before the metaMap lookup.
+                const cableLogicalId = cableInstanceToLogical.get(pickedObject.id) ?? pickedObject.id;
+                const cableMeta = cableMetaMap.get(cableLogicalId);
+                if (cableMeta) {
+                    useTimelineStore.getState().setSelectedEntityId(cableLogicalId, {
+                        name: cableMeta.name,
+                        id: cableLogicalId,
+                        type: 'Cable',
+                    });
+                    return;
+                }
+
+                // Pipeline (Primitive + PolylineGeometry). Single-part — no
+                // instance-id suffix so logicalId is the pick id directly.
+                const pipelineMeta = pipelineMetaMap.get(pickedObject.id);
+                if (pipelineMeta) {
+                    useTimelineStore.getState().setSelectedEntityId(pickedObject.id, {
+                        name: pipelineMeta.name,
+                        id: pickedObject.id,
+                        type: 'Pipeline',
+                    });
+                    return;
+                }
+
+                // Airspace zone (dual Primitive: fill + outline). Pick id is
+                // a part id like "airspace-42#0#fill"; strip the suffix via
+                // the instance→logical map before the metaMap lookup.
+                const airspaceLogicalId = airspaceInstanceToLogical.get(pickedObject.id) ?? pickedObject.id;
+                const airspaceMeta = airspaceMetaMap.get(airspaceLogicalId);
+                if (airspaceMeta) {
+                    useTimelineStore.getState().setSelectedEntityId(airspaceLogicalId, {
+                        name: `${airspaceMeta.typeName}: ${airspaceMeta.name}`,
+                        id: airspaceLogicalId,
+                        type: 'Airspace',
+                    });
+                    return;
+                }
+
+                // Infrastructure (plants, refineries, military, substations,
+                // power lines). Per-tile instance ids embed the tile key
+                // (MEDIUM 6 dedup), so strip the tile prefix via
+                // infraStripInstanceId before looking up the logical meta.
+                const infraLogicalId = infraStripInstanceId(pickedObject.id);
+                const infraMeta = infraMetaMap.get(infraLogicalId);
+                if (infraMeta) {
+                    useTimelineStore.getState().setSelectedEntityId(infraLogicalId, {
+                        name: infraMeta.name,
+                        id: infraLogicalId,
+                        type: 'Infrastructure',
+                    });
+                    return;
+                }
             }
 
-            // Case 2: Entity API object (satellite, vessel, osint, jamming)
+            // Case 2: Entity API object (satellite, vessel, osint, jamming,
+            // border, infrastructure, pipeline, cable, airspace, …)
             if (pickedObject.id && pickedObject.id instanceof Cesium.Entity) {
                 const entity = pickedObject.id;
                 const eid = entity.id ?? '';
+
+                // Satellite footprint overlay — fp-* and beam-* ids live in
+                // the sat-footprints datasource and reference a parent
+                // satellite via satelliteFootprintMetaMap. Resolve to the
+                // parent sat so the HUD shows the correct satellite with
+                // the footprint annotation, not the footprint entity
+                // itself (which has no Legend layer of its own).
+                if (eid.startsWith('fp-sat-') || eid.startsWith('beam-sat-')) {
+                    const fpMeta = satelliteFootprintMetaMap.get(eid);
+                    if (fpMeta) {
+                        useTimelineStore.getState().setSelectedEntityId(fpMeta.parentSatId, {
+                            name: fpMeta.satName,
+                            id: fpMeta.parentSatId,
+                            type: 'Satellite',
+                            // Annotate the card with the sensor source so
+                            // the HUD can render the "Projected —
+                            // Spectator Earth" block.
+                            footprint: {
+                                sensorName: fpMeta.sensorName,
+                                sensorType: fpMeta.sensorType,
+                                swathMeters: fpMeta.swathMeters,
+                                source: fpMeta.source,
+                                projected: true,
+                            },
+                        });
+                        return;
+                    }
+                }
+
+                // Prefer the authoritative `layer` stashed in entity.properties
+                // by the layer hooks — single source of truth, survives arbitrary
+                // id shapes (cables have no prefix, pwr-* is new, etc.).
+                const props = entity.properties as Cesium.PropertyBag | undefined;
+                let layerName: string | undefined;
+                try {
+                    const raw = (props as any)?.layer;
+                    layerName = typeof raw?.getValue === 'function' ? raw.getValue() : raw;
+                } catch {
+                    layerName = undefined;
+                }
+
+                if (layerName) {
+                    useTimelineStore.getState().setSelectedEntityId(eid, {
+                        name: entity.name || eid,
+                        id: eid,
+                        type: layerName,
+                    });
+                    return;
+                }
+
+                // Fallback: id-prefix heuristics for entities whose layer hook
+                // hasn't been migrated to set properties.layer yet.
                 const metadata = {
                     name: entity.name,
                     id: eid,
@@ -130,6 +271,9 @@ export default function Globe() {
                         : eid.startsWith('gdacs-') || eid.startsWith('usgs-') || eid.startsWith('eonet-') ? 'OSINT'
                         : eid.startsWith('infra-') ? 'Infrastructure'
                         : eid.startsWith('pipe-') ? 'Pipeline'
+                        : eid.startsWith('pwr-') ? 'Infrastructure'
+                        : eid.startsWith('cable-') ? 'Cable'
+                        : eid.startsWith('border-') ? 'Border'
                         : eid.startsWith('outage-') || eid.startsWith('cf-') ? 'Outage'
                         : eid.startsWith('dark-') ? 'Dark Vessel'
                         : eid.startsWith('conflict-') || eid.startsWith('acled-') ? 'Conflict'
@@ -137,7 +281,7 @@ export default function Globe() {
                         : eid.startsWith('gfw-') ? 'GFW Event'
                         : 'Vessel'
                 };
-                useTimelineStore.getState().setSelectedEntityId(entity.id, metadata);
+                useTimelineStore.getState().setSelectedEntityId(eid, metadata);
                 return;
             }
 
@@ -148,12 +292,48 @@ export default function Globe() {
         v.scene.screenSpaceCameraController.zoomEventTypes = [Cesium.CameraEventType.WHEEL, Cesium.CameraEventType.PINCH];
         v.scene.screenSpaceCameraController.tiltEventTypes = [Cesium.CameraEventType.PINCH, Cesium.CameraEventType.RIGHT_DRAG];
 
-        // Sync Clock with Mode
+        // --- Globe-centred navigation ---
+        //
+        // The only camera control we change from Cesium defaults is
+        // `enableTranslate` (middle-click / two-finger pan that drags
+        // the globe under the cursor). That gesture is what drifts the
+        // earth off-centre; disabling it leaves the user with the
+        // default left-drag-spin and wheel-zoom, both of which orbit /
+        // scale around the globe's centre in 3D mode.
+        //
+        // Previously this effect also installed a `lookAtTransform` lock
+        // at `Cartesian3.ZERO`. That hard-froze Cesium's mouse handlers
+        // (no input response even after textures + orbits had loaded)
+        // because `Cartesian3.ZERO` is the literal centre of the Earth
+        // and the ENU frame there is degenerate. Default Cesium controls
+        // already orbit around the globe's centre for left-drag in 3D
+        // mode, so the transform lock wasn't needed — removing it
+        // restores input responsiveness.
+        v.scene.screenSpaceCameraController.enableTranslate = false;
+
+        // Push viewer clock → Zustand store (throttled to 1 Hz) so
+        // TimelinePlayer sees the real Cesium time. We do NOT force-
+        // clamp `clock.currentTime = now()` here anymore: with
+        // `clockStep = SYSTEM_CLOCK_MULTIPLIER` + `multiplier = 1.0`
+        // (set below) Cesium naturally tracks wall-clock in live mode.
+        //
+        // The old code rewrote currentTime on every animation tick,
+        // which meant the simulation time always changed by a tiny
+        // increment → `scene.maximumRenderTimeChange` saw a change every
+        // frame → Cesium entered the full dynamic render pipeline at
+        // 60 Hz, nullifying the whole `requestRenderMode` benefit.
+        // Removing the forced clamp is exactly what makes the rate
+        // limiter work.
+        let lastStoreSync = 0;
         v.clock.onTick.addEventListener((clock) => {
-             const mode = useTimelineStore.getState().mode;
-             if (mode === 'live') {
-                 // Force to current system time
-                 clock.currentTime = Cesium.JulianDate.fromDate(new Date());
+             const now = performance.now();
+             if (now - lastStoreSync >= 1000) {
+                 lastStoreSync = now;
+                 const currentDate = Cesium.JulianDate.toDate(clock.currentTime);
+                 const storeTime = useTimelineStore.getState().currentTime;
+                 if (Math.abs(storeTime.getTime() - currentDate.getTime()) > 750) {
+                     useTimelineStore.getState().setCurrentTime(currentDate);
+                 }
              }
         });
 
@@ -180,7 +360,7 @@ export default function Globe() {
             const detail = (e as CustomEvent).detail;
             v.camera.flyTo({
                 destination: Cesium.Cartesian3.fromDegrees(detail.lng, detail.lat, detail.height || 15000),
-                duration: 2.0
+                duration: 2.0,
             });
         };
         document.addEventListener('fly-to', handleFlyTo);
@@ -199,27 +379,31 @@ export default function Globe() {
         };
     }, []);
 
-    // --- NASA GIBS MODIS cloud overlay (today's imagery) ---
-    // Free, no auth, WMTS tiles. Updates daily. Shows real cloud coverage.
-    const showClouds = useTimelineStore(s => s.layers.clouds ?? false);
+    // --- NASA GIBS Cloud Fraction overlay (daily) ---
+    // Uses MODIS_Terra_Cloud_Fraction_Day — actual cloud coverage product,
+    // NOT the true-color imagery (that's a separate "satellite_imagery" layer).
+    // Clouds imagery: we use visibility for show/hide (cheap), and only care
+    // about sources for the metric status dot. The ImageryLayer itself stops
+    // issuing tile requests to GIBS iff show=false, so toggling visibility
+    // already acts as a fetch gate for imagery layers.
+    const showClouds = useTimelineStore(s => s.sources.clouds && s.visibility.clouds);
     const gibsLayerRef = useRef<Cesium.ImageryLayer | null>(null);
 
     useEffect(() => {
         if (!viewer) return;
-        // Build today's date string for GIBS TIME parameter
-        const today = new Date().toISOString().split('T')[0];
-        // Bake today's date directly into the URL — avoids the `times`/`clock`
-        // coupling that WebMapTileServiceImageryProvider enforces.
+        // GIBS cloud products lag ~1 day, so use yesterday's date
+        const cloudDate = new Date(Date.now() - 86400_000).toISOString().split('T')[0];
         const provider = new Cesium.UrlTemplateImageryProvider({
-            url: `https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/MODIS_Terra_CorrectedReflectance_TrueColor/default/${today}/250m/{z}/{y}/{x}.jpg`,
+            url: `https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/MODIS_Terra_Cloud_Fraction_Day/default/${cloudDate}/2km/{z}/{y}/{x}.png`,
             tilingScheme: new Cesium.GeographicTilingScheme(),
-            maximumLevel: 8,
-            credit: 'NASA GIBS',
+            maximumLevel: 5,
+            credit: 'NASA GIBS MODIS Terra Cloud Fraction',
         });
         const layer = viewer.imageryLayers.addImageryProvider(provider);
-        layer.alpha = 0.5;
+        layer.alpha = 0.55;
         layer.show = showClouds;
         gibsLayerRef.current = layer;
+        const today = cloudDate;
 
         // Track tile loading metrics for LayerManager
         const metricsInterval = setInterval(() => {
@@ -250,7 +434,8 @@ export default function Globe() {
 
     // --- NASA GIBS MODIS True Color satellite imagery overlay ---
     // Full true-color Earth imagery from MODIS Terra, daily update.
-    const showSatImagery = useTimelineStore(s => s.layers.satellite_imagery ?? false);
+    // Same logic as clouds — show if source AND visibility both on.
+    const showSatImagery = useTimelineStore(s => s.sources.satellite_imagery && s.visibility.satellite_imagery);
     const satImageryLayerRef = useRef<Cesium.ImageryLayer | null>(null);
 
     useEffect(() => {
@@ -304,17 +489,46 @@ export default function Globe() {
 
         async function ensureGoogle() {
             if (googleTileRef.current) return; // already loaded
+            const googleKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_KEY;
+            if (!googleKey) {
+                console.warn('[Globe] NEXT_PUBLIC_GOOGLE_MAPS_KEY not set — falling back to OSM');
+                useTimelineStore.getState().setTileMode('osm');
+                return;
+            }
             try {
-                const url = "https://tile.googleapis.com/v1/3dtiles/root.json?key=GOOGLE_MAPS_KEY_FROM_ENV";
+                const url = `https://tile.googleapis.com/v1/3dtiles/root.json?key=${googleKey}`;
                 const tileset = await Cesium.Cesium3DTileset.fromUrl(url, {
                     // LOD optimization: higher = less detail = faster rendering.
-                    // Default is 16. 24 gives ~2x fewer tile requests at close zoom.
-                    maximumScreenSpaceError: 24,
+                    //
+                    // In-browser profiling (measured April 2026) showed Google
+                    // Photorealistic 3D Tiles cost ~6.4 ms per frame at SSE=24
+                    // and dropped the interactive FPS from 44 to ~11. At SSE=48
+                    // Cesium draws roughly half as many tiles per frame, which
+                    // brings rotation back toward the 30-45 FPS range on
+                    // mid-range hardware without visibly degrading the
+                    // photorealistic look at typical command-centre zoom
+                    // levels (we rarely sit at a single building for long).
+                    maximumScreenSpaceError: 48,
                     // Skip intermediate LOD levels — jump straight to the target,
                     // avoids rendering multiple LOD layers during zoom transitions.
                     skipLevelOfDetail: true,
+                    // Collision was enabled so CLAMP_TO_GROUND billboards could
+                    // latch onto the photo mesh, but the same profiling showed
+                    // the clamp-collision resolver running on every frame over
+                    // every clamp-registered billboard (fires, infrastructure,
+                    // cables) is a separate main-thread sink on top of the
+                    // tileset render cost. Off = those markers fall to the
+                    // ellipsoid/terrain surface (still geolocated correctly),
+                    // which is a reasonable trade for a responsive globe.
+                    enableCollision: false,
                 } as any);
-                tileset.cacheBytes = 512 * 1024 * 1024; // 512 MB tile cache
+                // Cap the tile cache. The prior 512 MB setting let Cesium
+                // retain a lot of mesh data across rotations, which showed
+                // up in profiling as heap oscillation between ~420 and 999
+                // MB with 150-200 ms GC pauses. 128 MB still keeps the
+                // currently-visible scene in cache but prevents the heap
+                // from ballooning into the "force major GC" band.
+                tileset.cacheBytes = 128 * 1024 * 1024;
                 if (!active || viewer!.isDestroyed()) return;
                 tileset.show = tileMode === 'google';
                 viewer!.scene.primitives.add(tileset);

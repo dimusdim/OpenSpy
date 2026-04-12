@@ -1,0 +1,45 @@
+{
+  "version": "1.1",
+  "note": "All icons render at 32x32 output. Vessels/conflicts/GFW/outages/webcams use 48x48 viewBox; satellites/aircraft use 24x24 viewBox.",
+  "icons": {
+    "satellite": {
+      "military": { "file": "sat-military.svg", "color": "#ef4444", "description": "Military satellite — black outline, red fill, crosshair/angular shape, 32x32 (24x24 viewBox)" },
+      "recon": { "file": "sat-recon.svg", "color": "#f59e0b", "description": "Recon satellite — black outline, amber fill, telescope/eye shape, 32x32 (24x24 viewBox)" },
+      "commercial": { "file": "sat-commercial.svg", "color": "#06b6d4", "description": "Commercial satellite — black outline, cyan fill, dish + body + panels, 32x32 (24x24 viewBox)" },
+      "civilian": { "file": "sat-civilian.svg", "color": "#84cc16", "description": "Civilian satellite — black outline, lime fill, ISS-like truss, 32x32 (24x24 viewBox)" },
+      "cluster": { "file": "sat-cluster.svg", "color": "#06b6d4", "description": "Satellite cluster — black outline bubble with colored tiny satellite shapes, 32x32 (24x24 viewBox)" }
+    },
+    "vessel": {
+      "cargo": { "file": "vessel-cargo.svg", "color": "#d1d5db", "description": "Cargo/container ship — top-down, colored container grid, gantry cranes" },
+      "tanker": { "file": "vessel-tanker.svg", "color": "#dc2626", "description": "Tanker — top-down, circular tank hatches, centerline pipeline" },
+      "passenger": { "file": "vessel-passenger.svg", "color": "#f8fafc", "description": "Passenger/cruise ship — white hull for ocean contrast, yellow lit windows, blue trim, pool deck, helipad" },
+      "fishing": { "file": "vessel-fishing.svg", "color": "#84cc16", "description": "Fishing vessel — top-down, crane/boom, net drums, fishing nets" },
+      "military": { "file": "vessel-military.svg", "color": "#475569", "description": "Military vessel — destroyer/frigate, gun turrets, VLS cells, radar mast" },
+      "unknown": { "file": "vessel-unknown.svg", "color": "#9ca3af", "description": "Unknown vessel — generic hull, question mark indicator" }
+    },
+    "aircraft": {
+      "airliner": { "file": "aircraft-airliner.svg", "color": "#ffffff", "description": "Airliner — wide fuselage, swept wings, engine pods, T-tail, top-down" },
+      "military": { "file": "aircraft-military.svg", "color": "#facc15", "description": "Fighter jet — delta wings, canards, twin stabilizers, hardpoints, top-down" },
+      "light": { "file": "aircraft-light.svg", "color": "#60a5fa", "description": "Light prop plane — straight high wings, propeller disc, fixed gear, top-down" },
+      "general": { "file": "aircraft-general.svg", "color": "#e5e7eb", "description": "General aviation — mid-size, moderate wings, cabin windows, top-down" }
+    },
+    "dark_vessel": {
+      "alert": { "file": "dark-vessel.svg", "color": "#dc2626", "description": "Dark vessel alert — dark ship silhouette (top-down) with red stroke and red warning badge in upper-right" }
+    },
+    "conflict": {
+      "explosions": { "file": "conflict-explosions.svg", "color": "#ef4444", "description": "Explosion — jagged star burst, orange inner layer, white-hot center" },
+      "battles": { "file": "conflict-battles.svg", "color": "#f97316", "description": "Battle — assault rifle silhouette (side view), stock, pistol grip, barrel, magazine" },
+      "violence": { "file": "conflict-violence.svg", "color": "#eab308", "description": "Violence against civilians — skull and crossbones danger symbol" }
+    },
+    "gfw": {
+      "event": { "file": "gfw-event.svg", "color": "#8b5cf6", "description": "GFW suspicious event — no-fishing sign (circle with fish silhouette and diagonal slash)" }
+    },
+    "outage": {
+      "critical": { "file": "outage-critical.svg", "color": "#ef4444", "description": "Critical outage — lightning bolt in red circle, double pulse ring, spark dots" },
+      "warning": { "file": "outage-warning.svg", "color": "#f97316", "description": "Warning outage — lightning bolt in orange circle, single pulse ring" }
+    },
+    "webcam": {
+      "default": { "file": "webcam.svg", "color": "#22d3ee", "description": "Video camera — body with lens, viewfinder, handle grip, status LED" }
+    }
+  }
+}

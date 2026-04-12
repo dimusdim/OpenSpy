@@ -12,7 +12,7 @@ type LegendRow = {
 };
 
 type LegendSection = {
-    layer: 'satellites' | 'aviation' | 'maritime' | 'osint' | 'jamming' | 'labels' | 'webcams' | 'infrastructure' | 'pipelines' | 'outages' | 'satellite_imagery' | 'traffic' | 'conflicts' | 'airspace' | 'gfw';
+    layer: 'satellites' | 'satelliteFootprints' | 'aviation' | 'maritime' | 'osint' | 'jamming' | 'labels' | 'webcams' | 'infrastructure' | 'pipelines' | 'outages' | 'satellite_imagery' | 'traffic' | 'conflicts' | 'airspace' | 'gfw';
     title: string;
     source: string;
     rows: LegendRow[];
@@ -23,9 +23,17 @@ const SECTIONS: LegendSection[] = [
         layer: 'satellites', title: 'Satellites', source: 'CelesTrak',
         rows: [
             { key: 'military',   label: 'Military',   icon: Satellite, color: 'text-red-500' },
+            { key: 'recon',      label: 'Recon',      icon: Satellite, color: 'text-fuchsia-400' },
             { key: 'commercial', label: 'Commercial', icon: Satellite, color: 'text-cyan-400' },
             { key: 'civilian',   label: 'Civilian',   icon: Satellite, color: 'text-lime-400' },
         ],
+    },
+    {
+        // Projected sensor footprints — rendered only for satellites with
+        // real Spectator Earth swath data. Subtype rows intentionally
+        // empty: the cone count is shown in the header.
+        layer: 'satelliteFootprints', title: 'Sensor Footprints', source: 'Spectator Earth (projected)',
+        rows: [],
     },
     {
         layer: 'aviation', title: 'Aviation', source: 'OpenSky',
@@ -79,12 +87,17 @@ const SECTIONS: LegendSection[] = [
         rows: [],
     },
     {
-        layer: 'infrastructure', title: 'Infrastructure', source: 'OpenStreetMap',
+        layer: 'infrastructure', title: 'Infrastructure', source: 'Overture Maps + Overpass',
         rows: [
-            { key: 'power_plant',   label: 'Power Plant',    icon: Zap,      color: 'text-yellow-400' },
-            { key: 'refinery',      label: 'Refinery',       icon: Factory,  color: 'text-red-500' },
-            { key: 'desalination',  label: 'Desalination',   icon: Droplets, color: 'text-blue-400' },
-            { key: 'military',      label: 'Military',       icon: Shield,   color: 'text-zinc-400' },
+            { key: 'military',             label: 'Military',       icon: Shield,        color: 'text-zinc-400' },
+            { key: 'power_plant',          label: 'Power Plant',    icon: Zap,           color: 'text-yellow-400' },
+            { key: 'power_substation',     label: 'Substation',     icon: Zap,           color: 'text-orange-400' },
+            { key: 'power_line',           label: 'Power Line',     icon: Zap,           color: 'text-orange-300' },
+            { key: 'refinery',             label: 'Refinery/Mining',icon: Factory,       color: 'text-red-500' },
+            { key: 'dam',                  label: 'Dam/Water',      icon: Waves,         color: 'text-blue-400' },
+            { key: 'desalination',         label: 'Desalination',   icon: Droplets,      color: 'text-blue-300' },
+            { key: 'communication_tower',  label: 'Comm Tower',     icon: Radio,         color: 'text-cyan-400' },
+            { key: 'aerodrome',            label: 'Aerodrome',      icon: Plane,         color: 'text-zinc-300' },
         ],
     },
     {
@@ -108,7 +121,8 @@ const SECTIONS: LegendSection[] = [
             { key: 'restricted', label: 'Restricted', icon: Ban, color: 'text-red-500' },
             { key: 'danger',     label: 'Danger',     icon: Ban, color: 'text-orange-400' },
             { key: 'prohibited', label: 'Prohibited', icon: Ban, color: 'text-red-700' },
-            { key: 'tfr',        label: 'TFR',        icon: Ban, color: 'text-yellow-400' },
+            { key: 'alert',      label: 'Alert',      icon: Ban, color: 'text-yellow-400' },
+            { key: 'warning',    label: 'Warning',    icon: Ban, color: 'text-amber-400' },
         ],
     },
     {
@@ -141,10 +155,14 @@ const SECTIONS: LegendSection[] = [
 ];
 
 export default function Legend() {
-    const layers = useTimelineStore(s => s.layers);
+    // Legend = right-panel render control. Reads/writes `visibility` (not
+    // `sources`) — so toggling here only flips primitive.show, never stops
+    // the backend fetch. Toggling a source off in LayerManager is what
+    // actually halts data fetching.
+    const visibility = useTimelineStore(s => s.visibility);
     const counts = useTimelineStore(s => s.subtypeCounts);
     const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
-    const toggleLayer = useTimelineStore(s => s.toggleLayer);
+    const toggleVisibility = useTimelineStore(s => s.toggleVisibility);
     const toggleSubtype = useTimelineStore(s => s.toggleSubtype);
 
     const [collapsed, setCollapsed] = useState(false);
@@ -182,7 +200,7 @@ export default function Legend() {
             {/* Scrollable body */}
             <div className="overflow-y-auto p-2 flex flex-col gap-1">
                 {SECTIONS.map(section => {
-                    const isLayerOn = layers[section.layer];
+                    const isLayerOn = visibility[section.layer];
                     const isGroupCollapsed = collapsedGroups[section.layer];
                     const totalCount = section.rows.reduce(
                         (sum, r) => sum + (counts[`${section.layer}:${r.key}`] || 0), 0
@@ -201,7 +219,7 @@ export default function Legend() {
 
                                 {/* Layer toggle */}
                                 <button
-                                    onClick={() => toggleLayer(section.layer)}
+                                    onClick={() => toggleVisibility(section.layer)}
                                     className={`flex-1 flex items-center justify-between text-[10px] uppercase font-mono tracking-wider px-1 py-1 rounded transition-colors ${
                                         isLayerOn ? 'text-cyan-400 hover:text-cyan-300' : 'text-zinc-600 hover:text-zinc-400'
                                     }`}

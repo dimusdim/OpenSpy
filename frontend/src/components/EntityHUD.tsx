@@ -8,14 +8,24 @@ import axios from 'axios';
 import Hls from 'hls.js';
 import { aircraftMetaMap } from '../cesium/useDynamicLayers';
 import { webcamMetaMap } from '../cesium/useWebcamsLayer';
+import { API_URL } from '../lib/config';
 import { fireMetaMap } from '../cesium/useFiresLayer';
+import { cableMetaMap } from '../cesium/useCablesLayer';
+import { pipelineMetaMap } from '../cesium/usePipelinesLayer';
+import { airspaceMetaMap } from '../cesium/useAirspaceLayer';
+import { infraMetaMap } from '../cesium/useInfrastructureLayer';
 
 // HUD that locks onto whatever entity the user clicked. Continuously projects
 // the entity's 3D world position to screen coords (for the dotted leader line)
 // AND reads back the live geodetic position (lat/lng/alt) + the subtype that
 // the layer hooks stashed in entity.properties when the entity was created.
 export default function EntityHUD() {
-    const { selectedEntityId, selectedEntityData } = useTimelineStore();
+    // Individual selectors — whole-store subscription re-renders this
+    // component on every store write (streamMetrics, currentTime, etc.),
+    // including the 60 Hz rAF loop below calling setScreenPos/setLive.
+    // Per-field selectors keep re-renders bound to what EntityHUD reads.
+    const selectedEntityId = useTimelineStore(s => s.selectedEntityId);
+    const selectedEntityData = useTimelineStore(s => s.selectedEntityData);
     const [screenPos, setScreenPos] = useState<{ x: number, y: number } | null>(null);
     const [live, setLive] = useState<{
         lat: number;
@@ -100,6 +110,92 @@ export default function EntityHUD() {
                 return;
             }
 
+            // Submarine cable (GroundPolylinePrimitive) — read from metaMap.
+            // Cables aren't in any dataSource.entities, so findEntity() would
+            // miss them; this branch runs before findEntity() below.
+            const cableMeta = cableMetaMap.get(selectedEntityId);
+            if (cableMeta) {
+                const pos = Cesium.Cartesian3.fromDegrees(cableMeta.lng, cableMeta.lat, 0);
+                const canvasPos = Cesium.SceneTransforms.worldToWindowCoordinates(cesViewer.scene, pos);
+                setScreenPos(canvasPos ? { x: canvasPos.x, y: canvasPos.y } : null);
+                setLive({
+                    lat: cableMeta.lat,
+                    lng: cableMeta.lng,
+                    alt: 0,
+                    layer: cableMeta.layer,
+                    subtype: cableMeta.subtype,
+                    source: cableMeta.source,
+                    description: cableMeta.description,
+                });
+                requestAnimationFrame(update);
+                return;
+            }
+
+            // Oil/gas pipeline (batched Primitive). Same rationale as cables —
+            // not in entities, HUD reads straight from metaMap.
+            const pipelineMeta = pipelineMetaMap.get(selectedEntityId);
+            if (pipelineMeta) {
+                const pos = Cesium.Cartesian3.fromDegrees(pipelineMeta.lng, pipelineMeta.lat, 0);
+                const canvasPos = Cesium.SceneTransforms.worldToWindowCoordinates(cesViewer.scene, pos);
+                setScreenPos(canvasPos ? { x: canvasPos.x, y: canvasPos.y } : null);
+                setLive({
+                    lat: pipelineMeta.lat,
+                    lng: pipelineMeta.lng,
+                    alt: 0,
+                    layer: pipelineMeta.layer,
+                    subtype: pipelineMeta.substance,
+                    source: pipelineMeta.source,
+                    description: pipelineMeta.description,
+                });
+                requestAnimationFrame(update);
+                return;
+            }
+
+            // Airspace zone (dual Primitive fill+outline). HUD shows type,
+            // vertical limits and source in the description row below.
+            const airspaceMeta = airspaceMetaMap.get(selectedEntityId);
+            if (airspaceMeta) {
+                const pos = Cesium.Cartesian3.fromDegrees(
+                    airspaceMeta.lng,
+                    airspaceMeta.lat,
+                    airspaceMeta.lowerLimit || 0
+                );
+                const canvasPos = Cesium.SceneTransforms.worldToWindowCoordinates(cesViewer.scene, pos);
+                setScreenPos(canvasPos ? { x: canvasPos.x, y: canvasPos.y } : null);
+                setLive({
+                    lat: airspaceMeta.lat,
+                    lng: airspaceMeta.lng,
+                    alt: airspaceMeta.lowerLimit || 0,
+                    layer: airspaceMeta.layer,
+                    subtype: airspaceMeta.subtype,
+                    source: airspaceMeta.source,
+                    description: `${airspaceMeta.name} — ${airspaceMeta.lowerLimit}→${airspaceMeta.upperLimit}m`,
+                });
+                requestAnimationFrame(update);
+                return;
+            }
+
+            // Infrastructure (billboards + power-line GroundPolylinePrimitive).
+            // All infrastructure objects share one metaMap so one branch
+            // handles plants, refineries, substations, military, power lines.
+            const infraMeta = infraMetaMap.get(selectedEntityId);
+            if (infraMeta) {
+                const pos = Cesium.Cartesian3.fromDegrees(infraMeta.lng, infraMeta.lat, 50);
+                const canvasPos = Cesium.SceneTransforms.worldToWindowCoordinates(cesViewer.scene, pos);
+                setScreenPos(canvasPos ? { x: canvasPos.x, y: canvasPos.y } : null);
+                setLive({
+                    lat: infraMeta.lat,
+                    lng: infraMeta.lng,
+                    alt: 0,
+                    layer: infraMeta.layer,
+                    subtype: infraMeta.subtype,
+                    source: infraMeta.source,
+                    description: infraMeta.description,
+                });
+                requestAnimationFrame(update);
+                return;
+            }
+
             // Aircraft are now BillboardCollection, not Entity. Read from metadata map.
             const acMeta = aircraftMetaMap.get(selectedEntityId);
             if (acMeta) {
@@ -165,8 +261,8 @@ export default function EntityHUD() {
         if (!selectedEntityId || !selectedEntityData) return;
         if (selectedEntityData.type !== 'Aircraft') return;
 
-        const callsign = selectedEntityId;
-        const meta = aircraftMetaMap.get(callsign);
+        // selectedEntityId is now icao24 (primary key). Callsign comes from meta.
+        const meta = aircraftMetaMap.get(selectedEntityId);
         let cancelled = false;
 
         // Origin country from OpenSky data
@@ -174,9 +270,9 @@ export default function EntityHUD() {
             setAircraftInfo({ origin: meta.origin });
         }
 
-        // Photo from Planespotters.net via backend proxy
+        // Photo from Planespotters.net via backend proxy (uses icao24)
         if (meta?.icao24) {
-            axios.get(`http://localhost:3055/api/aircraft-photo/${meta.icao24}`)
+            axios.get(`${API_URL}/api/aircraft-photo/${meta.icao24}`)
                 .then(res => {
                     if (cancelled) return;
                     const photo = res.data?.photos?.[0];
@@ -184,21 +280,24 @@ export default function EntityHUD() {
                         setAircraftPhoto(photo.thumbnail_large.src);
                     }
                 })
-                .catch(() => {}); // Silently fail
+                .catch(err => console.warn('[EntityHUD] Photo fetch failed:', err.message));
         }
 
-        // Fetch route via backend proxy (avoids CORS block from OpenSky)
-        axios.get(`http://localhost:3055/api/routes/${encodeURIComponent(callsign.trim())}`)
-            .then(res => {
-                if (cancelled) return;
-                if (res.data?.route?.length >= 2) {
-                    setAircraftRoute({
-                        origin: res.data.route[0],
-                        destination: res.data.route[res.data.route.length - 1],
-                    });
-                }
-            })
-            .catch(() => {}); // Silently fail — rate limits, no route found, etc.
+        // Fetch route via backend proxy (uses callsign, not icao24)
+        const callsign = meta?.callsign?.trim();
+        if (callsign && callsign !== meta?.icao24) {
+            axios.get(`${API_URL}/api/routes/${encodeURIComponent(callsign)}`)
+                .then(res => {
+                    if (cancelled) return;
+                    if (res.data?.route?.length >= 2) {
+                        setAircraftRoute({
+                            origin: res.data.route[0],
+                            destination: res.data.route[res.data.route.length - 1],
+                        });
+                    }
+                })
+                .catch(err => console.warn('[EntityHUD] Route fetch failed:', err.message));
+        }
 
         return () => { cancelled = true; };
     }, [selectedEntityId, selectedEntityData]);
@@ -355,10 +454,44 @@ export default function EntityHUD() {
                         </div>
                     )}
 
-                    {selectedEntityData?.type === 'Webcam' && selectedEntityData.url && (
+                    {selectedEntityData?.type === 'Webcam' && (
                         <div className="border-t border-zinc-800/60 pt-3">
                             <div className="text-[10px] text-zinc-500 font-mono mb-1">LIVE STREAM</div>
-                            <WebcamPlayer url={selectedEntityData.url} />
+                            <WebcamPlayer
+                                url={selectedEntityData.url}
+                                imageUrl={selectedEntityData.imageUrl}
+                                playerUrl={selectedEntityData.playerUrl}
+                                source={selectedEntityData.source}
+                            />
+                        </div>
+                    )}
+
+                    {/*
+                      Footprint annotation — only present when the user
+                      clicked on the footprint overlay (fp- or beam-
+                      entity) of a satellite. The parent sat's normal
+                      card is shown above; this block adds the sensor
+                      swath + a hard "PROJECTED" badge so the user
+                      understands the shape on the ground is computed,
+                      not a literal sensor readback.
+                    */}
+                    {selectedEntityData?.type === 'Satellite' && selectedEntityData?.footprint && (
+                        <div className="border-t border-zinc-800/60 pt-3">
+                            <div className="flex items-center justify-between mb-1">
+                                <div className="text-[10px] text-zinc-500 font-mono">PROJECTED FOOTPRINT</div>
+                                <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border border-amber-700/60 bg-amber-900/30 text-amber-300">
+                                    projected
+                                </span>
+                            </div>
+                            <div className="font-mono text-xs leading-relaxed text-zinc-200">
+                                <div>sensor <span className="text-zinc-400">{selectedEntityData.footprint.sensorName || '—'}</span></div>
+                                <div>type <span className="text-zinc-400">{selectedEntityData.footprint.sensorType}</span></div>
+                                <div>swath <span className="text-zinc-400">{(selectedEntityData.footprint.swathMeters / 1000).toFixed(1)} km</span></div>
+                                <div className="text-[10px] text-zinc-500 mt-1">
+                                    Shape is a predictive projection from sensor swath. Real footprint depends on pointing mode + orbit phase.
+                                </div>
+                                <div className="text-[10px] text-zinc-600">source · {selectedEntityData.footprint.source}</div>
+                            </div>
                         </div>
                     )}
 
@@ -381,23 +514,34 @@ export default function EntityHUD() {
 }
 
 // ---------------------------------------------------------------------------
-// WebcamPlayer — embedded HLS video player using hls.js
+// WebcamPlayer — handles HLS streams, Windy previews, and webpage links
 // ---------------------------------------------------------------------------
 
-function WebcamPlayer({ url }: { url: string }) {
+function WebcamPlayer({ url, imageUrl, playerUrl, source }: {
+    url?: string;
+    imageUrl?: string;
+    playerUrl?: string;
+    source?: string;
+}) {
     const videoRef = useRef<HTMLVideoElement | null>(null);
     const hlsRef = useRef<Hls | null>(null);
-    const [error, setError] = useState(false);
+    const [status, setStatus] = useState<'loading' | 'playing' | 'error'>('loading');
+
+    const isHls = url?.includes('.m3u8');
+    const hasEmbed = !!playerUrl && playerUrl !== imageUrl && playerUrl !== url;
+    const isWebpage = url && !isHls && (url.includes('http') && !url.includes('.m3u8'));
+    const isWindy = source?.toLowerCase().includes('windy');
 
     const attachHls = useCallback((videoEl: HTMLVideoElement | null) => {
-        // Cleanup previous instance
         if (hlsRef.current) {
             hlsRef.current.destroy();
             hlsRef.current = null;
         }
 
         videoRef.current = videoEl;
-        if (!videoEl || !url) return;
+        if (!videoEl || !isHls || !url) return;
+
+        setStatus('loading');
 
         if (Hls.isSupported()) {
             const hls = new Hls({
@@ -406,19 +550,19 @@ function WebcamPlayer({ url }: { url: string }) {
             });
             hls.loadSource(url);
             hls.attachMedia(videoEl);
+            hls.on(Hls.Events.MANIFEST_PARSED, () => setStatus('playing'));
             hls.on(Hls.Events.ERROR, (_event, data) => {
-                if (data.fatal) {
-                    setError(true);
-                }
+                if (data.fatal) setStatus('error');
             });
             hlsRef.current = hls;
         } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
-            // Safari native HLS support
             videoEl.src = url;
+            videoEl.onplaying = () => setStatus('playing');
+            videoEl.onerror = () => setStatus('error');
         } else {
-            setError(true);
+            setStatus('error');
         }
-    }, [url]);
+    }, [url, isHls]);
 
     useEffect(() => {
         return () => {
@@ -429,22 +573,95 @@ function WebcamPlayer({ url }: { url: string }) {
         };
     }, []);
 
-    if (error) {
+    // Case 1: Real HLS stream
+    if (isHls && url) {
         return (
-            <div className="text-[10px] text-zinc-500 font-mono py-2">
-                Stream unavailable
+            <div className="relative">
+                {status === 'loading' && (
+                    <div className="flex items-center gap-2 py-3">
+                        <div className="w-3 h-3 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin" />
+                        <span className="text-[10px] text-zinc-400 font-mono">Connecting to stream...</span>
+                    </div>
+                )}
+                {status === 'error' && (
+                    <div className="text-[10px] text-zinc-500 font-mono py-2">
+                        Stream offline or unavailable
+                    </div>
+                )}
+                <video
+                    ref={attachHls}
+                    autoPlay
+                    muted
+                    playsInline
+                    className={`w-full rounded-md border border-zinc-700 mt-1 ${status === 'loading' ? 'h-0 overflow-hidden' : ''}`}
+                    style={{ maxHeight: 180 }}
+                />
             </div>
         );
     }
 
+    // Case 2: Embed player (Windy embed iframe, etc.)
+    if (hasEmbed && playerUrl) {
+        return (
+            <div>
+                <iframe
+                    src={playerUrl}
+                    className="w-full rounded-md border border-zinc-700 mt-1"
+                    style={{ height: 180, border: 0 }}
+                    allow="accelerometer; encrypted-media; gyroscope; picture-in-picture"
+                    allowFullScreen
+                />
+                <div className="text-[10px] text-zinc-500 font-mono mt-1">
+                    {isWindy ? 'Windy embed (free tier — 10 min expiry)' : `Embed player${source ? ` (${source})` : ''}`}
+                </div>
+                <a
+                    href={playerUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block mt-1 text-[10px] text-cyan-400 font-mono hover:text-cyan-300"
+                >
+                    Open player ↗
+                </a>
+            </div>
+        );
+    }
+
+    // Case 3: Windy preview image
+    if (imageUrl) {
+        return (
+            <div>
+                <img
+                    src={imageUrl}
+                    alt="Webcam preview"
+                    className="w-full rounded-md border border-zinc-700 mt-1"
+                    style={{ maxHeight: 180, objectFit: 'cover' }}
+                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                />
+                <div className="text-[10px] text-zinc-500 font-mono mt-1">
+                    {isWindy ? 'Preview image (Windy free tier)' : `Preview image${source ? ` (${source})` : ''}`}
+                </div>
+            </div>
+        );
+    }
+
+    // Case 4: Webpage URL (skylinewebcams etc.)
+    if (isWebpage && url) {
+        return (
+            <a
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="block text-center py-2 px-3 rounded-md border border-cyan-700/40 bg-cyan-900/10 text-cyan-400 text-xs font-mono hover:bg-cyan-900/30 transition-colors"
+            >
+                Open live stream ↗
+            </a>
+        );
+    }
+
+    // Case 5: No stream available
     return (
-        <video
-            ref={attachHls}
-            autoPlay
-            muted
-            playsInline
-            className="w-full rounded-md border border-zinc-700 mt-1"
-            style={{ maxHeight: 180 }}
-        />
+        <div className="text-[10px] text-zinc-500 font-mono py-2">
+            No stream available for this camera
+        </div>
     );
 }

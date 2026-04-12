@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24">
+  <!-- Satellite cluster: black outline bubble with colored tiny satellite shapes -->
+  <!-- Outer glow ring -->
+  <circle cx="12" cy="12" r="11" fill="none" stroke="#000000" stroke-width="0.3" opacity="0.3"/>
+  <circle cx="12" cy="12" r="9" fill="none" stroke="#000000" stroke-width="0.4" opacity="0.4"/>
+  <!-- Main bubble -->
+  <circle cx="12" cy="12" r="7" fill="#06b6d4" fill-opacity="0.15" stroke="#000000" stroke-width="1"/>
+  <!-- Inner ring -->
+  <circle cx="12" cy="12" r="4.5" fill="none" stroke="#000000" stroke-width="0.4" opacity="0.5"/>
+  <!-- Tiny satellite silhouettes (3 colored sats) -->
+  <rect x="9" y="8.5" width="1.5" height="1" rx="0.3" fill="#ef4444" stroke="#000000" stroke-width="0.5" opacity="0.8"/>
+  <line x1="8" y1="9" x2="9" y2="9" stroke="#000000" stroke-width="0.4" opacity="0.6"/>
+  <line x1="10.5" y1="9" x2="11.5" y2="9" stroke="#000000" stroke-width="0.4" opacity="0.6"/>
+  <rect x="13" y="11.5" width="1.5" height="1" rx="0.3" fill="#06b6d4" stroke="#000000" stroke-width="0.5" opacity="0.7"/>
+  <line x1="12" y1="12" x2="13" y2="12" stroke="#000000" stroke-width="0.4" opacity="0.5"/>
+  <line x1="14.5" y1="12" x2="15.5" y2="12" stroke="#000000" stroke-width="0.4" opacity="0.5"/>
+  <rect x="10" y="14" width="1.5" height="1" rx="0.3" fill="#84cc16" stroke="#000000" stroke-width="0.5" opacity="0.7"/>
+  <line x1="9" y1="14.5" x2="10" y2="14.5" stroke="#000000" stroke-width="0.4" opacity="0.5"/>
+  <line x1="11.5" y1="14.5" x2="12.5" y2="14.5" stroke="#000000" stroke-width="0.4" opacity="0.5"/>
+</svg>

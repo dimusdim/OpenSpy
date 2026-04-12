@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 48 48">
+  <!-- No-fishing sign: circle + fish + diagonal slash -->
+  <!-- Outer circle -->
+  <circle cx="24" cy="24" r="20" fill="none" stroke="#8b5cf6" stroke-width="2.5"/>
+  <!-- Fish body — simple silhouette -->
+  <path d="M12 24 Q18 16 28 18 L34 14 L34 20 Q38 24 34 28 L34 34 L28 30 Q18 32 12 24 Z"
+        fill="#a78bfa" stroke="#7c3aed" stroke-width="0.8"/>
+  <!-- Fish eye -->
+  <circle cx="18" cy="23" r="1.8" fill="#8b5cf6"/>
+  <circle cx="18" cy="23" r="0.8" fill="#1e1b4b"/>
+  <!-- Fish tail fin detail -->
+  <path d="M33 16 L36 14 L34 20" fill="none" stroke="#7c3aed" stroke-width="0.6"/>
+  <path d="M33 32 L36 34 L34 28" fill="none" stroke="#7c3aed" stroke-width="0.6"/>
+  <!-- Diagonal "no" slash -->
+  <line x1="10" y1="38" x2="38" y2="10" stroke="#8b5cf6" stroke-width="3" stroke-linecap="round"/>
+</svg>

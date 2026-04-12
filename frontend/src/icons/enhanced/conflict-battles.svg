@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 48 48">
+  <!-- Assault rifle silhouette (AK/M4 profile) — side view, iconic -->
+  <!-- Stock -->
+  <path d="M2 22 L10 22 L10 18 L6 16 L2 18 Z" fill="#f97316" stroke="#000" stroke-width="0.8" stroke-linejoin="round"/>
+  <!-- Receiver / body -->
+  <path d="M10 18 L10 24 L34 24 L36 20 L34 18 L10 18 Z" fill="#f97316" stroke="#000" stroke-width="0.8" stroke-linejoin="round"/>
+  <!-- Barrel -->
+  <rect x="34" y="19" width="12" height="3" rx="0.5" fill="#f97316" stroke="#000" stroke-width="0.8"/>
+  <!-- Muzzle / flash hider -->
+  <rect x="45" y="18" width="2" height="5" rx="0.3" fill="#f97316" stroke="#000" stroke-width="0.8"/>
+  <!-- Front sight -->
+  <rect x="42" y="16" width="1.5" height="3" rx="0.3" fill="#f97316" stroke="#000" stroke-width="0.8"/>
+  <!-- Rear sight -->
+  <rect x="14" y="16" width="1.5" height="2" rx="0.3" fill="#f97316" stroke="#000" stroke-width="0.8"/>
+  <!-- Magazine (curved) -->
+  <path d="M22 24 L24 24 L26 36 L20 36 Z" fill="#f97316" stroke="#000" stroke-width="0.8" stroke-linejoin="round"/>
+  <!-- Pistol grip -->
+  <path d="M28 24 L30 24 L31 34 L27 34 Z" fill="#f97316" stroke="#000" stroke-width="0.8" stroke-linejoin="round"/>
+  <!-- Trigger guard -->
+  <path d="M25 24 Q26 28 29 28 L29 24" fill="none" stroke="#000" stroke-width="0.8"/>
+  <!-- Gas tube above barrel -->
+  <rect x="20" y="16.5" width="14" height="1.5" rx="0.5" fill="#f97316" stroke="#000" stroke-width="0.6"/>
+</svg>

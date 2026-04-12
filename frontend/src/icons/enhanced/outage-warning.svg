@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 48 48">
+  <!-- Warning outage: lightning bolt in circle. Orange scheme, smaller pulse -->
+  <!-- Outer pulse ring (smaller than critical) -->
+  <circle cx="24" cy="24" r="20" fill="#f97316" opacity="0.1"/>
+  <!-- Outer ring stroke -->
+  <circle cx="24" cy="24" r="20" fill="none" stroke="#f97316" stroke-width="0.5" opacity="0.3"/>
+
+  <!-- Main circle -->
+  <circle cx="24" cy="24" r="15" fill="#7c2d12" stroke="#f97316" stroke-width="1.2"/>
+  <!-- Inner circle highlight -->
+  <circle cx="24" cy="24" r="12" fill="#9a3412" stroke="#ea580c" stroke-width="0.5"/>
+
+  <!-- Lightning bolt -->
+  <polygon points="27,8 19,24 23,24 20,40 32,22 27,22 30,10" fill="#fbbf24" stroke="#f59e0b" stroke-width="0.8"/>
+  <!-- Lightning bolt highlight -->
+  <polygon points="27,11 21,23 24,23 22,36 30,23 27,23 29,13" fill="#fde68a" opacity="0.4"/>
+
+  <!-- Fewer spark dots (less urgent) -->
+  <circle cx="18" cy="19" r="0.6" fill="#fbbf24" opacity="0.4"/>
+  <circle cx="30" cy="29" r="0.6" fill="#fbbf24" opacity="0.4"/>
+</svg>

@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <!-- Military fighter jet, top-down view, nose up. Yellow fill, black stroke -->
+  <!-- Fuselage (narrow, aggressive) -->
+  <path d="M24 1 C23 1 22.5 3 22.5 5 L22 14 L22 34 C22 37 23 40 24 42 C25 40 26 37 26 34 L26 14 L25.5 5 C25.5 3 25 1 24 1 Z" fill="#facc15" stroke="#1a1a1a" stroke-width="0.9"/>
+  <!-- Fuselage center line -->
+  <line x1="24" y1="3" x2="24" y2="40" stroke="#ca8a04" stroke-width="0.4"/>
+
+  <!-- Nose cone -->
+  <path d="M23.2 3 L24 0.5 L24.8 3 Z" fill="#fde68a" stroke="#1a1a1a" stroke-width="0.5"/>
+  <!-- Cockpit canopy -->
+  <ellipse cx="24" cy="7" rx="1.2" ry="2.5" fill="#67e8f9" stroke="#1a1a1a" stroke-width="0.5" opacity="0.8"/>
+  <ellipse cx="23.5" cy="6" rx="0.4" ry="0.8" fill="white" opacity="0.3"/>
+
+  <!-- Delta/swept wings -->
+  <path d="M22 16 L2 30 L3 32 L5 31 L22 23 Z" fill="#facc15" stroke="#1a1a1a" stroke-width="0.8"/>
+  <path d="M26 16 L46 30 L45 32 L43 31 L26 23 Z" fill="#facc15" stroke="#1a1a1a" stroke-width="0.8"/>
+  <!-- Wing hard points -->
+  <circle cx="10" cy="26" r="0.8" fill="#854d0e" stroke="#1a1a1a" stroke-width="0.3"/>
+  <circle cx="15" cy="24" r="0.8" fill="#854d0e" stroke="#1a1a1a" stroke-width="0.3"/>
+  <circle cx="38" cy="26" r="0.8" fill="#854d0e" stroke="#1a1a1a" stroke-width="0.3"/>
+  <circle cx="33" cy="24" r="0.8" fill="#854d0e" stroke="#1a1a1a" stroke-width="0.3"/>
+  <!-- Wing panel lines -->
+  <line x1="12" y1="25" x2="22" y2="18" stroke="#ca8a04" stroke-width="0.4"/>
+  <line x1="36" y1="25" x2="26" y2="18" stroke="#ca8a04" stroke-width="0.4"/>
+
+  <!-- Canard foreplanes -->
+  <path d="M22.5 12 L16 14 L16 15 L22.5 13.5 Z" fill="#fde68a" stroke="#1a1a1a" stroke-width="0.5"/>
+  <path d="M25.5 12 L32 14 L32 15 L25.5 13.5 Z" fill="#fde68a" stroke="#1a1a1a" stroke-width="0.5"/>
+
+  <!-- Twin vertical stabilizers (top-down = angled fins) -->
+  <path d="M22.5 34 L20 38 L21 39 L23 36 Z" fill="#eab308" stroke="#1a1a1a" stroke-width="0.6"/>
+  <path d="M25.5 34 L28 38 L27 39 L25 36 Z" fill="#eab308" stroke="#1a1a1a" stroke-width="0.6"/>
+
+  <!-- Engine exhausts -->
+  <ellipse cx="23" cy="41" rx="0.8" ry="1.2" fill="#f97316" opacity="0.6" stroke="#1a1a1a" stroke-width="0.3"/>
+  <ellipse cx="25" cy="41" rx="0.8" ry="1.2" fill="#f97316" opacity="0.6" stroke="#1a1a1a" stroke-width="0.3"/>
+
+  <!-- Intake shadows -->
+  <rect x="21.5" y="10" width="1" height="3" rx="0.3" fill="#854d0e" opacity="0.3"/>
+  <rect x="25.5" y="10" width="1" height="3" rx="0.3" fill="#854d0e" opacity="0.3"/>
+</svg>

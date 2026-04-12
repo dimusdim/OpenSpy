@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 48 48">
+  <!-- Airliner, top-down view, nose up. White fill, black stroke -->
+  <!-- Fuselage -->
+  <path d="M24 2 C22.5 2 21.5 4 21.5 6 L21 14 L21 36 C21 40 22 44 24 46 C26 44 27 40 27 36 L27 14 L26.5 6 C26.5 4 25.5 2 24 2 Z" fill="#ffffff" stroke="#1a1a1a" stroke-width="0.9"/>
+  <!-- Fuselage center line -->
+  <line x1="24" y1="4" x2="24" y2="44" stroke="#d1d5db" stroke-width="0.4"/>
+  <!-- Cockpit windows -->
+  <path d="M23 5 L24 3.5 L25 5 Z" fill="#67e8f9" stroke="#1a1a1a" stroke-width="0.4" opacity="0.8"/>
+
+  <!-- Main wings (swept) -->
+  <path d="M21 18 L3 26 L3 28 L5 28.5 L21 22 Z" fill="#ffffff" stroke="#1a1a1a" stroke-width="0.8"/>
+  <path d="M27 18 L45 26 L45 28 L43 28.5 L27 22 Z" fill="#ffffff" stroke="#1a1a1a" stroke-width="0.8"/>
+  <!-- Wing panel lines -->
+  <line x1="12" y1="22.5" x2="21" y2="19" stroke="#d1d5db" stroke-width="0.4"/>
+  <line x1="36" y1="22.5" x2="27" y2="19" stroke="#d1d5db" stroke-width="0.4"/>
+
+  <!-- Engine pods (left) -->
+  <ellipse cx="13" cy="22" rx="1.5" ry="3" fill="#e5e7eb" stroke="#1a1a1a" stroke-width="0.6"/>
+  <circle cx="13" cy="20" r="1" fill="#9ca3af" stroke="#1a1a1a" stroke-width="0.4"/>
+  <!-- Engine pods (right) -->
+  <ellipse cx="35" cy="22" rx="1.5" ry="3" fill="#e5e7eb" stroke="#1a1a1a" stroke-width="0.6"/>
+  <circle cx="35" cy="20" r="1" fill="#9ca3af" stroke="#1a1a1a" stroke-width="0.4"/>
+
+  <!-- Horizontal stabilizer (tail) -->
+  <path d="M22 38 L14 41 L14 42.5 L15 42.8 L22 40 Z" fill="#ffffff" stroke="#1a1a1a" stroke-width="0.7"/>
+  <path d="M26 38 L34 41 L34 42.5 L33 42.8 L26 40 Z" fill="#ffffff" stroke="#1a1a1a" stroke-width="0.7"/>
+
+  <!-- Vertical stabilizer (T-tail, top-down = thin line) -->
+  <rect x="23" y="38" width="2" height="5" rx="0.5" fill="#f3f4f6" stroke="#1a1a1a" stroke-width="0.6"/>
+
+  <!-- Window rows (port side) -->
+  <line x1="21.5" y1="10" x2="21.5" y2="34" stroke="#9ca3af" stroke-width="0.3" stroke-dasharray="0.8 1.2"/>
+  <!-- Window rows (starboard side) -->
+  <line x1="26.5" y1="10" x2="26.5" y2="34" stroke="#9ca3af" stroke-width="0.3" stroke-dasharray="0.8 1.2"/>
+</svg>

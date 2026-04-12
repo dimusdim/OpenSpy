@@ -4,6 +4,8 @@ import { useState } from 'react';
 import * as Cesium from 'cesium';
 import axios from 'axios';
 import { Plane, Loader2, X } from 'lucide-react';
+import { API_URL } from '../lib/config';
+import { useTimelineStore } from '../store/useTimelineStore';
 
 /**
  * TrackReplay — small HUD panel that loads a historical flight track from
@@ -30,7 +32,7 @@ export default function TrackReplay() {
         setError(null);
 
         try {
-            const res = await axios.get(`http://localhost:3055/api/track/${hex}`);
+            const res = await axios.get(`${API_URL}/api/track/${hex}`);
             const data = res.data;
 
             if (!data.path || data.path.length === 0) {
@@ -125,6 +127,11 @@ export default function TrackReplay() {
                 },
             });
 
+            // Switch store to playback mode — otherwise Globe.onTick
+            // will force currentTime = now and break the replay
+            const store = useTimelineStore.getState();
+            store.setMode('playback');
+
             // Set clock to the track's time range for scrubbing
             const startTime = Cesium.JulianDate.fromDate(new Date(data.startTime * 1000));
             const endTime = Cesium.JulianDate.fromDate(new Date(data.endTime * 1000));
@@ -134,9 +141,13 @@ export default function TrackReplay() {
             viewer.clock.currentTime = startTime.clone();
             viewer.clock.clockRange = Cesium.ClockRange.LOOP_STOP;
             viewer.clock.multiplier = 60; // 1 minute per second for smooth replay
+            viewer.clock.shouldAnimate = true;
 
-            // Dispatch timeline-ctrl to pause live mode, let playback take over
-            document.dispatchEvent(new CustomEvent('timeline-ctrl', { detail: { action: 'speed', value: 60 } }));
+            // Mirror the clock state into the Zustand store so TimelinePlayer,
+            // deep-history checks in useDynamicLayers, and speed HUD stay in sync.
+            store.setSpeedMultiplier(60);
+            store.setIsPlaying(true);
+            store.setCurrentTime(new Date(data.startTime * 1000));
 
             // Fly camera to the first waypoint
             const firstWp = data.path[0];
@@ -165,7 +176,14 @@ export default function TrackReplay() {
             viewer.clock.clockRange = Cesium.ClockRange.UNBOUNDED;
             viewer.clock.multiplier = 1;
             viewer.clock.currentTime = Cesium.JulianDate.fromDate(new Date());
+            viewer.clock.shouldAnimate = true;
         }
+        // Return store to live mode so Globe.onTick resumes syncing to now
+        const store = useTimelineStore.getState();
+        store.setMode('live');
+        store.setSpeedMultiplier(1);
+        store.setIsPlaying(true);
+        store.setCurrentTime(new Date());
         setActiveTrack(null);
         setError(null);
     };
