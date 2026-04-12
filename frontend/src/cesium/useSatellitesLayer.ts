@@ -239,7 +239,7 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                         entityProps.sensor = sat.sensor;
                     }
 
-                    const entityId = `sat-${sat.name}`;
+                    const entityId = `sat-${sat.noradId || sat.name}`;
                     ds.entities.add({
                         id: entityId,
                         name: sat.name,

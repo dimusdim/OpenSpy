@@ -298,6 +298,9 @@ export class SatelliteService {
                 // so their sensor metadata can be surfaced to the frontend.
                 const hasSensorData = spectatorNorads.has(noradId);
 
+                // Skip debris — they waste slots and create duplicate IDs
+                if (nameUpper.includes(' DEB') || nameUpper.includes(' R/B') || nameUpper.includes('COOLANT')) continue;
+
                 // Filter down to an interesting subset to avoid lag
                 if (type === 'military' || type === 'commercial' || nameUpper.includes('ISS') || isRecon || hasSensorData) {
                     const record: SatelliteRecord = { name, tleLine1, tleLine2, type, noradId };
