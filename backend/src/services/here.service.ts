@@ -28,13 +28,18 @@ export class HereTrafficService {
         }
     }
 
-    /** Fetch flow data for a bounding box (west,south,east,north) */
+    /**
+     * Fetch flow data for a pre-validated bounding box (west,south,east,north).
+     * Caller is responsible for validating the bbox — we encode each piece
+     * anyway so any lingering metacharacters can't reach the upstream URL.
+     */
     async getFlow(bbox: string): Promise<HereFlowResponse> {
         if (!this.enabled) {
             return { results: [] };
         }
 
-        const url = `https://data.traffic.hereapi.com/v7/flow?in=bbox:${bbox}&locationReferencing=shape&functionalClasses=1,2,3&apiKey=${this.apiKey}`;
+        const safeBbox = encodeURIComponent(bbox);
+        const url = `https://data.traffic.hereapi.com/v7/flow?in=bbox:${safeBbox}&locationReferencing=shape&functionalClasses=1,2,3&apiKey=${encodeURIComponent(this.apiKey)}`;
 
         try {
             const response = await axios.get(url, { timeout: 15_000 });

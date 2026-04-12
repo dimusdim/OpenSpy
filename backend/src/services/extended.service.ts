@@ -61,7 +61,9 @@ export class ExtendedDataService {
 
     // Periodic polling
     this.firesInterval = setInterval(() => {
-      this.fetchFires().catch(() => {});
+      this.fetchFires().catch(err => {
+        console.warn('[ExtendedDataService] scheduled fires fetch failed:', err?.message || err);
+      });
     }, 30 * 60 * 1000); // 30 min
 
     console.log('[ExtendedDataService] All feeds initialised.');

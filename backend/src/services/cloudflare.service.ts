@@ -15,11 +15,14 @@ export interface CloudflareOutage {
 export class CloudflareService {
     private outages: CloudflareOutage[] = [];
     private timer: NodeJS.Timeout | null = null;
+    private health: 'streaming' | 'error' | 'auth-missing' = 'streaming';
+    private lastError: string | null = null;
 
     start() {
         const token = process.env.CLOUDFLARE_API_TOKEN;
         if (!token) {
             console.warn('[Cloudflare] API key not configured, skipping');
+            this.health = 'auth-missing';
             return;
         }
 
@@ -30,6 +33,10 @@ export class CloudflareService {
 
     getOutages(): CloudflareOutage[] {
         return this.outages;
+    }
+
+    getHealth() {
+        return { status: this.health, note: this.lastError || undefined, count: this.outages.length };
     }
 
     private async fetchOutages() {
@@ -69,9 +76,13 @@ export class CloudflareService {
             }
 
             this.outages = records;
+            this.health = 'streaming';
+            this.lastError = null;
             console.log(`[Cloudflare] ${records.length} internet outage annotations loaded`);
         } catch (err: any) {
             console.error('[Cloudflare] Fetch failed:', err.message);
+            this.health = 'error';
+            this.lastError = err.message;
         }
     }
 }

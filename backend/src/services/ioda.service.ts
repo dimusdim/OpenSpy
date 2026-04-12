@@ -73,6 +73,8 @@ const COUNTRY_CENTROIDS: Record<string, [number, number]> = {
 export class IODAService {
     private outages: OutageRecord[] = [];
     private timer: NodeJS.Timeout | null = null;
+    private health: 'streaming' | 'error' = 'streaming';
+    private lastError: string | null = null;
 
     start() {
         console.log('[IODA] Starting internet outage monitoring...');
@@ -84,11 +86,17 @@ export class IODAService {
         return this.outages;
     }
 
+    getHealth() {
+        return { status: this.health, note: this.lastError || undefined, count: this.outages.length };
+    }
+
     private async fetchOutages() {
         try {
             const now = Math.floor(Date.now() / 1000);
             const from = now - 86400; // 24h ago
-            const url = `https://api.ioda.caida.org/dev/outages/alerts/country?from=${from}&until=${now}`;
+            // IODA moved from CAIDA to Georgia Tech InetIntel in 2025.
+            // Old: api.ioda.caida.org/dev  New: api.ioda.inetintel.cc.gatech.edu/v2
+            const url = `https://api.ioda.inetintel.cc.gatech.edu/v2/outages/alerts?from=${from}&until=${now}&entityType=country`;
             const res = await axios.get(url, { timeout: 20000 });
 
             if (!res.data?.data) {
@@ -145,9 +153,13 @@ export class IODAService {
             }
 
             this.outages = Array.from(byCountry.values());
+            this.health = 'streaming';
+            this.lastError = null;
             console.log(`[IODA] ${this.outages.length} internet outage alerts (${this.outages.filter(o => o.level === 'critical').length} critical, ${this.outages.filter(o => o.level === 'warning').length} warning)`);
         } catch (err: any) {
             console.error('[IODA] Fetch failed:', err.message);
+            this.health = 'error';
+            this.lastError = err.message || 'fetch failed';
         }
     }
 }

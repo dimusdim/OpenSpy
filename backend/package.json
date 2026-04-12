@@ -5,20 +5,19 @@
   "main": "index.js",
   "scripts": {
     "dev": "nodemon src/index.ts",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node ../tests/smoke-api.mjs"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@types/ws": "^8.18.1",
     "axios": "^1.15.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.1",
+    "duckdb": "^1.4.4",
     "express": "^5.2.1",
     "h3-js": "^4.4.0",
-    "satellite.js": "^7.0.0",
     "socket.io": "^4.8.3",
     "ws": "^8.20.0",
     "yahoo-finance2": "^3.14.0"
@@ -27,6 +26,7 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^25.5.2",
+    "@types/ws": "^8.18.1",
     "nodemon": "^3.1.14",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.2"

@@ -74,6 +74,14 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
     private timer: NodeJS.Timeout | null = null;
 
     private aircrafts = new Map<string, any>();
+    private aircraftsDirty = false;  // true after fetchOpenSky refresh, false after broadcast
+    // Health tracking — consumed by /api/status via getHealth().
+    private openSkyHealth: 'streaming' | 'error' | 'auth-missing' | 'rate-limited' = 'streaming';
+    private openSkyLastError: string | null = null;
+    private openSkyNextRetry: string | null = null;
+    private aisStreamHealth: 'streaming' | 'error' | 'auth-missing' | 'rate-limited' = 'streaming';
+    private aisStreamLastError: string | null = null;
+    private aisStreamNextRetry: string | null = null;
     private vessels = new Map<string, any>();
     // MMSI → vessel class string. Populated lazily from ShipStaticData messages,
     // which arrive far less frequently than PositionReport. Backed by a disk
@@ -128,11 +136,11 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
             };
 
 
-            // Always include aircraft when we have data. BillboardCollection
-            // on the frontend handles 11K updates efficiently (direct position
-            // set, no per-frame property evaluation). The 1.1MB JSON parse
-            // takes ~5ms — acceptable vs the UX cost of delayed aircraft.
-            if (this.aircrafts.size > 0) {
+            // Include aircraft ONLY when fresh data arrived from OpenSky.
+            // OpenSky refreshes every 90s → we broadcast the 1.1MB array once
+            // per refresh instead of every 2s tick. Clients keep old positions
+            // between refreshes (BillboardCollection persists until next update).
+            if (this.aircraftsDirty && this.aircrafts.size > 0) {
                 const aircrafts = Array.from(this.aircrafts.values());
                 payload.aircrafts = aircrafts;
                 const aviationCounts: Record<string, number> = {};
@@ -140,10 +148,49 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
                     aviationCounts[ac.type] = (aviationCounts[ac.type] || 0) + 1;
                 }
                 payload.meta.aviationCounts = aviationCounts;
+                this.aircraftsDirty = false;
             }
 
             this.io.emit('simulator-update', payload);
         }, 2000);
+
+        // When a new client connects, send the current full snapshot immediately —
+        // aircraft + vessels + darkVessels — otherwise the client would either
+        // wait for the next 2s tick (vessels-only, no aircraft/dark) or for the
+        // next OpenSky refresh (up to 90s). Also prevents frontend reconciliation
+        // from removing dark vessels it already tracks.
+        this.io.on('connection', (socket) => {
+            const aircrafts = this.aircrafts.size > 0 ? Array.from(this.aircrafts.values()) : undefined;
+            const vessels = Array.from(this.vessels.values());
+            const darkVesselsArr = Array.from(this.darkVessels.values());
+
+            const aviationCounts: Record<string, number> = {};
+            if (aircrafts) {
+                for (const ac of aircrafts) {
+                    aviationCounts[ac.type] = (aviationCounts[ac.type] || 0) + 1;
+                }
+            }
+            const maritimeCounts: Record<string, number> = {};
+            for (const v of vessels) {
+                maritimeCounts[v.type] = (maritimeCounts[v.type] || 0) + 1;
+            }
+
+            const payload: any = {
+                vessels,
+                darkVessels: darkVesselsArr,
+                meta: {
+                    aviationTotal: aircrafts?.length ?? 0,
+                    maritimeTotal: vessels.length,
+                    maritimeCounts,
+                    darkVesselCount: darkVesselsArr.length,
+                },
+            };
+            if (aircrafts) {
+                payload.aircrafts = aircrafts;
+                payload.meta.aviationCounts = aviationCounts;
+            }
+            socket.emit('simulator-update', payload);
+        });
 
         // Periodic disk flush of the vessel-type cache (only when dirty).
         setInterval(() => this.flushVesselTypesCache(), VESSEL_TYPES_FLUSH_INTERVAL_MS);
@@ -240,7 +287,10 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
         const clientId = process.env.OPENSKY_USERNAME;
         const clientSecret = process.env.OPENSKY_PASSWORD;
 
-        if (!clientId || !clientSecret) return {};
+        if (!clientId || !clientSecret) {
+            this.openSkyHealth = 'auth-missing';
+            return {};
+        }
 
         if (this.openSkyToken && Date.now() < this.openSkyTokenExpiry) {
             return { headers: { Authorization: `Bearer ${this.openSkyToken}` } };
@@ -265,7 +315,17 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
             console.log('[OpenSky] OAuth2 Token acquired successfully. Unlocking 4000 Credits.');
             return { headers: { Authorization: `Bearer ${this.openSkyToken}` } };
         } catch (authError: any) {
-            console.error('[OpenSky] OAuth2 Token Error:', authError.response?.data || authError.message);
+            const errMsg = authError.response?.data
+                ? (typeof authError.response.data === 'string' ? authError.response.data : JSON.stringify(authError.response.data))
+                : (authError.message || 'auth failed');
+            console.error('[OpenSky] OAuth2 Token Error:', errMsg);
+            // Auth failure must propagate into health state — otherwise
+            // /api/status will keep reporting 'streaming' while every fetch
+            // silently falls back to anonymous credits and may be rate-limited.
+            this.openSkyHealth = 'error';
+            this.openSkyLastError = `OAuth: ${errMsg}`;
+            this.openSkyToken = null;
+            this.openSkyTokenExpiry = 0;
             return {};
         }
     }
@@ -288,11 +348,19 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
                 // OAuth2 standard-tier ceiling.
                 const res = await axios.get('https://opensky-network.org/api/states/all', config);
                 if (res.data && res.data.states) {
+                    // Recovery path: if the previous fetch (or auth) failed,
+                    // this successful response restores 'streaming' and clears
+                    // stale error details so /api/status stops lying.
+                    if (this.openSkyHealth !== 'streaming') {
+                        this.openSkyHealth = 'streaming';
+                        this.openSkyLastError = null;
+                        this.openSkyNextRetry = null;
+                    }
                     const states = res.data.states;
                     const newAircrafts = new Map<string, any>();
                     
                     states.forEach((s: any) => {
-                        const icao24 = s[0]; // ICAO 24-bit hex address
+                        const icao24 = s[0]; // ICAO 24-bit hex address — unique per airframe
                         const callsign = s[1]?.trim() || icao24;
                         const lng = s[5];
                         const lat = s[6];
@@ -301,11 +369,14 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
                         const heading = s[10];
                         const origin = s[2] || ''; // origin country
 
-                        if (lng === null || lat === null) return;
+                        if (lng === null || lat === null || !icao24) return;
 
-                        newAircrafts.set(callsign, {
-                            id: callsign,
+                        // Primary key is icao24 (unique airframe). Callsign is display-only —
+                        // multiple airframes can share the same callsign (rotating crew, empty callsign, etc.)
+                        newAircrafts.set(icao24, {
+                            id: icao24,
                             icao24,
+                            callsign,
                             origin,
                             lat,
                             lng,
@@ -317,11 +388,22 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
                     });
                     
                     this.aircrafts = newAircrafts;
+                    this.aircraftsDirty = true;
                     console.log(`[OpenSky] Updated ${this.aircrafts.size} real aircraft.`);
                 }
             } catch (err: any) {
-                console.error('[OpenSky] fetch failed (rate limit or timeout):', err.message);
-                this.aircrafts.clear(); // Ensure 0 entities if stream is dead
+                const is429 = err?.response?.status === 429 || /429/.test(err.message);
+                console.error(`[OpenSky] fetch failed (${is429 ? 'rate limited' : 'error'}):`, err.message);
+                // Keep existing aircraft data on transient errors.
+                if (is429) {
+                    this.openSkyHealth = 'rate-limited';
+                    this.openSkyLastError = 'Rate limited by OpenSky (429)';
+                    this.openSkyNextRetry = new Date(Date.now() + OPENSKY_INTERVAL_MS).toISOString();
+                } else {
+                    this.openSkyHealth = 'error';
+                    this.openSkyLastError = err.message || 'fetch failed';
+                    this.openSkyNextRetry = null;
+                }
             }
         };
 
@@ -331,9 +413,10 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
 
     private initAisStream() {
         const apiKey = process.env.AISSTREAM_API_KEY;
-        
+
         if (!apiKey) {
             console.warn('[AISStream] WARN: Missing AISSTREAM_API_KEY in .env. Maritime feed suspended.');
+            this.aisStreamHealth = 'auth-missing';
             return;
         }
 
@@ -343,6 +426,8 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
 
              ws.on('open', () => {
                  console.log('[AISStream] Connected to WebSocket');
+                 this.aisStreamHealth = 'streaming';
+                 this.aisStreamLastError = null;
                  // Subscribe to BOTH position and static-data messages so we
                  // can resolve real vessel types instead of hard-coding 'cargo'.
                  // ShipStaticData arrives every ~6 minutes per vessel, so the
@@ -404,24 +489,51 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
                              if (firstKey !== undefined) {
                                  this.vessels.delete(firstKey);
                                  this.vesselTypes.delete(firstKey);
+                                 // Also clean auxiliary maps — prevents unbounded growth
+                                 this.vesselLastSeen.delete(firstKey);
+                                 this.vesselReportCount.delete(firstKey);
+                                 this.darkVessels.delete(firstKey);
                              }
                          }
                      }
-                 } catch(err) {}
+                 } catch (err: any) {
+                     // Log, but don't crash the socket over one bad message.
+                     // AISStream occasionally ships truncated JSON during peak
+                     // bursts — we want visibility without 2000 log lines.
+                     console.warn('[AISStream] malformed message ignored:', err?.message || err);
+                 }
              });
 
+             // Track whether close was triggered by a 429 so we don't
+             // wipe preserved vessel data in the close handler.
+             let closedDueToRateLimit = false;
+
              ws.on('close', () => {
-                 console.log('[AISStream] Disconnected. Reconnecting in 5s...');
-                 // Clear positions but KEEP vesselTypes — that cache is the
-                 // entire point of persistence; otherwise icons reset to
-                 // 'unknown' on every reconnect.
-                 this.vessels.clear();
-                 setTimeout(connectWS, 5000);
+                 // On rate limit: back off 5 min instead of 5s to not
+                 // prolong the ban with aggressive reconnects.
+                 const delay = closedDueToRateLimit ? 300_000 : 5_000;
+                 const delayLabel = closedDueToRateLimit ? '5 min' : '5s';
+                 console.log(`[AISStream] Disconnected. Reconnecting in ${delayLabel}...`);
+                 if (!closedDueToRateLimit) {
+                     this.vessels.clear();
+                     this.aisStreamHealth = 'error';
+                 }
+                 this.aisStreamNextRetry = new Date(Date.now() + delay).toISOString();
+                 closedDueToRateLimit = false;
+                 setTimeout(connectWS, delay);
              });
 
              ws.on('error', (err) => {
-                 console.error('[AISStream] WS Error:', err.message);
-                 this.vessels.clear();
+                 const is429 = /429/.test(err.message);
+                 console.error(`[AISStream] WS Error (${is429 ? 'rate limited' : 'error'}):`, err.message);
+                 if (is429) {
+                     closedDueToRateLimit = true;
+                     this.aisStreamHealth = 'rate-limited';
+                     this.aisStreamLastError = 'Rate limited (429). Retry in 5 min';
+                 } else {
+                     this.aisStreamHealth = 'error';
+                     this.aisStreamLastError = err.message;
+                 }
                  ws.close();
              });
         };
@@ -573,5 +685,25 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
 
     getOsintEvents() {
         return this.osintEvents;
+    }
+
+    // Real health state — consumed by /api/status so the frontend can
+    // distinguish "streaming", "error" (upstream failing), and "auth-missing"
+    // (no API key) instead of guessing from env presence.
+    getHealth() {
+        return {
+            aviation: {
+                status: this.openSkyHealth,
+                note: this.openSkyLastError || undefined,
+                count: this.aircrafts.size,
+                nextRetry: this.openSkyNextRetry || undefined,
+            },
+            maritime: {
+                status: this.aisStreamHealth,
+                note: this.aisStreamLastError || undefined,
+                count: this.vessels.size,
+                nextRetry: this.aisStreamNextRetry || undefined,
+            },
+        };
     }
 }

@@ -1,13 +1,26 @@
 import axios from 'axios';
 
+/**
+ * One polygon (outer ring + optional holes) in [lat,lng] format. Cesium's
+ * PolygonHierarchy needs this shape directly: outer is the main boundary,
+ * holes are cut-outs inside it. MultiPolygon zones give multiple of these.
+ */
+export interface AirspacePolygon {
+    outer: [number, number][];
+    holes: [number, number][][];
+}
+
 export interface AirspaceZone {
     id: string;
     name: string;
-    type: number;           // 1=restricted, 2=danger, 3=prohibited
+    type: number;           // 1=restricted, 2=danger, 3=prohibited, 17=alert, 18=warning
     typeName: string;
     upperLimit: number;
     lowerLimit: number;
-    geometry: [number, number][][];  // [lat,lng][][] polygon rings
+    // Array of polygons. A simple Polygon zone has exactly one entry.
+    // A MultiPolygon zone (e.g. a restricted area split by a gap) has
+    // several. Each entry carries its own outer boundary + holes.
+    geometry: AirspacePolygon[];
 }
 
 const TYPE_NAMES: Record<number, string> = {
@@ -22,11 +35,14 @@ export class AirspaceService {
     private zones: AirspaceZone[] = [];
     private refreshTimer: NodeJS.Timeout | null = null;
     private lastFetch: number = 0;
+    private health: 'streaming' | 'error' | 'auth-missing' = 'streaming';
+    private lastError: string | null = null;
 
     start() {
         const apiKey = process.env.OPENAIP_API_KEY;
         if (!apiKey) {
             console.warn('[Airspace] OPENAIP_API_KEY not set — airspace layer disabled');
+            this.health = 'auth-missing';
             return;
         }
 
@@ -39,20 +55,70 @@ export class AirspaceService {
         return this.zones;
     }
 
+    getHealth() {
+        return { status: this.health, note: this.lastError || undefined, count: this.zones.length };
+    }
+
+    /**
+     * Parse a GeoJSON ring (array of [lng,lat] points) into our
+     * [lat,lng] convention. Filters out degenerate rings with < 3 points.
+     */
+    private ringToLatLng(ring: any[]): [number, number][] | null {
+        if (!Array.isArray(ring) || ring.length < 3) return null;
+        const mapped: [number, number][] = [];
+        for (const pt of ring) {
+            if (!Array.isArray(pt) || pt.length < 2) continue;
+            // GeoJSON: [lng, lat]. Our convention: [lat, lng].
+            mapped.push([pt[1], pt[0]]);
+        }
+        return mapped.length >= 3 ? mapped : null;
+    }
+
+    /**
+     * Convert a GeoJSON Polygon (outer + optional holes) into our
+     * AirspacePolygon. GeoJSON Polygon coordinates are:
+     *   [outerRing, hole1, hole2, ...]
+     * where each ring is an array of [lng,lat] points.
+     */
+    private parsePolygon(poly: any[]): AirspacePolygon | null {
+        if (!Array.isArray(poly) || poly.length === 0) return null;
+        const outer = this.ringToLatLng(poly[0]);
+        if (!outer) return null;
+        const holes: [number, number][][] = [];
+        for (let i = 1; i < poly.length; i++) {
+            const hole = this.ringToLatLng(poly[i]);
+            if (hole) holes.push(hole);
+        }
+        return { outer, holes };
+    }
+
     private parseItems(items: any[]): AirspaceZone[] {
         const records: AirspaceZone[] = [];
         for (const item of items) {
             const geom = item.geometry;
             if (!geom || !geom.coordinates) continue;
 
-            const geometry: [number, number][][] = [];
-            const coords = geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates;
-            for (const polygon of coords) {
-                for (const ring of polygon) {
-                    const mapped: [number, number][] = ring.map((pt: number[]) => [pt[1], pt[0]]);
-                    geometry.push(mapped);
+            // GeoJSON Polygon: coordinates = [outer, hole1, hole2, ...]
+            // GeoJSON MultiPolygon: coordinates = [polygon1, polygon2, ...]
+            //   where each polygonN = [outer, hole1, hole2, ...]
+            // We normalise both into AirspacePolygon[] so downstream code
+            // doesn't branch on geometry.type.
+            const geometry: AirspacePolygon[] = [];
+            if (geom.type === 'Polygon') {
+                const parsed = this.parsePolygon(geom.coordinates);
+                if (parsed) geometry.push(parsed);
+            } else if (geom.type === 'MultiPolygon') {
+                for (const poly of geom.coordinates) {
+                    const parsed = this.parsePolygon(poly);
+                    if (parsed) geometry.push(parsed);
                 }
+            } else {
+                // Unsupported geometry type — skip silently, OpenAIP should
+                // only ever return Polygon or MultiPolygon for airspaces.
+                continue;
             }
+
+            if (geometry.length === 0) continue;
 
             const typeNum = item.type ?? 0;
             records.push({
@@ -95,9 +161,13 @@ export class AirspaceService {
 
             this.zones = allRecords;
             this.lastFetch = Date.now();
+            this.health = 'streaming';
+            this.lastError = null;
             console.log(`[Airspace] ${allRecords.length} restricted/danger/prohibited/alert/warning zones loaded (${page} pages)`);
         } catch (err: any) {
             console.error('[Airspace] Fetch failed:', err.message);
+            this.health = 'error';
+            this.lastError = err.message;
         }
     }
 }

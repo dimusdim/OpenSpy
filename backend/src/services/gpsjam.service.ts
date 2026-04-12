@@ -22,7 +22,9 @@ export class GPSJamService {
         console.log('[GPSJam] Starting GPSJam feed...');
         await this.fetchLatest();
         // Re-fetch every 6 hours (data updates daily, but we don't know exactly when)
-        this.interval = setInterval(() => this.fetchLatest().catch(() => {}), 6 * 3600 * 1000);
+        this.interval = setInterval(() => this.fetchLatest().catch(err => {
+            console.warn('[GPSJam] scheduled refresh failed:', err?.message || err);
+        }), 6 * 3600 * 1000);
     }
 
     getZones(): JammingZone[] {

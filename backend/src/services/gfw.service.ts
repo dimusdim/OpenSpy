@@ -15,11 +15,14 @@ export interface GFWEvent {
 export class GFWService {
     private events: GFWEvent[] = [];
     private timer: NodeJS.Timeout | null = null;
+    private health: 'streaming' | 'error' | 'auth-missing' = 'streaming';
+    private lastError: string | null = null;
 
     start() {
         const token = process.env.GFW_TOKEN;
         if (!token) {
             console.warn('[GFW] API key not configured, skipping');
+            this.health = 'auth-missing';
             return;
         }
 
@@ -30,6 +33,10 @@ export class GFWService {
 
     getEvents(): GFWEvent[] {
         return this.events;
+    }
+
+    getHealth() {
+        return { status: this.health, note: this.lastError || undefined, count: this.events.length };
     }
 
     private async fetchEvents() {
@@ -73,9 +80,13 @@ export class GFWService {
             }
 
             this.events = records;
+            this.health = 'streaming';
+            this.lastError = null;
             console.log(`[GFW] ${records.length} dark vessel / gap events loaded`);
         } catch (err: any) {
             console.error('[GFW] Fetch failed:', err.message);
+            this.health = 'error';
+            this.lastError = err.message;
         }
     }
 }

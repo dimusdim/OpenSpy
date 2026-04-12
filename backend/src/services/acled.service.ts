@@ -17,6 +17,8 @@ export interface ConflictEvent {
 export class ACLEDService {
     private events: ConflictEvent[] = [];
     private timer: NodeJS.Timeout | null = null;
+    private health: 'streaming' | 'error' | 'auth-missing' = 'streaming';
+    private lastError: string | null = null;
 
     start() {
         const email = process.env.ACLED_EMAIL;
@@ -24,6 +26,7 @@ export class ACLEDService {
 
         if (!email || !key) {
             console.warn('[ACLED] API key not configured, skipping');
+            this.health = 'auth-missing';
             return;
         }
 
@@ -34,6 +37,10 @@ export class ACLEDService {
 
     getEvents(): ConflictEvent[] {
         return this.events;
+    }
+
+    getHealth() {
+        return { status: this.health, note: this.lastError || undefined, count: this.events.length };
     }
 
     private async fetchEvents() {
@@ -77,12 +84,16 @@ export class ACLEDService {
             }
 
             this.events = records;
+            this.health = 'streaming';
+            this.lastError = null;
             const battles = records.filter(e => e.event_type === 'Battles').length;
             const explosions = records.filter(e => e.event_type.includes('Explosions')).length;
             const violence = records.filter(e => e.event_type.includes('Violence')).length;
             console.log(`[ACLED] ${records.length} conflict events (${battles} battles, ${explosions} explosions, ${violence} violence)`);
         } catch (err: any) {
             console.error('[ACLED] Fetch failed:', err.message);
+            this.health = 'error';
+            this.lastError = err.message;
         }
     }
 }

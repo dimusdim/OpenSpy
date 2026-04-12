@@ -4,12 +4,27 @@ import http from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import axios from 'axios';
+
+// Global process-level safety nets. Without these, a single upstream HTTP
+// client throwing during a response-parsing phase will bring the whole
+// backend down and force nodemon to restart. nodemon restart takes ~2 s
+// during which every /api/* call fails with ECONNREFUSED and the smoke
+// test cascades. Logging instead keeps the server alive while still
+// making the failure loud.
+process.on('unhandledRejection', (reason, _promise) => {
+    console.error('[process] Unhandled Promise rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+    console.error('[process] Uncaught exception:', err);
+});
 import { SatelliteService } from './services/satellite.service';
+import { SpectatorService } from './services/spectator.service';
 import { SimulatorService } from './services/adsb.service';
 import { ExtendedDataService } from './services/extended.service';
 import { GPSJamService } from './services/gpsjam.service';
 import { WebcamsService } from './services/webcams.service';
 import { InfrastructureService } from './services/infrastructure.service';
+import { OvertureService, dedupAgainstOverture } from './services/overture.service';
 import { IODAService } from './services/ioda.service';
 import { OilPricesService } from './services/oilprices.service';
 import { EnergyService } from './services/energy.service';
@@ -20,27 +35,157 @@ import { AirspaceService } from './services/airspace.service';
 import { GFWService } from './services/gfw.service';
 import { CloudflareService } from './services/cloudflare.service';
 import { WindyService } from './services/windy.service';
-import { Road511Service } from './services/road511.service';
-import { NotamService } from './services/notam.service';
+import { setupAIImageRoutes } from './routes/ai-image';
+
+// CORS origin whitelist — comma-separated list in ALLOWED_ORIGINS env var.
+// Defaults to localhost dev ports if unset.
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3737,http://localhost:3000')
+    .split(',')
+    .map(o => o.trim())
+    .filter(Boolean);
+
+const corsOptions: cors.CorsOptions = {
+    origin: (origin, callback) => {
+        // Allow same-origin and tools without origin (curl, Postman) in dev.
+        if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+        callback(new Error(`CORS: origin ${origin} not allowed`));
+    },
+    methods: ['GET', 'POST', 'DELETE'],
+};
 
 const app = express();
-app.use(cors());
+app.use(cors(corsOptions));
+app.use(express.json());
+
+// ---------------------------------------------------------------------------
+// User settings persistence (JSON file on disk)
+// ---------------------------------------------------------------------------
+import path from 'path';
+import fs from 'fs';
+const SETTINGS_FILE = path.resolve(__dirname, '../data/user-settings.json');
+
+app.get('/api/settings', (_req, res) => {
+    try {
+        if (fs.existsSync(SETTINGS_FILE)) {
+            const data = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8'));
+            res.json(data);
+        } else {
+            res.json({});
+        }
+    } catch {
+        res.json({});
+    }
+});
+
+app.post('/api/settings', (req, res) => {
+    try {
+        const dir = path.dirname(SETTINGS_FILE);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(SETTINGS_FILE, JSON.stringify(req.body, null, 2));
+        res.json({ ok: true });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Simple in-memory rate limiter — per-IP token bucket, 120 req/min.
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX = 120;
+app.use((req, res, next) => {
+    const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+    const now = Date.now();
+    const bucket = rateLimitMap.get(ip);
+    if (!bucket || now >= bucket.resetAt) {
+        rateLimitMap.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+    } else {
+        bucket.count++;
+        if (bucket.count > RATE_LIMIT_MAX) {
+            res.status(429).json({ error: 'Too many requests' });
+            return;
+        }
+    }
+    next();
+});
+
+// Prune rate-limit buckets every 5 min so the Map doesn't grow unbounded.
+setInterval(() => {
+    const now = Date.now();
+    for (const [ip, bucket] of rateLimitMap) {
+        if (now >= bucket.resetAt) rateLimitMap.delete(ip);
+    }
+}, 5 * 60_000);
+
+// --- Input validators -------------------------------------------------------
+const ICAO24_RE = /^[0-9a-f]{6}$/i;
+const CALLSIGN_RE = /^[A-Z0-9]{1,8}$/i;
+const INT_RE = /^-?\d+$/;
+
+/**
+ * Parse a 4-number bbox string in one of two orderings: south,west,north,east
+ * (OSM/Overpass convention) or west,south,east,north (Tile/OpenInfraMap
+ * convention). `order` picks which ordering to enforce. Returns null for:
+ *   - wrong number of components or non-finite values
+ *   - latitudes outside [-90,90] or longitudes outside [-180,180]
+ *   - inverted boxes (south >= north or west >= east)
+ */
+type BboxOrder = 'swne' | 'wsen';
+function parseBbox(bbox: string | undefined, order: BboxOrder = 'swne'): [number, number, number, number] | null {
+    if (!bbox) return null;
+    const parts = bbox.split(',').map(Number);
+    if (parts.length !== 4 || parts.some(n => !Number.isFinite(n))) return null;
+
+    let south: number, west: number, north: number, east: number;
+    if (order === 'swne') {
+        [south, west, north, east] = parts;
+    } else {
+        [west, south, east, north] = parts;
+    }
+
+    // Range checks: latitudes are the half-circle, longitudes the full one.
+    if (Math.abs(south) > 90 || Math.abs(north) > 90) return null;
+    if (Math.abs(west) > 180 || Math.abs(east) > 180) return null;
+    // Ordering: reject inverted / zero-area boxes so we never forward them
+    // to upstream Overpass (where they'd either 400 or return 0 elements).
+    // This also rejects antimeridian-crossing bboxes (west > east across
+    // ±180°). That limitation is documented in tests/README.md; direct API
+    // callers that need to cover the dateline should split into two halves
+    // client-side (west..180 + -180..east). The frontend infrastructure
+    // layer already handles this by skipping antimeridian viewports.
+    if (south >= north || west >= east) return null;
+
+    // Return the numbers back in the input order so callers can destructure
+    // as they already do. This keeps existing `[south, west, north, east]`
+    // and `[w, s, e, n]` destructures at call sites working.
+    return parts as [number, number, number, number];
+}
 
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: '*',
+    origin: allowedOrigins,
     methods: ['GET', 'POST']
   }
 });
 
-const satelliteService = new SatelliteService();
+// Spectator Earth sensor catalog fetched at boot and merged into
+// /api/satellites so the frontend can draw projected footprint cones
+// sized to real swath widths. Passed into SatelliteService so the two
+// share state and avoid a duplicate catalog fetch.
+const spectatorService = new SpectatorService();
+const satelliteService = new SatelliteService(spectatorService);
 const simulatorService = new SimulatorService(io);
 const extendedService = new ExtendedDataService();
 const gpsJamService = new GPSJamService();
 const windyService = new WindyService();
 const webcamsService = new WebcamsService(windyService);
 const infrastructureService = new InfrastructureService();
+// Overture Maps (opt-in via OVERTURE_ENABLED=true). When enabled, its
+// DuckDB+httpfs queries run in parallel with Overpass and the two
+// result sets are merged + deduped per request. Disabled by default
+// until we've validated the category/class mapping against live
+// Overture data; flipping it off never degrades Overpass behaviour.
+const overtureService = new OvertureService();
 const iodaService = new IODAService();
 const oilPricesService = new OilPricesService();
 const energyService = new EnergyService();
@@ -50,8 +195,9 @@ const acledService = new ACLEDService();
 const airspaceService = new AirspaceService();
 const gfwService = new GFWService();
 const cloudflareService = new CloudflareService();
-const road511Service = new Road511Service();
-const notamService = new NotamService();
+
+// AI Vision — image generation via OpenRouter Gemini Flash Image
+setupAIImageRoutes(app);
 
 app.get('/api/satellites', (req, res) => {
     res.json(satelliteService.getSatellites());
@@ -85,41 +231,165 @@ app.get('/api/outages', (_req, res) => {
     res.json(iodaService.getOutages());
 });
 
-// Critical infrastructure from OSM Overpass
+// Overpass queries on multi-tag bounding boxes scale faster than linearly.
+// A 3°×3° power-infra query can return 40k+ elements / 27 MB of JSON and
+// push the backend into OOM when parsing. The frontend requests ~1° tiles,
+// so 4 sq.deg (2°×2°) is loose enough for direct API callers without
+// exceeding the axios maxContentLength guard in the Overpass client.
+const MAX_BBOX_AREA_SQDEG = 4;
+
+function bboxArea(a: number, b: number, c: number, d: number): number {
+    // parseBbox accepts either south,west,north,east or west,south,east,north.
+    // Either way, |latA-latC| × |lonB-lonD| gives the right magnitude.
+    return Math.abs(a - c) * Math.abs(b - d);
+}
+
+// Critical infrastructure — hybrid Overpass + Overture merge.
+//
+// Overpass is the canonical source (always runs). When OVERTURE_ENABLED
+// is set, Overture Maps runs in parallel via OvertureService and its
+// results are merged into the response. Overpass records that collide
+// spatially with an Overture record (same type, within ~555 m) are
+// dropped so the two sources don't render as duplicate billboards.
+// Overture stays off by default; `dedupAgainstOverture` is a safe
+// no-op on an empty Overture list so the fallback path matches the
+// previous behaviour exactly.
 app.get('/api/infrastructure', async (req, res) => {
-    const bboxStr = req.query.bbox as string | undefined;
-    if (!bboxStr) {
-        res.status(400).json({ error: 'Missing bbox query parameter (south,west,north,east)' });
+    const parsed = parseBbox(req.query.bbox as string | undefined, 'swne');
+    if (!parsed) {
+        res.status(400).json({ error: 'Missing or invalid bbox (expected south,west,north,east; lat ±90, lng ±180; south<north; west<east)' });
         return;
     }
-    const parts = bboxStr.split(',').map(Number);
-    if (parts.length !== 4 || parts.some(isNaN)) {
-        res.status(400).json({ error: 'Invalid bbox format. Expected: south,west,north,east' });
+    const [south, west, north, east] = parsed;
+    const area = bboxArea(south, west, north, east);
+    if (area > MAX_BBOX_AREA_SQDEG) {
+        res.status(400).json({
+            error: `bbox too large: ${area.toFixed(1)} sq.deg (max ${MAX_BBOX_AREA_SQDEG}). Request smaller tiles — Overpass will time out otherwise.`,
+        });
         return;
     }
-    const [south, west, north, east] = parts;
     try {
-        const data = await infrastructureService.getInfrastructure(south, west, north, east);
-        res.json(data);
+        // Fire both sources in parallel. Overture's promise resolves to []
+        // when the service is disabled or errors out, so Overpass stays
+        // authoritative under every failure mode.
+        const [overpassSettled, overtureRecords] = await Promise.all([
+            infrastructureService.getInfrastructure(south, west, north, east)
+                .then((data) => ({ ok: true as const, data }))
+                .catch((err) => ({ ok: false as const, err })),
+            overtureService.getInfrastructureInBbox(south, west, north, east),
+        ]);
+
+        if (!overpassSettled.ok) {
+            console.error('[Infrastructure] Overpass failed:', overpassSettled.err?.message || overpassSettled.err);
+            // If Overpass failed but Overture returned data, hand the
+            // Overture slice to the client — it's better than a hard 502.
+            if (overtureRecords.length > 0) {
+                res.json(overtureRecords.map((r) => ({
+                    id: r.id,
+                    lat: r.lat,
+                    lng: r.lng,
+                    name: r.name,
+                    type: r.type,
+                })));
+                return;
+            }
+            res.status(502).json({ error: 'Failed to fetch infrastructure data (upstream Overpass unavailable)' });
+            return;
+        }
+
+        const overpassRecords = overpassSettled.data;
+        const deduped = dedupAgainstOverture(overpassRecords, overtureRecords);
+        // Merge: Overture first (canonical), then remaining Overpass records.
+        // Frontend InfraRecord shape: the Overture helper record matches
+        // field-for-field minus the `source` tag, which the frontend safely
+        // ignores.
+        const merged = [
+            ...overtureRecords.map((r) => ({
+                id: r.id,
+                lat: r.lat,
+                lng: r.lng,
+                name: r.name,
+                type: r.type,
+            })),
+            ...deduped,
+        ];
+        res.json(merged);
     } catch (err: any) {
         console.error('[Infrastructure] endpoint error:', err.message);
-        res.status(502).json({ error: 'Failed to fetch infrastructure data' });
+        res.status(502).json({ error: 'Failed to fetch infrastructure data (upstream Overpass unavailable)' });
     }
 });
 
-// Power infrastructure from OpenInfraMap
+// Power infrastructure via OSM Overpass (power=plant/substation/line tags).
+// (The name "power-infra" is historic — it used to proxy openinframap.org
+// but that API is gone, so we now hit Overpass directly.)
+// Endpoint receives bbox as west,south,east,north (Tile convention) so the
+// frontend can hand off its own viewport ordering directly.
 app.get('/api/power-infra', async (req, res) => {
     const bbox = req.query.bbox as string | undefined;
-    if (!bbox) {
-        res.status(400).json({ error: 'Missing bbox query parameter (west,south,east,north)' });
+    const parsed = parseBbox(bbox, 'wsen');
+    if (!parsed || !bbox) {
+        res.status(400).json({ error: 'Missing or invalid bbox (expected west,south,east,north; lat ±90, lng ±180; south<north; west<east)' });
+        return;
+    }
+    const [west, south, east, north] = parsed;
+    const area = bboxArea(south, west, north, east);
+    if (area > MAX_BBOX_AREA_SQDEG) {
+        res.status(400).json({
+            error: `bbox too large: ${area.toFixed(1)} sq.deg (max ${MAX_BBOX_AREA_SQDEG}). Request smaller tiles — Overpass will time out otherwise.`,
+        });
         return;
     }
     try {
-        const data = await infrastructureService.getPowerInfra(bbox);
-        res.json(data);
+        // Parallel hybrid: Overpass always runs, Overture runs when
+        // OVERTURE_ENABLED. Same dedup rules as /api/infrastructure
+        // except power lines (linestrings) pass through untouched —
+        // entity resolution for line geometry is out of scope for the
+        // first pass.
+        const [overpassSettled, overtureRecords] = await Promise.all([
+            infrastructureService.getPowerInfra(bbox)
+                .then((data) => ({ ok: true as const, data }))
+                .catch((err) => ({ ok: false as const, err })),
+            overtureService.getPowerInfraInBbox(south, west, north, east),
+        ]);
+
+        if (!overpassSettled.ok) {
+            console.error('[PowerInfra] Overpass failed:', overpassSettled.err?.message || overpassSettled.err);
+            if (overtureRecords.length > 0) {
+                res.json(overtureRecords.map((r) => ({
+                    id: r.id,
+                    lat: r.lat,
+                    lng: r.lng,
+                    name: r.name,
+                    type: r.type,
+                    source: 'overture',
+                    voltage: '',
+                    coordinates: r.coordinates,
+                })));
+                return;
+            }
+            res.status(502).json({ error: 'Failed to fetch power infrastructure data (upstream Overpass unavailable)' });
+            return;
+        }
+
+        const deduped = dedupAgainstOverture(overpassSettled.data, overtureRecords);
+        const merged = [
+            ...overtureRecords.map((r) => ({
+                id: r.id,
+                lat: r.lat,
+                lng: r.lng,
+                name: r.name,
+                type: r.type,
+                source: 'overture',
+                voltage: '',
+                coordinates: r.coordinates,
+            })),
+            ...deduped,
+        ];
+        res.json(merged);
     } catch (err: any) {
         console.error('[PowerInfra] endpoint error:', err.message);
-        res.status(502).json({ error: 'Failed to fetch power infrastructure data' });
+        res.status(502).json({ error: 'Failed to fetch power infrastructure data (upstream Overpass unavailable)' });
     }
 });
 
@@ -186,9 +456,13 @@ app.get('/api/track/:icao24', async (req, res) => {
 // Proxy Planespotters photo API
 app.get('/api/aircraft-photo/:icao24', async (req, res) => {
     const { icao24 } = req.params;
+    if (!ICAO24_RE.test(icao24)) {
+        res.status(400).json({ error: 'Invalid icao24 hex code' });
+        return;
+    }
     try {
         const response = await axios.get(
-            `https://api.planespotters.net/pub/photos/hex/${encodeURIComponent(icao24)}`,
+            `https://api.planespotters.net/pub/photos/hex/${icao24.toLowerCase()}`,
             { timeout: 10000 }
         );
         res.json(response.data);
@@ -200,6 +474,10 @@ app.get('/api/aircraft-photo/:icao24', async (req, res) => {
 // Proxy OpenSky routes API (avoids CORS when called from browser)
 app.get('/api/routes/:callsign', async (req, res) => {
     const { callsign } = req.params;
+    if (!CALLSIGN_RE.test(callsign.trim())) {
+        res.status(400).json({ error: 'Invalid callsign (1-8 alphanumeric chars)' });
+        return;
+    }
     try {
         const response = await axios.get(
             `https://opensky-network.org/api/routes?callsign=${encodeURIComponent(callsign.trim())}`,
@@ -213,10 +491,27 @@ app.get('/api/routes/:callsign', async (req, res) => {
 });
 
 // TomTom Traffic Flow tiles (vector + raster proxy)
+function validateTileParams(req: express.Request, res: express.Response): boolean {
+    const z = String(req.params.z ?? '');
+    const x = String(req.params.x ?? '');
+    const y = String(req.params.y ?? '');
+    if (!INT_RE.test(z) || !INT_RE.test(x) || !INT_RE.test(y)) {
+        res.status(400).json({ error: 'z/x/y must be integers' });
+        return false;
+    }
+    const zn = Number(z);
+    if (zn < 0 || zn > 22) {
+        res.status(400).json({ error: 'zoom out of range (0-22)' });
+        return false;
+    }
+    return true;
+}
 app.get('/api/traffic/tile/:z/:x/:y', (req, res) => {
+    if (!validateTileParams(req, res)) return;
     tomtomService.proxyVectorTile(req, res);
 });
 app.get('/api/traffic/raster/:z/:x/:y', (req, res) => {
+    if (!validateTileParams(req, res)) return;
     tomtomService.proxyRasterTile(req, res);
 });
 
@@ -242,13 +537,27 @@ app.get('/api/cloudflare-outages', (_req, res) => {
 
 // HERE Traffic Flow v7
 app.get('/api/here-traffic', async (req, res) => {
-    const bbox = req.query.bbox as string | undefined;
-    if (!bbox) {
-        res.status(400).json({ error: 'Missing bbox query parameter (west,south,east,north)' });
+    const parsed = parseBbox(req.query.bbox as string | undefined, 'wsen');
+    if (!parsed) {
+        res.status(400).json({ error: 'Missing or invalid bbox (expected west,south,east,north; lat ±90, lng ±180; south<north; west<east)' });
         return;
     }
-    const data = await hereTrafficService.getFlow(bbox);
-    res.json(data);
+    // HERE wants the same ordering we validated (west,south,east,north). Pass
+    // the normalised numeric form so a caller can't smuggle arbitrary text
+    // into the upstream URL.
+    const [west, south, east, north] = parsed;
+    const safeBbox = `${west},${south},${east},${north}`;
+    try {
+        const data = await hereTrafficService.getFlow(safeBbox);
+        if (data.error) {
+            res.status(502).json({ error: `HERE upstream failed: ${data.error}` });
+            return;
+        }
+        res.json(data);
+    } catch (err: any) {
+        console.error('[HereTraffic] endpoint error:', err.message);
+        res.status(502).json({ error: 'Failed to fetch HERE traffic' });
+    }
 });
 
 // Windy Webcams — nearby cameras by lat/lng/radius
@@ -256,8 +565,10 @@ app.get('/api/windy-webcams', async (req, res) => {
     const lat = Number(req.query.lat);
     const lng = Number(req.query.lng);
     const radius = Number(req.query.radius) || 50;
-    if (isNaN(lat) || isNaN(lng)) {
-        res.status(400).json({ error: 'Missing or invalid lat/lng query parameters' });
+    if (!Number.isFinite(lat) || Math.abs(lat) > 90 ||
+        !Number.isFinite(lng) || Math.abs(lng) > 180 ||
+        !Number.isFinite(radius) || radius <= 0 || radius > 250) {
+        res.status(400).json({ error: 'Invalid lat (±90), lng (±180), or radius (0-250 km)' });
         return;
     }
     try {
@@ -269,31 +580,117 @@ app.get('/api/windy-webcams', async (req, res) => {
     }
 });
 
-// Road511 US/Canada traffic cameras
-app.get('/api/road511-cameras', async (_req, res) => {
-    try {
-        const data = await road511Service.getCameras();
-        res.json(data);
-    } catch (err: any) {
-        console.error('[Road511] endpoint error:', err.message);
-        res.status(502).json({ error: 'Failed to fetch Road511 cameras' });
+// Service health status — real state from each service's getHealth(),
+// not just env-var presence. Services report streaming/error/auth-missing
+// based on actual upstream success.
+app.get('/api/status', (_req, res) => {
+    const envCheck = (key: string) => !!(process.env[key] && process.env[key]!.length > 0);
+    const adsbHealth = simulatorService.getHealth();
+
+    // Outages are an aggregate of two independent upstreams (Cloudflare Radar +
+    // IODA). Report the best-of-two status and surface per-source detail in
+    // the note — don't hardcode which one is broken.
+    const cfH = cloudflareService.getHealth();
+    const iodaH = iodaService.getHealth();
+    // streaming if either upstream is live; error if both broken; auth-missing
+    // only if both are gated by missing creds (iodaH only exposes streaming/
+    // error, so this reduces to cfH.status === 'auth-missing' in practice).
+    let outagesStatus: 'streaming' | 'error' | 'auth-missing';
+    if (cfH.status === 'streaming' || iodaH.status === 'streaming') {
+        outagesStatus = 'streaming';
+    } else if (cfH.status === 'auth-missing') {
+        outagesStatus = 'auth-missing';
+    } else {
+        outagesStatus = 'error';
     }
+    const outagesNote = `Cloudflare: ${cfH.status}${cfH.note ? ` (${cfH.note})` : ''}; IODA: ${iodaH.status}${iodaH.note ? ` (${iodaH.note})` : ''}`;
+    const outagesCount = (cfH.count || 0) + (iodaH.count || 0);
+
+    // Webcams aggregate Windy + Live-Environment-Streams + Caltrans CCTV.
+    // Use Windy's real health and tag the note so UI knows whether we're on
+    // full (Windy) or a limited fallback feed.
+    const windyH = windyService.getHealth();
+    let webcamsStatus: 'streaming' | 'error' | 'auth-missing' | 'limited';
+    if (windyH.status === 'streaming') {
+        webcamsStatus = 'streaming';
+    } else if (windyH.status === 'auth-missing') {
+        // No Windy key — still streaming via Live-Environment-Streams +
+        // Caltrans, just without Windy's global webcam set.
+        webcamsStatus = 'limited';
+    } else {
+        // Windy errored — the layer still works via Live-Environment-Streams
+        // + Caltrans, but we surface 'limited' with the Windy error note so
+        // ops can see the underlying failure without treating the whole
+        // layer as broken.
+        webcamsStatus = 'limited';
+    }
+    const webcamsNote = windyH.status === 'streaming'
+        ? `Windy: ${windyH.count} cams`
+        : windyH.status === 'auth-missing'
+            ? 'Live-Env-Streams + Caltrans (no Windy key)'
+            : `Windy: ${windyH.note || 'error'}; fallback Live-Env-Streams + Caltrans`;
+
+    // Infrastructure composite health: Overpass is authoritative; Overture
+    // is the opt-in secondary. If Overture is enabled and init'd OK, it's
+    // adding coverage → streaming with a note. If Overture is enabled but
+    // init failed (DuckDB / httpfs / spatial ext broken) we surface the
+    // real error to the UI via status='warning' so the user sees the
+    // dependency failure instead of having it silently fall back. When
+    // Overture is disabled, the row shows plain Overpass streaming.
+    const overtureEnabled = overtureService.isEnabled();
+    const os = overtureEnabled ? overtureService.getStatus() : null;
+    let infraStatus: 'streaming' | 'warning' = 'streaming';
+    let infraNote = 'Overpass (OSM)';
+    if (overtureEnabled && os) {
+        if (os.state === 'ready') {
+            infraNote = `Overpass + Overture (${os.records} records, ${os.diskMb} MB, cache ${os.cacheAge ?? 'fresh'})`;
+        } else if (os.state === 'downloading') {
+            infraStatus = 'warning';
+            infraNote = `Overpass + Overture downloading: ${os.step}`;
+        } else if (os.state === 'error') {
+            infraStatus = 'warning';
+            infraNote = `Overture error: ${os.error}; Overpass only`;
+        }
+    }
+
+    res.json({
+        aviation: adsbHealth.aviation,
+        maritime: adsbHealth.maritime,
+        airspace: airspaceService.getHealth(),
+        conflicts: acledService.getHealth(),
+        gfw: gfwService.getHealth(),
+        outages: { status: outagesStatus, note: outagesNote, count: outagesCount },
+        // Services without real health getters still fall back to env check
+        traffic: { status: envCheck('TOMTOM_API_KEY') ? 'streaming' : 'auth-missing' },
+        webcams: { status: webcamsStatus, note: webcamsNote },
+        infrastructure: { status: infraStatus, note: infraNote },
+        overture: os ?? { state: 'disabled' },
+    });
 });
 
-// NASA DIP NOTAMs
-app.get('/api/notams', async (_req, res) => {
-    try {
-        const data = await notamService.getNotams();
-        res.json(data);
-    } catch (err: any) {
-        console.error('[NOTAMs] endpoint error:', err.message);
-        res.status(502).json({ error: 'Failed to fetch NOTAMs' });
+// Detailed Overture cache status for the frontend settings panel.
+app.get('/api/overture-status', (_req, res) => {
+    if (!overtureService.isEnabled()) {
+        res.json({ state: 'disabled' });
+        return;
     }
+    res.json(overtureService.getStatus());
 });
 
 async function bootstrap() {
     console.log('Initializing backend services...');
+    // Spectator must init before SatelliteService so the TLE enrichment
+    // step sees a populated catalog on first boot. If the Spectator fetch
+    // fails (network, missing key) we still continue — SatelliteService
+    // just skips sensor enrichment and the frontend shows no footprints.
+    await spectatorService.init();
     await satelliteService.init();
+    // OvertureService boots the DuckDB + httpfs stack lazily. When
+    // disabled via OVERTURE_ENABLED this is a fast no-op; when enabled
+    // a failure here (missing extension, no network) leaves the
+    // service unready and the hybrid merge silently falls back to
+    // Overpass-only responses — no request path bails.
+    await overtureService.init();
     simulatorService.start();
     extendedService.start();
     gpsJamService.start();

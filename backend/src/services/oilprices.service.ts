@@ -33,7 +33,9 @@ export class OilPricesService {
         }
         await this.fetch();
         // Poll every 5 minutes
-        this.interval = setInterval(() => this.fetch().catch(() => {}), 5 * 60 * 1000);
+        this.interval = setInterval(() => this.fetch().catch(err => {
+            console.warn('[OilPrices] scheduled fetch failed:', err?.message || err);
+        }), 5 * 60 * 1000);
     }
 
     getPrices(): OilPricesData | null {

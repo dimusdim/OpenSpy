@@ -36,15 +36,48 @@ export class WebcamsService {
 
     start(): void {
         console.log('[WebcamsService] Starting webcam aggregation...');
-        this.fetchAll().catch(() => {});
+        this.fetchAll().catch(err => {
+            console.warn('[WebcamsService] initial fetchAll failed:', err?.message || err);
+        });
         // Re-fetch every 1 hour
         this.refreshInterval = setInterval(() => {
-            this.fetchAll().catch(() => {});
+            this.fetchAll().catch(err => {
+                console.warn('[WebcamsService] scheduled fetchAll failed:', err?.message || err);
+            });
         }, 60 * 60 * 1000);
     }
 
     getWebcams(): WebcamRecord[] {
-        return this.webcams;
+        // Merge the "slow" aggregated list (live-env-streams + caltrans, which
+        // we cache on an hourly fetchAll cycle) with whatever Windy currently
+        // has in its in-memory cache. We do this at read time instead of only
+        // during fetchAll() because Windy's paginated global load can take
+        // 10+ seconds on first startup — if the first fetchAll() finishes
+        // before Windy is populated, Windy cams would otherwise be missing
+        // from /api/webcams until the next hourly cycle.
+        const windyGlobal = this.windyService.getGlobalWebcams();
+        if (windyGlobal.length === 0) {
+            return this.webcams;
+        }
+        const windyRecords: WebcamRecord[] = windyGlobal.map((cam) => ({
+            id: `windy-${cam.id}`,
+            lat: cam.lat,
+            lng: cam.lng,
+            name: cam.title || 'Windy Webcam',
+            url: cam.playerUrl || '',
+            source: 'windy',
+            playerUrl: cam.playerUrl,
+            imageUrl: cam.imageUrl,
+        }));
+        // Dedupe: skip any Windy record whose id already exists in the
+        // aggregated list (fetchAll() may have already added them on a
+        // subsequent cycle once Windy's cache was populated).
+        const existingIds = new Set(this.webcams.map(w => w.id));
+        const merged = [...this.webcams];
+        for (const rec of windyRecords) {
+            if (!existingIds.has(rec.id)) merged.push(rec);
+        }
+        return merged;
     }
 
     // -- Fetch Logic ---------------------------------------------------------

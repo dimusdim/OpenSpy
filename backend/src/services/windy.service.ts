@@ -19,12 +19,19 @@ export class WindyService {
     private apiKey: string;
     private globalWebcams: WindyWebcam[] = [];
     private lastGlobalFetch: number = 0;
+    private health: 'streaming' | 'error' | 'auth-missing' = 'streaming';
+    private lastError: string | null = null;
 
     constructor() {
         this.apiKey = process.env.WINDY_API_KEY ?? '';
         if (!this.apiKey) {
             console.warn('[Windy] WINDY_API_KEY not set — Windy webcams disabled');
+            this.health = 'auth-missing';
         }
+    }
+
+    getHealth() {
+        return { status: this.health, note: this.lastError || undefined, count: this.globalWebcams.length };
     }
 
     /** Fetch global webcams on startup (called from WebcamsService or bootstrap) */
@@ -62,10 +69,14 @@ export class WindyService {
 
             this.globalWebcams = all;
             this.lastGlobalFetch = Date.now();
+            this.health = 'streaming';
+            this.lastError = null;
             console.log(`[Windy] Fetched ${all.length} global webcams`);
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err);
             console.error(`[Windy] Global fetch failed: ${msg}`);
+            this.health = 'error';
+            this.lastError = msg;
         }
 
         return this.globalWebcams;
