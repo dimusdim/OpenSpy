@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import * as Cesium from 'cesium';
 import 'cesium/Build/Cesium/Widgets/widgets.css';
 import { useTimelineStore } from '../store/useTimelineStore';
-import { useSatellitesLayer, satelliteFootprintMetaMap } from '../cesium/useSatellitesLayer';
+import { useSatellitesLayer, satelliteFootprintMetaMap, satelliteMetaMap } from '../cesium/useSatellitesLayer';
 import { useDynamicLayers, aircraftMetaMap } from '../cesium/useDynamicLayers';
 import { useOsintLayer } from '../cesium/useOsintLayer';
 import { useJammingLayer } from '../cesium/useJammingLayer';
@@ -134,6 +134,21 @@ export default function Globe() {
                         name: displayName,
                         id: pickedObject.id,
                         type: 'Aircraft',
+                    });
+                    return;
+                }
+
+                // Satellite billboard (BillboardCollection)
+                const satMeta = satelliteMetaMap.get(pickedObject.id);
+                if (satMeta) {
+                    useTimelineStore.getState().setSelectedEntityId(pickedObject.id, {
+                        name: satMeta.name,
+                        id: pickedObject.id,
+                        type: 'Satellite',
+                        subtype: satMeta.subtype,
+                        noradId: satMeta.noradId,
+                        ...(satMeta.reconMeta ? { country: satMeta.reconMeta.country, sensorType: satMeta.reconMeta.sensorType, resolution: satMeta.reconMeta.resolution } : {}),
+                        ...(satMeta.sensor ? { sensor: satMeta.sensor } : {}),
                     });
                     return;
                 }

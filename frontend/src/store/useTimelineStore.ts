@@ -206,7 +206,7 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
   toggleClustering: () => set(s => ({ clusteringEnabled: !s.clusteringEnabled })),
   streamMetrics: {
       aviation: { label: 'OpenSky Network', source: 'api.opensky-network.org', type: 'REST Polling (global)', count: 0, speed: '0 bps', status: 'connecting', poll: '90s', upstream: '5–10s ADS-B' },
-      maritime: { label: 'AISStream', source: 'wss://stream.aisstream.io', type: 'WebSocket', count: 0, speed: '0 msgs/s', status: 'connecting', poll: 'push (live)', upstream: '2–10s AIS' },
+      maritime: { label: 'AISStream', source: 'wss://stream.aisstream.io', type: 'WebSocket (persistent)', count: 0, speed: '0 msgs/s', status: 'connecting', poll: 'live (~3m update)', upstream: '2–10s AIS' },
       osint: { label: 'GDACS + USGS + EONET', source: 'gdacs / usgs / nasa', type: 'REST aggregated', count: 0, speed: '-', status: 'connecting', poll: '5m', upstream: 'event-driven (~min)' },
       satellites: { label: 'CelesTrak', source: 'celestrak.org', type: 'SGP4', count: 0, speed: '-', status: 'connecting', poll: '24h cache', upstream: '2–3 ×/day' },
       satelliteFootprints: { label: 'Sensor Footprints', source: 'Spectator Earth', type: 'Projected cone', count: 0, speed: '-', status: 'connecting', poll: 'on load', upstream: '24h TTL' },
