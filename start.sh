@@ -24,7 +24,32 @@ echo "╚═══════════════════════�
 echo ""
 echo "[cleanup] Checking for stale processes..."
 
-# Kill anything holding the DuckDB cache file (stale backend instances)
+# Kill ALL old backend processes — not just by port.
+#
+# Root cause of zombies: `concurrently` spawns `nodemon` → `ts-node`.
+# When concurrently is killed (Ctrl+C, terminal close, Claude restarts),
+# the child ts-node processes become orphans. They no longer listen on the
+# port (a new process took it), but they still hold WebSocket connections
+# to AISStream, OpenSky, etc. — burning API quotas and triggering rate
+# limits. Searching by port (lsof) misses these orphans completely.
+
+# Step 1: kill ALL ts-node backend processes (orphans + current)
+STALE_PIDS=$(pgrep -f "ts-node.*src/index\.ts" 2>/dev/null || true)
+if [ -n "$STALE_PIDS" ]; then
+    echo "[cleanup] Killing stale backend processes: $STALE_PIDS"
+    echo "$STALE_PIDS" | xargs kill -9 2>/dev/null || true
+    sleep 1
+fi
+
+# Step 2: kill stale concurrently / nodemon wrappers
+WRAPPER_PIDS=$(pgrep -f "concurrently.*dev|nodemon.*src/index" 2>/dev/null || true)
+if [ -n "$WRAPPER_PIDS" ]; then
+    echo "[cleanup] Killing stale wrappers: $WRAPPER_PIDS"
+    echo "$WRAPPER_PIDS" | xargs kill -9 2>/dev/null || true
+    sleep 1
+fi
+
+# Step 3: kill anything holding the DuckDB cache file
 if [ -f "$DUCKDB_FILE" ]; then
     DUCKDB_PIDS=$(lsof "$DUCKDB_FILE" 2>/dev/null | awk 'NR>1{print $2}' | sort -u)
     if [ -n "$DUCKDB_PIDS" ]; then
@@ -34,26 +59,20 @@ if [ -f "$DUCKDB_FILE" ]; then
     fi
 fi
 
-# Free backend port
-BACKEND_PIDS=$(lsof -ti :$BACKEND_PORT 2>/dev/null || true)
-if [ -n "$BACKEND_PIDS" ]; then
-    echo "[cleanup] Killing processes on port $BACKEND_PORT: $BACKEND_PIDS"
-    echo "$BACKEND_PIDS" | xargs kill -9 2>/dev/null || true
-    sleep 1
-fi
-
-# Free frontend port
-FRONTEND_PIDS=$(lsof -ti :$FRONTEND_PORT 2>/dev/null || true)
-if [ -n "$FRONTEND_PIDS" ]; then
-    echo "[cleanup] Killing processes on port $FRONTEND_PORT: $FRONTEND_PIDS"
-    echo "$FRONTEND_PIDS" | xargs kill -9 2>/dev/null || true
-    sleep 1
-fi
+# Step 4: free ports (catch anything else — other projects, stale next-server)
+for PORT in $BACKEND_PORT $FRONTEND_PORT; do
+    PORT_PIDS=$(lsof -ti :$PORT 2>/dev/null || true)
+    if [ -n "$PORT_PIDS" ]; then
+        echo "[cleanup] Killing processes on port $PORT: $PORT_PIDS"
+        echo "$PORT_PIDS" | xargs kill -9 2>/dev/null || true
+    fi
+done
+sleep 1
 
 # Remove stale DuckDB WAL/lock files (safe — DuckDB recreates on open)
 rm -f "$DUCKDB_FILE.wal" 2>/dev/null || true
 
-echo "[cleanup] Done. Ports $BACKEND_PORT and $FRONTEND_PORT are free."
+echo "[cleanup] Done. All stale processes killed, ports free."
 
 # ----------------------------------------------------------------------------
 # 2. Pre-flight checks

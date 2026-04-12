@@ -266,6 +266,15 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
             }
         }
 
+        // Prune stale vessels from the live map (no update in >30 min).
+        // Prevents showing ghost ships at old positions indefinitely.
+        const STALE_VESSEL_MS = 1800_000; // 30 min
+        for (const [id, lastSeen] of this.vesselLastSeen) {
+            if (now - lastSeen > STALE_VESSEL_MS && !this.darkVessels.has(id)) {
+                this.vessels.delete(id);
+            }
+        }
+
         // Prune stale dark vessels (gone dark > 24h — likely just left the area)
         for (const [id, dv] of this.darkVessels) {
             if (now - dv.darkSince > 86400_000) {
@@ -411,6 +420,15 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
         setInterval(fetchOpenSky, OPENSKY_INTERVAL_MS);
     }
 
+    // Per-vessel throttle: accept position update at most once per 20s.
+    // At ~160 msg/s globally this cuts processing ~10x while keeping
+    // positions fresh enough (20s ≈ 200m drift at 20 knots).
+    private static AIS_VESSEL_THROTTLE_MS = 160_000; // ~2.5 min per vessel
+
+    // Singleton guard — prevents duplicate WebSocket connections if
+    // multiple frontends or hot-reloads trigger initAisStream.
+    private aisWs: WebSocket | null = null;
+
     private initAisStream() {
         const apiKey = process.env.AISSTREAM_API_KEY;
 
@@ -420,33 +438,37 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
             return;
         }
 
+        // Singleton: if a WebSocket is already open, don't create another
+        if (this.aisWs && this.aisWs.readyState === WebSocket.OPEN) {
+            console.warn('[AISStream] WebSocket already connected — skipping duplicate init');
+            return;
+        }
+
         const connectWS = () => {
-             console.log('[AISStream] Connecting WS with Token...');
+             // Guard again before reconnect
+             if (this.aisWs && this.aisWs.readyState === WebSocket.OPEN) return;
+
+             console.log('[AISStream] Connecting WebSocket (global, persistent)...');
              const ws = new WebSocket("wss://stream.aisstream.io/v0/stream");
+             this.aisWs = ws;
 
              ws.on('open', () => {
-                 console.log('[AISStream] Connected to WebSocket');
+                 console.log('[AISStream] Connected — streaming global AIS');
                  this.aisStreamHealth = 'streaming';
                  this.aisStreamLastError = null;
-                 // Subscribe to BOTH position and static-data messages so we
-                 // can resolve real vessel types instead of hard-coding 'cargo'.
-                 // ShipStaticData arrives every ~6 minutes per vessel, so the
-                 // extra bandwidth is negligible compared to PositionReport.
-                 const subscriptionMessage = {
+                 this.aisStreamNextRetry = null as any;
+                 ws.send(JSON.stringify({
                      Apikey: apiKey,
-                     BoundingBoxes: [[[-10.0, -10.0], [50.0, 50.0]]],
+                     BoundingBoxes: [[[-90.0, -180.0], [90.0, 180.0]]],
                      FiltersShipMMSI: [],
                      FilterMessageTypes: ["PositionReport", "ShipStaticData"]
-                 };
-                 ws.send(JSON.stringify(subscriptionMessage));
+                 }));
              });
 
              ws.on('message', (data) => {
                  try {
                      const parsed = JSON.parse(data.toString());
 
-                     // Cache vessel class from static data so subsequent
-                     // PositionReports can render the right icon.
                      if (parsed.MessageType === 'ShipStaticData' && parsed.Message?.ShipStaticData) {
                          const stat = parsed.Message.ShipStaticData;
                          const id = String(stat.UserID);
@@ -456,7 +478,6 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
                              this.vesselTypes.set(id, cls);
                              this.vesselTypesDirty = true;
                          }
-                         // Patch already-tracked vessel in place if present.
                          const existing = this.vessels.get(id);
                          if (existing) existing.type = cls;
                          return;
@@ -465,6 +486,12 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
                      if (parsed.MessageType === 'PositionReport' && parsed.Message?.PositionReport) {
                          const report = parsed.Message.PositionReport;
                          const id = String(report.UserID);
+
+                         // Per-vessel throttle: skip if updated less than 20s ago
+                         const now = Date.now();
+                         const lastSeen = this.vesselLastSeen.get(id);
+                         if (lastSeen && now - lastSeen < SimulatorService.AIS_VESSEL_THROTTLE_MS) return;
+
                          this.vessels.set(id, {
                              id,
                              lat: report.Latitude,
@@ -474,22 +501,20 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
                              speed: report.Sog || 0
                          });
 
-                         // Dark vessel tracking: record last-seen time + increment report count
-                         this.vesselLastSeen.set(id, Date.now());
+                         this.vesselLastSeen.set(id, now);
                          this.vesselReportCount.set(id, (this.vesselReportCount.get(id) || 0) + 1);
 
-                         // If this vessel was flagged dark, it just reappeared — remove from dark list
                          if (this.darkVessels.has(id)) {
-                             console.log(`[DarkVessel] ${id} reappeared after ${Math.round((Date.now() - this.darkVessels.get(id)!.darkSince) / 60000)}m dark`);
+                             console.log(`[DarkVessel] ${id} reappeared after ${Math.round((now - this.darkVessels.get(id)!.darkSince) / 60000)}m dark`);
                              this.darkVessels.delete(id);
                          }
 
-                         if (this.vessels.size > 2000) {
+                         // Hard cap — 50k vessels ≈ 5 MB RAM, safe
+                         if (this.vessels.size > 50000) {
                              const firstKey = this.vessels.keys().next().value;
                              if (firstKey !== undefined) {
                                  this.vessels.delete(firstKey);
                                  this.vesselTypes.delete(firstKey);
-                                 // Also clean auxiliary maps — prevents unbounded growth
                                  this.vesselLastSeen.delete(firstKey);
                                  this.vesselReportCount.delete(firstKey);
                                  this.darkVessels.delete(firstKey);
@@ -497,9 +522,6 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
                          }
                      }
                  } catch (err: any) {
-                     // Log, but don't crash the socket over one bad message.
-                     // AISStream occasionally ships truncated JSON during peak
-                     // bursts — we want visibility without 2000 log lines.
                      console.warn('[AISStream] malformed message ignored:', err?.message || err);
                  }
              });
@@ -509,13 +531,12 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
              let closedDueToRateLimit = false;
 
              ws.on('close', () => {
-                 // On rate limit: back off 5 min instead of 5s to not
-                 // prolong the ban with aggressive reconnects.
+                 this.aisWs = null;
                  const delay = closedDueToRateLimit ? 300_000 : 5_000;
                  const delayLabel = closedDueToRateLimit ? '5 min' : '5s';
                  console.log(`[AISStream] Disconnected. Reconnecting in ${delayLabel}...`);
                  if (!closedDueToRateLimit) {
-                     this.vessels.clear();
+                     // Keep vessel data on normal disconnect — don't wipe
                      this.aisStreamHealth = 'error';
                  }
                  this.aisStreamNextRetry = new Date(Date.now() + delay).toISOString();

@@ -55,7 +55,7 @@ const corsOptions: cors.CorsOptions = {
 
 const app = express();
 app.use(cors(corsOptions));
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 
 // ---------------------------------------------------------------------------
 // User settings persistence (JSON file on disk)

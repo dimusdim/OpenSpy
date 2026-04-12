@@ -159,11 +159,19 @@ export class SatelliteService {
         };
     }
 
+    // Provider priority index — lower = higher priority.
+    // Cache stores this so we know if it came from a fallback.
+    private static PROVIDER_PRIORITY: Record<string, number> = {
+        'space-track': 0,
+        'celestrak': 1,
+        'ivanstanojevic': 2,
+    };
+
     /**
      * TLE provider chain: Space-Track → CelesTrak → ivanstanojevic.me
-     * Returns raw TLE text (name\nline1\nline2 triples).
+     * Returns { text, provider } so the caller can tag the cache.
      */
-    private async fetchTLEChain(): Promise<string> {
+    private async fetchTLEChain(): Promise<{ text: string; provider: string }> {
         // 1. Space-Track.org (primary — US Space Command)
         const stEmail = process.env.SPACETRACK_EMAIL;
         const stPass = process.env.SPACETRACK_PASSWORD;
@@ -185,7 +193,7 @@ export class SatelliteService {
                         // Space-Track 3le prefixes names with "0 " — strip it
                         const cleaned = res.data.replace(/^0 /gm, '');
                         console.log('[Satellites] TLE from Space-Track.org');
-                        return cleaned;
+                        return { text: cleaned, provider: 'space-track' };
                     }
                 }
             } catch (err: any) {
@@ -199,7 +207,7 @@ export class SatelliteService {
                 const res = await axios.get(url, { timeout: 30_000 });
                 if (res.data && typeof res.data === 'string' && res.data.includes('1 ')) {
                     console.log(`[Satellites] TLE from ${new URL(url).hostname}`);
-                    return res.data;
+                    return { text: res.data, provider: 'celestrak' };
                 }
             } catch (err: any) {
                 console.warn(`[Satellites] ${new URL(url).hostname} failed: ${err.message}`);
@@ -227,7 +235,7 @@ export class SatelliteService {
             }
             if (allLines.length > 0) {
                 console.log(`[Satellites] TLE from ivanstanojevic.me (${allLines.length / 3} sats)`);
-                return allLines.join('\n');
+                return { text: allLines.join('\n'), provider: 'ivanstanojevic' };
             }
         } catch (err: any) {
             console.warn('[Satellites] ivanstanojevic.me failed:', err.message);
@@ -236,92 +244,105 @@ export class SatelliteService {
         throw new Error('All TLE providers failed (Space-Track, CelesTrak, ivanstanojevic.me)');
     }
 
+    /** Parse raw TLE text into SatelliteRecord[] */
+    private parseTLE(tleText: string): SatelliteRecord[] {
+        const lines = tleText.split('\n').map((l: string) => l.trim());
+        const parsed: SatelliteRecord[] = [];
+
+        for (let i = 0; i < lines.length - 2; i += 3) {
+            const name = lines[i];
+            const tleLine1 = lines[i+1];
+            const tleLine2 = lines[i+2];
+            if (!name || !tleLine1 || !tleLine2) continue;
+
+            const nameUpper = name.toUpperCase();
+            // Skip debris
+            if (nameUpper.includes(' DEB') || nameUpper.includes(' R/B') || nameUpper.includes('COOLANT')) continue;
+
+            let type: 'military' | 'civilian' | 'commercial' = 'civilian';
+            if (nameUpper.includes('USA') || nameUpper.includes('COSMOS') || nameUpper.includes('YAOGAN')) {
+                type = 'military';
+            } else if (nameUpper.includes('STARLINK') || nameUpper.includes('ONEWEB') || nameUpper.includes('WORLDVIEW') || nameUpper.includes('CAPELLA')) {
+                type = 'commercial';
+            }
+
+            const noradId = extractNoradId(tleLine1);
+            const reconMeta = RECON_BY_NORAD.get(noradId);
+            const isRecon = !!reconMeta;
+
+            const record: SatelliteRecord = { name, tleLine1, tleLine2, type, noradId };
+            if (isRecon) { record.recon = true; record.reconMeta = reconMeta; }
+            this.enrichWithSpectator(record);
+            parsed.push(record);
+        }
+
+        // Priority ordering: sensor-equipped + recon + ISS first
+        const priority = parsed.filter(s => !!s.sensor || s.recon || s.name.toUpperCase().includes('ISS'));
+        const rest = parsed.filter(s => !s.sensor && !s.recon && !s.name.toUpperCase().includes('ISS'));
+        return [...priority, ...rest].slice(0, 2000);
+    }
+
+    /** Write cache with provider tag */
+    private writeCache(satellites: SatelliteRecord[], provider: string) {
+        fs.writeFileSync(CACHE_FILE, JSON.stringify({ provider, satellites }, null, 2));
+    }
+
+    /** Read cache — returns { provider, satellites, fresh } or null */
+    private readCache(): { provider: string; satellites: SatelliteRecord[]; fresh: boolean } | null {
+        try {
+            if (!fs.existsSync(CACHE_FILE)) return null;
+            const stat = fs.statSync(CACHE_FILE);
+            const fresh = Date.now() - stat.mtimeMs < CACHE_TTL;
+            const raw = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8'));
+            // Support old format (plain array) and new format ({ provider, satellites })
+            if (Array.isArray(raw)) return { provider: 'unknown', satellites: raw, fresh };
+            if (raw.satellites && Array.isArray(raw.satellites)) return { provider: raw.provider || 'unknown', satellites: raw.satellites, fresh };
+            return null;
+        } catch { return null; }
+    }
+
     private async loadSatellites() {
         try {
-            if (fs.existsSync(CACHE_FILE)) {
-                const stat = fs.statSync(CACHE_FILE);
-                if (Date.now() - stat.mtimeMs < CACHE_TTL) {
-                    const data = fs.readFileSync(CACHE_FILE, 'utf-8');
-                    const parsed = JSON.parse(data);
-                    if (!Array.isArray(parsed)) throw new Error('corrupt cache');
-                    this.satellites = parsed;
-                    // Backfill noradId on records cached before the field
-                    // was added — preserves cache validity across the
-                    // schema change without forcing a CelesTrak refetch.
-                    for (const rec of this.satellites) {
-                        if (typeof rec.noradId !== 'number' || rec.noradId < 0) {
-                            rec.noradId = extractNoradId(rec.tleLine1);
-                        }
-                        // Clear any stale sensor data — we'll re-derive it
-                        // from the currently-known Spectator catalog below.
-                        delete rec.sensor;
-                        this.enrichWithSpectator(rec);
-                    }
-                    console.log(`Loaded ${this.satellites.length} satellites from cache.`);
-                    return;
+            const cache = this.readCache();
+
+            // If cache is fresh AND from a primary source — use it directly
+            if (cache && cache.fresh && SatelliteService.PROVIDER_PRIORITY[cache.provider] === 0) {
+                this.satellites = cache.satellites;
+                for (const rec of this.satellites) {
+                    if (typeof rec.noradId !== 'number' || rec.noradId < 0) rec.noradId = extractNoradId(rec.tleLine1);
+                    delete rec.sensor;
+                    this.enrichWithSpectator(rec);
                 }
+                console.log(`[Satellites] ${this.satellites.length} from cache (${cache.provider}, fresh)`);
+                return;
             }
+
+            // Cache is from a fallback or expired — try to fetch from a better source
             console.log('[Satellites] Fetching TLE data (Space-Track → CelesTrak → ivanstanojevic)...');
-            const tleText = await this.fetchTLEChain();
-            const lines = tleText.split('\n').map((l: string) => l.trim());
-            const parsed: SatelliteRecord[] = [];
-            // Known Spectator NORADs — force-include these into the 300
-            // cap so we always keep the satellites with real sensor data,
-            // even if they'd be filtered out by the classification check
-            // below (Spectator's catalog is mostly civilian EO, which
-            // our default filter otherwise drops).
-            const spectatorNorads = this.spectator
-                ? new Set(this.spectator.getKnownNorads())
-                : new Set<number>();
+            const { text: tleText, provider } = await this.fetchTLEChain();
+            const parsed = this.parseTLE(tleText);
 
-            for (let i = 0; i < lines.length - 2; i += 3) {
-                const name = lines[i];
-                const tleLine1 = lines[i+1];
-                const tleLine2 = lines[i+2];
+            // If we got data from a higher-priority source than cache, use it
+            // If we got data from a lower-priority source and cache is still fresh, keep cache
+            const newPriority = SatelliteService.PROVIDER_PRIORITY[provider] ?? 99;
+            const cachePriority = cache ? (SatelliteService.PROVIDER_PRIORITY[cache.provider] ?? 99) : 99;
 
-                if (!name || !tleLine1 || !tleLine2) continue;
-
-                let type: 'military' | 'civilian' | 'commercial' = 'civilian';
-                const nameUpper = name.toUpperCase();
-                // Basic classification based on well-known names
-                if (nameUpper.includes('USA') || nameUpper.includes('COSMOS') || nameUpper.includes('YAOGAN')) {
-                    type = 'military';
-                } else if (nameUpper.includes('STARLINK') || nameUpper.includes('ONEWEB') || nameUpper.includes('WORLDVIEW') || nameUpper.includes('CAPELLA')) {
-                    type = 'commercial';
+            if (cache && cache.fresh && cachePriority <= newPriority && cache.satellites.length >= parsed.length) {
+                // Cache is from equal/better source and still fresh — keep it
+                this.satellites = cache.satellites;
+                for (const rec of this.satellites) {
+                    if (typeof rec.noradId !== 'number' || rec.noradId < 0) rec.noradId = extractNoradId(rec.tleLine1);
+                    delete rec.sensor;
+                    this.enrichWithSpectator(rec);
                 }
-
-                // Check if this is a known reconnaissance satellite
-                const noradId = extractNoradId(tleLine1);
-                const reconMeta = RECON_BY_NORAD.get(noradId);
-                const isRecon = !!reconMeta;
-                // Force-include satellites present in the Spectator catalog
-                // so their sensor metadata can be surfaced to the frontend.
-                const hasSensorData = spectatorNorads.has(noradId);
-
-                // Skip debris — they waste slots and create duplicate IDs
-                if (nameUpper.includes(' DEB') || nameUpper.includes(' R/B') || nameUpper.includes('COOLANT')) continue;
-
-                // Filter down to an interesting subset to avoid lag
-                if (type === 'military' || type === 'commercial' || nameUpper.includes('ISS') || isRecon || hasSensorData) {
-                    const record: SatelliteRecord = { name, tleLine1, tleLine2, type, noradId };
-                    if (isRecon) {
-                        record.recon = true;
-                        record.reconMeta = reconMeta;
-                    }
-                    this.enrichWithSpectator(record);
-                    parsed.push(record);
-                }
+                console.log(`[Satellites] ${this.satellites.length} from cache (${cache.provider}), skipping ${provider} (${parsed.length} sats)`);
+                return;
             }
 
-            // Priority ordering: sensor-equipped + recon + ISS first,
-            // then military, then commercial. This ensures Spectator-
-            // enriched and recon sats aren't pushed out by thousands of
-            // old COSMOS debris when the source is sorted by NORAD ID.
-            const priority = parsed.filter(s => !!s.sensor || s.recon || s.name.toUpperCase().includes('ISS'));
-            const rest = parsed.filter(s => !s.sensor && !s.recon && !s.name.toUpperCase().includes('ISS'));
-            this.satellites = [...priority, ...rest].slice(0, 300);
-            fs.writeFileSync(CACHE_FILE, JSON.stringify(this.satellites, null, 2));
-            console.log(`Loaded ${this.satellites.length} filtered satellites and cached.`);
+            // Use new data
+            this.satellites = parsed;
+            this.writeCache(parsed, provider);
+            console.log(`[Satellites] ${this.satellites.length} from ${provider} (cached)`);
         } catch (error) {
             console.error('Failed to load TLEs:', error);
             // Fallback mock

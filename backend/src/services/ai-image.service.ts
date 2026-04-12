@@ -101,10 +101,11 @@ export class AIImageService {
         if (isGemini) {
             imageConfig = { image_size: '2K' };
         } else if (isFlux) {
-            // Round to multiples of 16 (FLUX requirement), cap at 2048
+            // BFL FLUX API uses width/height (multiples of 16, max 4MP).
+            // No aspect_ratio param — only explicit pixel dimensions.
             const w = Math.min(2048, Math.round(imageWidth / 16) * 16);
             const h = Math.min(2048, Math.round(imageHeight / 16) * 16);
-            imageConfig = { width: w, height: h, safety_tolerance: 6, image_size: '2K' };
+            imageConfig = { width: w, height: h };
         } else {
             imageConfig = { aspect_ratio: aspectRatio, image_size: '2K' };
         }
@@ -152,6 +153,13 @@ export class AIImageService {
         const msgObj = response.data?.choices?.[0]?.message;
         let imageData: string | null = null;
 
+        // Debug: log response structure to understand what the model returns
+        const contentType = Array.isArray(msgObj?.content) ? 'array' : typeof msgObj?.content;
+        const contentParts = Array.isArray(msgObj?.content)
+            ? msgObj.content.map((p: any) => ({ type: p.type, hasUrl: !!p.image_url?.url, textLen: p.text?.length }))
+            : null;
+        console.log(`[AIImage] Response structure: content=${contentType}, images=${msgObj?.images?.length ?? 0}, parts=${JSON.stringify(contentParts)}`);
+
         // Structured images array (preferred)
         if (msgObj?.images?.length > 0) {
             const img = msgObj.images[0];
@@ -160,9 +168,27 @@ export class AIImageService {
             }
         }
 
-        // Fallback: extract from text content
+        // Multipart content array (Gemini returns [{type:'text',...}, {type:'image_url',...}])
+        if (!imageData && Array.isArray(msgObj?.content)) {
+            for (const part of msgObj.content) {
+                if (part.type === 'image_url' && part.image_url?.url) {
+                    imageData = part.image_url.url;
+                    break;
+                }
+            }
+        }
+
+        // Fallback: extract from text content (string or multipart text parts)
         if (!imageData && msgObj?.content) {
-            const text = typeof msgObj.content === 'string' ? msgObj.content : '';
+            let text = '';
+            if (typeof msgObj.content === 'string') {
+                text = msgObj.content;
+            } else if (Array.isArray(msgObj.content)) {
+                text = msgObj.content
+                    .filter((p: any) => p.type === 'text' && p.text)
+                    .map((p: any) => p.text)
+                    .join('\n');
+            }
             const b64Match = text.match(/data:image\/[a-zA-Z]+;base64,[^\s)"']+/);
             if (b64Match) {
                 imageData = b64Match[0];
