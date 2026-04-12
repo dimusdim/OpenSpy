@@ -1,0 +1,2472 @@
+{
+  "$schema": "Sources catalog for AI Worldview — what we load, what we show, what we don't",
+  "generated": "2026-04-12",
+  "sources": [
+    {
+      "id": "opensky",
+      "name": "OpenSky Network",
+      "provider": "OpenSky Network Foundation",
+      "category": "aviation",
+      "layer": "Aircraft",
+      "status": "LIVE",
+      "type": "real-time",
+      "refresh": "90s polling",
+      "endpoints": [
+        "https://opensky-network.org/api/states/all"
+      ],
+      "auth": {
+        "required": true,
+        "method": "OAuth2 client_credentials",
+        "env_keys": ["OPENSKY_USERNAME", "OPENSKY_PASSWORD"],
+        "limits": "4000 credits/day (~90s polling = 3840/day)"
+      },
+      "legend": {
+        "subtypes": ["airliner", "military", "light/GA", "general"],
+        "colors": {
+          "airliner": "white",
+          "military": "red",
+          "light": "lime",
+          "general": "cyan"
+        }
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "lat": "billboard position",
+          "lng": "billboard position",
+          "alt": "billboard altitude (feet→meters)",
+          "heading": "billboard rotation",
+          "type": "icon color/shape selection"
+        },
+        "hud": {
+          "callsign": "IDENTIFIER (entity name)",
+          "type": "CLASS field",
+          "origin": "ORIGIN field",
+          "speed": "speed readout (km/h)",
+          "alt": "altitude in WGS-84 block"
+        },
+        "enrichment": {
+          "aircraft_photo": "Planespotters.net photo via /api/aircraft-photo/:icao24",
+          "route": "origin→destination via /api/routes/:callsign"
+        }
+      },
+      "fields_loaded_not_displayed": {
+        "icao24": "stored in meta, used as ID but not shown as separate field in HUD",
+        "callsign": "used to fetch route but raw callsign not shown as dedicated field"
+      },
+      "fields_available_not_loaded": {
+        "on_ground": "boolean — whether aircraft is on ground. Could filter parked aircraft",
+        "vertical_rate": "m/s climb/descent rate. Could show ascending/descending indicator",
+        "squawk": "transponder code (e.g. 7700=emergency, 7600=radio failure, 7500=hijack). HIGH VALUE for situational awareness",
+        "spi": "Special Position Indicator flag — triggered by pilot. Could highlight distress",
+        "geo_altitude": "geometric altitude (vs barometric). More accurate at high altitudes",
+        "sensors": "array of sensor IDs that detected this aircraft. Could show data quality",
+        "position_source": "0=ADS-B, 1=ASTERIX, 2=MLAT, 3=FLARM. Could indicate data source quality",
+        "category": "aircraft category (0-20): large, small, rotorcraft, glider, UAV, space vehicle, etc. MUCH better classification than our name-based heuristic",
+        "last_contact": "unix timestamp of last message. Could compute staleness/age of data",
+        "time_position": "unix timestamp of last position update. Data freshness indicator"
+      },
+      "api_capabilities_not_used": {
+        "tracks_endpoint": "GET /tracks/all?icao24=X — last 30 days of flight tracks (we only use for selected aircraft)",
+        "flights_endpoint": "GET /flights/all — all flights in time range, arrivals/departures by airport",
+        "metadata_endpoint": "GET /metadata/aircraft/icao24/X — aircraft registration, model, manufacturer, owner"
+      }
+    },
+    {
+      "id": "aisstream",
+      "name": "AISStream",
+      "provider": "AISStream.io",
+      "category": "maritime",
+      "layer": "Vessel",
+      "status": "LIVE",
+      "type": "real-time",
+      "refresh": "WebSocket continuous stream",
+      "endpoints": [
+        "wss://stream.aisstream.io/v0/stream"
+      ],
+      "auth": {
+        "required": true,
+        "method": "API key in WebSocket message",
+        "env_keys": ["AISSTREAM_API_KEY"],
+        "limits": "free tier available"
+      },
+      "legend": {
+        "subtypes": ["cargo", "tanker", "passenger", "fishing", "military", "unknown"],
+        "colors": {
+          "cargo": "orange",
+          "tanker": "red",
+          "passenger": "cyan",
+          "fishing": "lime",
+          "military": "red",
+          "unknown": "gray"
+        }
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "lat": "entity position",
+          "lng": "entity position",
+          "heading": "billboard rotation",
+          "type": "icon color selection",
+          "speed": "SampledPositionProperty interpolation"
+        },
+        "hud": {
+          "MMSI": "IDENTIFIER + dedicated MMSI row",
+          "type": "CLASS field",
+          "speed": "knots",
+          "heading": "degrees"
+        }
+      },
+      "fields_loaded_not_displayed": {
+        "speed": "loaded and shown in HUD, but NOT used to scale visual",
+        "heading": "loaded and shown in HUD"
+      },
+      "fields_available_not_loaded": {
+        "Name": "vessel name from ShipStaticData. HIGH VALUE — currently we only show MMSI number",
+        "CallSign": "radio call sign. Useful for identification",
+        "ImoNumber": "International Maritime Organization number. Permanent vessel identifier (MMSI can change)",
+        "NavigationalStatus": "0=under way using engine, 1=at anchor, 2=not under command, 3=restricted maneuverability, 5=moored, 6=aground, 7=engaged in fishing, 8=under way sailing, 14=AIS-SART (man overboard!). CRITICAL for situational awareness",
+        "RateOfTurn": "degrees/min. Indicates maneuvering",
+        "Cog": "Course Over Ground — actual track direction (vs heading which is bow direction). Shows crabbing/drift",
+        "Destination": "reported destination port. HIGH VALUE for intelligence",
+        "Eta": "Estimated Time of Arrival. Combined with destination gives full route picture",
+        "MaximumStaticDraught": "how deep the hull sits. Indicates cargo load",
+        "Dimension.A": "distance from bow to GPS antenna (meters). A+B = total length",
+        "Dimension.B": "distance from GPS antenna to stern (meters). A+B = total length",
+        "Dimension.C": "distance from port side to GPS antenna (meters). C+D = beam width",
+        "Dimension.D": "distance from GPS antenna to starboard (meters). C+D = beam width",
+        "FixType": "GPS quality (1=GPS, 3=DGPS). Data quality indicator",
+        "SpecialManoeuvreIndicator": "flag for special maneuver in progress",
+        "Timestamp": "seconds within UTC minute of report. Data freshness"
+      },
+      "api_capabilities_not_used": {
+        "area_filtering": "WebSocket subscription can filter by bounding box regions",
+        "ship_type_filtering": "can subscribe to specific ship types only",
+        "mmsi_filtering": "can track specific vessels by MMSI list"
+      }
+    },
+    {
+      "id": "aisstream_dark",
+      "name": "Dark Vessel Detection",
+      "provider": "Own algorithm on AISStream data",
+      "category": "maritime",
+      "layer": "Vessel (dark)",
+      "status": "LIVE",
+      "type": "derived",
+      "refresh": "continuous (>1h gap triggers dark flag)",
+      "endpoints": [],
+      "auth": {
+        "required": false,
+        "method": "uses AISStream data",
+        "env_keys": [],
+        "limits": "n/a"
+      },
+      "legend": {
+        "subtypes": ["dark_vessel"],
+        "colors": {
+          "dark_vessel": "amber/pulsing"
+        }
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "lat": "last known position",
+          "lng": "last known position",
+          "heading": "last known heading",
+          "type": "dark vessel icon"
+        },
+        "hud": {
+          "MMSI": "vessel ID",
+          "lastSeen": "when signal was lost",
+          "darkSince": "duration of silence"
+        }
+      },
+      "fields_loaded_not_displayed": {},
+      "fields_available_not_loaded": {
+        "predicted_position": "could extrapolate from last heading+speed where vessel likely is now",
+        "historical_pattern": "could compare current gap to vessel's typical behavior patterns"
+      }
+    },
+    {
+      "id": "celestrak",
+      "name": "Space-Track → CelesTrak → Ivan TLE (3-source chain) + Spectator Earth",
+      "provider": "Space-Track.org (US Space Command, primary) → CelesTrak (mirror, fallback) → tle.ivanstanojevic.me (JSON API, last resort) + Spectator Earth (sensor enrichment)",
+      "category": "space",
+      "layer": "Satellite",
+      "status": "LIVE",
+      "type": "near-real-time",
+      "refresh": "TLE: 24h cache, Spectator: 24h lazy",
+      "endpoints": [
+        "https://www.space-track.org/basicspacedata/query/class/gp/... (primary, US Space Command)",
+        "https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle (mirror)",
+        "https://celestrak.com/NORAD/elements/gp.php?GROUP=active&FORMAT=tle (mirror 2)",
+        "https://tle.ivanstanojevic.me/api/tle (JSON fallback, paginated)",
+        "https://api.spectator.earth/satellite/ (sensor enrichment)"
+      ],
+      "auth": {
+        "space_track": {
+          "required": false,
+          "method": "Login + session cookie",
+          "env_keys": ["SPACETRACK_EMAIL", "SPACETRACK_PASSWORD"],
+          "note": "Optional. If set, used as primary source (most authoritative). Falls back to CelesTrak/Ivan if not set."
+        },
+        "celestrak": {
+          "required": false,
+          "method": "none",
+          "note": "Public, but rate-limits aggressively (403 bans possible)"
+        },
+        "ivan_tle": {
+          "required": false,
+          "method": "none",
+          "note": "Free JSON API, 24K+ sats, no auth, last resort fallback"
+        },
+        "spectator": {
+          "required": false,
+          "method": "API key",
+          "env_keys": ["SPECTATOR_EARTH_API_KEY"],
+          "note": "Enriches ~55 sats with sensor specs. Without it, no footprint cones."
+        }
+      },
+      "legend": {
+        "subtypes": ["military", "recon", "commercial", "civilian"],
+        "colors": {
+          "military": "red",
+          "recon": "amber",
+          "commercial": "cyan",
+          "civilian": "lime"
+        }
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "tleLine1/2": "SGP4-propagated position + trail polyline (±2h)",
+          "type": "icon color + shape",
+          "recon": "amber eye icon override at 1.8x scale",
+          "sensor.swathMeters": "footprint cone overlay (if > 0)"
+        },
+        "hud": {
+          "name": "IDENTIFIER",
+          "type": "CLASS (military/recon/commercial/civilian)",
+          "alt": "ORBIT classification (LEO/MEO/GEO)",
+          "sensor.sensorName": "footprint panel",
+          "sensor.sensorType": "footprint panel (OPTICAL/SAR)",
+          "sensor.swathMeters": "footprint panel (km)"
+        }
+      },
+      "fields_loaded_not_displayed": {
+        "noradId": "stored in entity properties but never shown in HUD",
+        "reconMeta.resolution": "stored (e.g. '0.31m') but not displayed anywhere",
+        "reconMeta.country": "stored but not shown in HUD",
+        "sensor.platform": "Spectator platform name, stored but unused",
+        "sensor.open": "whether imagery is open-access, stored but unused"
+      },
+      "fields_available_not_loaded": {
+        "COUNTRY_CODE": "CelesTrak GP JSON format includes country code of operator. Better than name heuristic",
+        "LAUNCH_DATE": "launch date of satellite. Context for age/generation",
+        "OBJECT_TYPE": "PAYLOAD, ROCKET BODY, DEBRIS, UNKNOWN. Could filter debris vs active",
+        "RCS_SIZE": "radar cross section: SMALL/MEDIUM/LARGE. Physical size indicator",
+        "PERIOD": "orbital period in minutes. Useful for orbit type classification",
+        "APOAPSIS": "highest orbit point (km). Orbit shape characterization",
+        "PERIAPSIS": "lowest orbit point (km). Orbit shape characterization",
+        "INCLINATION": "embedded in TLE but not extracted as human-readable field. Polar vs equatorial indication",
+        "DECAY_DATE": "predicted re-entry date for decaying satellites",
+        "BSTAR": "drag coefficient — indicates how fast orbit is decaying",
+        "CLASSIFICATION_TYPE": "U=unclassified, C=classified, S=secret. Intelligence value"
+      },
+      "api_capabilities_not_used": {
+        "celestrak_gp_json": "JSON/XML GP format with rich metadata (vs raw TLE). Includes country, launch date, RCS, object type",
+        "celestrak_supplemental": "TLE for classified objects (analyst-derived orbits for spy satellites)",
+        "celestrak_satcat": "full satellite catalog with international designator, launch info, decay status",
+        "spectator_search_imagery": "search for actual satellite imagery over an area. Could show what satellites recently imaged a location",
+        "spectator_tasking": "request new satellite imagery of a target area"
+      }
+    },
+    {
+      "id": "gdacs",
+      "name": "GDACS — Global Disaster Alert",
+      "provider": "European Commission / United Nations",
+      "category": "disasters",
+      "layer": "OSINT",
+      "status": "LIVE",
+      "type": "near-real-time",
+      "refresh": "5 min",
+      "endpoints": [
+        "https://www.gdacs.org/gdacsapi/api/events/geteventlist/MAP"
+      ],
+      "auth": {
+        "required": false,
+        "method": "none",
+        "env_keys": [],
+        "limits": "robots.txt caps at 1 req/60s"
+      },
+      "legend": {
+        "subtypes": ["EQ", "TC", "FL", "VO", "WF", "DR"],
+        "colors": {
+          "Red_alert": "red",
+          "Orange_alert": "orange",
+          "Green_alert": "lime"
+        }
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "eventType": "icon body shape (earthquake ripples, cyclone spiral, etc.)",
+          "alertLevel": "icon fill color (Red/Orange/Green)",
+          "radiusKm": "ellipse impact zone radius",
+          "lat/lng": "billboard position"
+        },
+        "hud": {
+          "description": "DESCRIPTION field",
+          "alertLevel": "ALERT LEVEL badge",
+          "source": "SOURCE field"
+        }
+      },
+      "fields_loaded_not_displayed": {
+        "startTime": "stored but not shown",
+        "endTime": "stored but not shown"
+      },
+      "fields_available_not_loaded": {
+        "alertscore": "numeric severity score. Could rank/sort events",
+        "episodealertscore": "episode-level severity. Distinguishes ongoing vs one-off",
+        "severity": "detailed severity metadata (displaced population, damage level)",
+        "population_affected": "estimated affected population. HIGH VALUE for impact assessment",
+        "country": "affected country. Could use for country-level aggregation",
+        "url": "link to full GDACS event page with detailed reports, maps, satellite imagery",
+        "fromdate/todate": "event time range. Could show event timeline/duration",
+        "description_extended": "full text description with details",
+        "resources": "links to situation reports, maps, satellite damage assessments"
+      },
+      "api_capabilities_not_used": {
+        "resources_endpoint": "/api/events/getresources — satellite imagery, reports, maps per event",
+        "geometry_endpoint": "detailed polygon geometry for flood extents, cyclone tracks",
+        "rss_feed": "real-time RSS feed for instant alerts",
+        "event_episodes": "track event evolution over time (cyclone track progression)"
+      }
+    },
+    {
+      "id": "usgs",
+      "name": "USGS Earthquake Hazards",
+      "provider": "U.S. Geological Survey",
+      "category": "disasters",
+      "layer": "OSINT",
+      "status": "LIVE",
+      "type": "near-real-time",
+      "refresh": "5 min",
+      "endpoints": [
+        "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_week.geojson"
+      ],
+      "auth": {
+        "required": false,
+        "method": "none",
+        "env_keys": [],
+        "limits": "none"
+      },
+      "legend": {
+        "merged_into": "OSINT layer (EQ subtype)"
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "mag": "mapped to alertLevel for color",
+          "coordinates": "position"
+        },
+        "hud": {
+          "place": "used in description/name",
+          "mag": "earthquake magnitude in description"
+        }
+      },
+      "fields_loaded_not_displayed": {},
+      "fields_available_not_loaded": {
+        "depth": "earthquake depth in km. Shallow quakes (<10km) are far more destructive. CRITICAL for impact assessment",
+        "felt": "number of DYFI (Did You Feel It?) reports. Indicates actual human impact",
+        "cdi": "Community Decimal Intensity — actual experienced shaking intensity",
+        "mmi": "Modified Mercalli Intensity — estimated shaking intensity from model",
+        "alert": "PAGER alert level (green/yellow/orange/red) — official USGS impact assessment. Already computed!",
+        "tsunami": "boolean tsunami warning flag. CRITICAL for coastal situational awareness",
+        "sig": "significance score (0-1000). Combines magnitude + impact + felt reports",
+        "magType": "magnitude type (ml, mb, mw). Mw is most reliable for large quakes",
+        "status": "reviewed vs automatic. Quality flag for data reliability",
+        "url": "link to full USGS event page with shakemap, PAGER assessment",
+        "detail": "URL to detailed GeoJSON with ShakeMap, PAGER, moment tensor data",
+        "gap": "azimuthal gap — larger gaps mean less well-constrained location",
+        "nst": "number of stations used. Data quality indicator",
+        "dmin": "distance to nearest station. Closer = better location accuracy",
+        "updated": "last update timestamp. Shows if event parameters were revised"
+      },
+      "api_capabilities_not_used": {
+        "shakemap": "ShakeMap contour data showing predicted ground shaking intensity by area",
+        "pager": "PAGER estimated fatalities and economic losses",
+        "moment_tensor": "focal mechanism — shows fault orientation and rupture type",
+        "historical_queries": "search earthquakes by date range, magnitude range, area"
+      }
+    },
+    {
+      "id": "eonet",
+      "name": "NASA EONET — Earth Observatory Natural Events",
+      "provider": "NASA",
+      "category": "disasters",
+      "layer": "OSINT",
+      "status": "LIVE",
+      "type": "near-real-time",
+      "refresh": "5 min",
+      "endpoints": [
+        "https://eonet.gsfc.nasa.gov/api/v3/events?status=open"
+      ],
+      "auth": {
+        "required": false,
+        "method": "none",
+        "env_keys": [],
+        "limits": "none"
+      },
+      "legend": {
+        "merged_into": "OSINT layer (WF/FL/VO/DR subtypes)"
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "categories": "mapped to event type icon",
+          "geometry.coordinates": "position"
+        },
+        "hud": {
+          "title": "event name/description"
+        }
+      },
+      "fields_loaded_not_displayed": {},
+      "fields_available_not_loaded": {
+        "description": "detailed event description text",
+        "link": "URL to full NASA event page",
+        "closed": "date event was declared over — could show event duration",
+        "sources": "array of data source URLs (NASA, GDACS, USGS, etc.) with direct links",
+        "magnitudeValue": "event magnitude (e.g. fire radiative power, storm wind speed)",
+        "magnitudeUnit": "unit of magnitude measurement",
+        "geometry_history": "multiple geometry entries over time — tracks event movement (e.g. storm track)"
+      },
+      "api_capabilities_not_used": {
+        "category_filter": "filter by event category (wildfires, storms, volcanoes, etc.)",
+        "date_range": "query historical events by date range",
+        "closed_events": "include resolved events for historical analysis"
+      }
+    },
+    {
+      "id": "acled",
+      "name": "ACLED — Armed Conflict Location & Event Data",
+      "provider": "ACLED (acleddata.com)",
+      "category": "conflicts",
+      "layer": "Conflict",
+      "status": "LIVE",
+      "type": "near-real-time",
+      "refresh": "30 min (last 7 days)",
+      "endpoints": [
+        "https://api.acleddata.com/acled/read"
+      ],
+      "auth": {
+        "required": true,
+        "method": "email + API key",
+        "env_keys": ["ACLED_EMAIL", "ACLED_KEY"],
+        "limits": "free academic/non-commercial"
+      },
+      "legend": {
+        "subtypes": ["explosions", "battles", "violence"],
+        "colors": {
+          "explosions": "red",
+          "battles": "orange",
+          "violence": "yellow"
+        }
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "event_type": "icon color (red/orange/yellow)",
+          "fatalities": "billboard scale (>10 = 1.4x, >0 = 1.1x, else 0.9x) + ellipse radius",
+          "lat/lng": "billboard position"
+        },
+        "hud": {
+          "event_type": "part of entity name ('EVENT_TYPE: COUNTRY')",
+          "country": "part of entity name",
+          "sub_event_type": "stored in properties (shown on click)",
+          "fatalities": "stored in properties",
+          "actor1": "stored in properties",
+          "actor2": "stored in properties",
+          "event_date": "stored in properties",
+          "notes": "stored in properties"
+        }
+      },
+      "fields_loaded_not_displayed": {
+        "sub_event_type": "stored but not used for visual differentiation. Could distinguish 'Air/drone strike' from 'Shelling/artillery'",
+        "actor1": "in entity properties but only visible in raw property inspection",
+        "actor2": "same",
+        "notes": "same — detailed incident description text"
+      },
+      "fields_available_not_loaded": {
+        "disorder_type": "higher-level classification: Political violence, Demonstrations, Strategic developments",
+        "interaction": "numeric code for actor interaction type (e.g. Military vs Civilians)",
+        "civilian_targeting": "flag for events specifically targeting civilians. HIGH VALUE for humanitarian monitoring",
+        "assoc_actor_1": "associated/allied actors (e.g. specific militia name under an umbrella group)",
+        "assoc_actor_2": "same for second party",
+        "inter1": "actor type code: State Forces, Rebel Groups, Political Militias, etc.",
+        "inter2": "same for second party",
+        "region": "ACLED region classification (e.g. Middle East, Eastern Europe)",
+        "admin1": "first-level administrative division (state/province)",
+        "admin2": "second-level administrative division (district/county)",
+        "admin3": "third-level administrative division",
+        "location": "specific named location",
+        "geo_precision": "1=exact, 2=near, 3=admin region. Data quality flag",
+        "source": "reporting source name. Could indicate reliability",
+        "source_scale": "source type: International, National, Subnational, New media, Other",
+        "tags": "additional tags and cross-references",
+        "iso3": "ISO 3166-1 alpha-3 country code. Better for cross-referencing",
+        "time_precision": "1=exact date, 2=week, 3=month. Temporal data quality"
+      },
+      "api_capabilities_not_used": {
+        "country_filter": "filter by specific countries or regions",
+        "actor_filter": "track specific armed groups across events",
+        "date_range": "query historical events beyond 7-day window",
+        "event_type_filter": "filter server-side by event category",
+        "export_csv": "bulk export for offline analysis"
+      }
+    },
+    {
+      "id": "gpsjam",
+      "name": "GPSJam.org — GNSS Interference",
+      "provider": "GPSJam.org (community, ADS-B NIC analysis)",
+      "category": "electronic_warfare",
+      "layer": "Jamming",
+      "status": "LIVE",
+      "type": "daily snapshot",
+      "refresh": "6h (daily CSV)",
+      "endpoints": [
+        "https://gpsjam.org/data/{YYYY-MM-DD}-h3_4.csv"
+      ],
+      "auth": {
+        "required": false,
+        "method": "none",
+        "env_keys": [],
+        "limits": "none"
+      },
+      "legend": {
+        "subtypes": ["high", "medium", "low"],
+        "colors": {
+          "high": "red",
+          "medium": "orange",
+          "low": "yellow"
+        }
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "intensity": "determines polygon color (red/orange/yellow), extrude height (80/40/15 km), outline alpha",
+          "boundary": "H3 cell polygon coordinates",
+          "lat/lng": "polygon centroid"
+        },
+        "hud": {
+          "subtype": "intensity level (high/medium/low)",
+          "description": "countBad of total aircraft, ratio %",
+          "source": "'GPSJam.org (ADS-B NIC)'"
+        }
+      },
+      "fields_loaded_not_displayed": {
+        "h3Index": "stored nowhere after polygon generation — could be used for H3 spatial analysis",
+        "countGood": "only used in description text construction",
+        "countBad": "only used in description text construction",
+        "ratio": "only used in description text"
+      },
+      "fields_available_not_loaded": {
+        "_note": "GPSJam CSV is minimal (hex, count_good, count_bad). All fields are loaded. The source is fundamentally limited to aggregate counts per H3 cell."
+      },
+      "api_capabilities_not_used": {
+        "historical_dates": "CSV files available for past dates. Could show jamming trends over time, animate jamming zone expansion/contraction"
+      }
+    },
+    {
+      "id": "firms",
+      "name": "NASA FIRMS — Active Fire Hotspots",
+      "provider": "NASA EOSDIS / LANCE",
+      "category": "disasters",
+      "layer": "Fire",
+      "status": "LIVE",
+      "type": "near-real-time",
+      "refresh": "30 min (last 24h)",
+      "endpoints": [
+        "https://firms.modaps.eosdis.nasa.gov/data/active_fire/suomi-npp-viirs-c2/csv/SUOMI_VIIRS_C2_Global_24h.csv"
+      ],
+      "auth": {
+        "required": false,
+        "method": "none",
+        "env_keys": [],
+        "limits": "none"
+      },
+      "legend": {
+        "subtypes": ["high", "medium", "low"],
+        "colors": {
+          "high_frp_gt100MW": "red",
+          "medium_frp_30_100MW": "orange",
+          "low_frp_lt30MW": "yellow"
+        }
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "frp": "determines dot color (red/orange/yellow) and scale (log2-based 0.25→0.85)",
+          "lat/lng": "billboard position (ground-clamped)"
+        },
+        "hud": {
+          "frp": "FRP in MW",
+          "brightness": "Brightness in K",
+          "confidence": "detection confidence"
+        }
+      },
+      "fields_loaded_not_displayed": {
+        "brightness": "in fireMetaMap, shown in HUD description but not used for map visual",
+        "confidence": "in fireMetaMap, shown in HUD description but not used to filter or style dots"
+      },
+      "fields_available_not_loaded": {
+        "scan": "along-scan pixel size. Indicates detection footprint area",
+        "track": "along-track pixel size. Same",
+        "acq_date": "acquisition date. Could filter by time of day",
+        "acq_time": "acquisition time (HHMM UTC). Could show how recent the detection is",
+        "satellite": "detecting satellite name (Suomi NPP, NOAA-20, etc.)",
+        "instrument": "sensor instrument (VIIRS). Useful if adding MODIS data",
+        "version": "processing algorithm version",
+        "bright_ti5": "brightness temperature in band I5 (11.0 µm). Multi-band analysis for fire characterization",
+        "daynight": "D=day, N=night detection. Night fires have different confidence profiles",
+        "type": "0=presumed vegetation fire, 1=active volcano, 2=other static land source, 3=offshore. HIGH VALUE — could distinguish wildfires from volcanic activity and industrial flares"
+      },
+      "api_capabilities_not_used": {
+        "modis_feed": "MODIS instrument fire data (lower resolution but wider swath, longer history)",
+        "country_feeds": "per-country CSV files for faster parsing",
+        "48h_72h_feeds": "extended time windows (48h, 7-day) for trend analysis",
+        "fire_archive": "historical fire data (months/years) for seasonal analysis",
+        "firms_api": "REST API for programmatic queries with bbox, date, confidence filters"
+      }
+    },
+    {
+      "id": "telegeography",
+      "name": "TeleGeography — Submarine Cables",
+      "provider": "TeleGeography (PriMetrica)",
+      "category": "infrastructure",
+      "layer": "Cable",
+      "status": "LIVE",
+      "type": "static",
+      "refresh": "once at startup",
+      "endpoints": [
+        "https://www.submarinecablemap.com/api/v3/cable/cable-geo.json"
+      ],
+      "auth": {
+        "required": false,
+        "method": "none",
+        "env_keys": [],
+        "limits": "none"
+      },
+      "legend": {
+        "subtypes": [],
+        "note": "no subtype rows — single cyan line style"
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "geometry": "polyline coordinates (ground-clamped, DEEPSKYBLUE 40% alpha)",
+          "name": "entity name"
+        },
+        "hud": {
+          "name": "IDENTIFIER",
+          "layer": "Cable",
+          "subtype": "submarine",
+          "source": "TeleGeography"
+        }
+      },
+      "fields_loaded_not_displayed": {},
+      "fields_available_not_loaded": {
+        "owners": "cable ownership (consortium of telecom companies). HIGH VALUE — shows who controls infrastructure",
+        "year": "year cable became operational. Age/generation indicator",
+        "length": "cable length in km. Scale indicator",
+        "rfs": "Ready For Service date. More precise than year",
+        "url": "link to detailed cable page on submarinecablemap.com",
+        "color": "cable color code from source (could match their visual style)",
+        "landing_points": "where cable comes ashore — available via separate API. Critical infrastructure chokepoints",
+        "capacity": "design capacity in Tbps. Shows strategic importance"
+      },
+      "api_capabilities_not_used": {
+        "landing_points_api": "/api/v3/landing-point/landing-point-geo.json — all cable landing stations worldwide. Major infrastructure targets",
+        "cable_details_api": "/api/v3/cable/:id.json — full cable metadata (owners, capacity, RFS, length, landing points)"
+      }
+    },
+    {
+      "id": "naturalearth",
+      "name": "Natural Earth — Country Borders",
+      "provider": "Natural Earth Data (public domain)",
+      "category": "reference",
+      "layer": "Border",
+      "status": "LIVE",
+      "type": "static",
+      "refresh": "static GeoJSON (110m resolution)",
+      "endpoints": [
+        "local GeoJSON file"
+      ],
+      "auth": {
+        "required": false,
+        "method": "none",
+        "env_keys": [],
+        "limits": "none"
+      },
+      "legend": {
+        "subtypes": [],
+        "note": "no subtype rows — cyan wall"
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "geometry": "Wall geometry (80km tall, cyan semi-transparent)",
+          "adm0_left/right": "border country names"
+        },
+        "hud": {
+          "name": "'Country A — Country B'"
+        }
+      },
+      "fields_loaded_not_displayed": {},
+      "fields_available_not_loaded": {
+        "_note": "Minimal dataset by design. Higher resolution (50m, 10m) variants exist. Additional NaturalEarth datasets available: disputed areas, maritime boundaries, exclusive economic zones (EEZ)."
+      }
+    },
+    {
+      "id": "openaip",
+      "name": "OpenAIP — Airspace Restrictions",
+      "provider": "OpenAIP",
+      "category": "aviation",
+      "layer": "Airspace",
+      "status": "LIVE",
+      "type": "semi-static",
+      "refresh": "1h cache",
+      "endpoints": [
+        "https://api.core.openaip.net/api/airspaces"
+      ],
+      "auth": {
+        "required": true,
+        "method": "API key",
+        "env_keys": ["OPENAIP_API_KEY"],
+        "limits": "free tier, paginated (1000/page)"
+      },
+      "legend": {
+        "subtypes": ["restricted", "danger", "prohibited", "alert", "warning"],
+        "colors": {
+          "restricted": "red",
+          "danger": "orange",
+          "prohibited": "darkred",
+          "alert": "yellow",
+          "warning": "gold"
+        }
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "type": "polygon color selection (5 types)",
+          "geometry": "extruded polygon (lowerLimit → min(upperLimit, 20km))",
+          "upperLimit/lowerLimit": "polygon vertical extent"
+        },
+        "hud": {
+          "name": "zone name",
+          "subtype": "zone type",
+          "description": "'name — lowerLimit→upperLimit m'",
+          "source": "'OpenAIP'"
+        }
+      },
+      "fields_loaded_not_displayed": {
+        "typeName": "stored in meta, used only in HUD description prefix"
+      },
+      "fields_available_not_loaded": {
+        "country": "country code. Could filter airspace by country",
+        "icaoClass": "ICAO airspace classification (A-G). Different rules for each class",
+        "activity": "active/inactive status. Could hide inactive zones",
+        "onDemand": "whether zone activates on demand. Operational planning value",
+        "byNotam": "whether zone activation is NOTAM-dependent. CRITICAL for operational relevance",
+        "specialAgreement": "whether special transit agreement exists",
+        "requestCompliance": "compliance requirement type",
+        "upperLimit_unit": "FL (flight level) vs meters vs feet. Currently converted but unit lost",
+        "lowerLimit_unit": "same"
+      },
+      "api_capabilities_not_used": {
+        "airports_endpoint": "/api/airports — worldwide airport data with runways, frequencies, navaids",
+        "navaids_endpoint": "/api/navaids — VOR, NDB, DME navigation aids",
+        "hotspots_endpoint": "/api/hotspots — thermal/ridge soaring hotspots",
+        "reporting_points": "/api/reporting-points — mandatory/voluntary reporting points"
+      }
+    },
+    {
+      "id": "gfw",
+      "name": "Global Fishing Watch — Dark Vessel Events",
+      "provider": "Global Fishing Watch",
+      "category": "maritime",
+      "layer": "GFW",
+      "status": "LIVE",
+      "type": "near-real-time",
+      "refresh": "1h",
+      "endpoints": [
+        "https://gateway.api.globalfishingwatch.org/v3/events"
+      ],
+      "auth": {
+        "required": true,
+        "method": "Bearer token",
+        "env_keys": ["GFW_TOKEN"],
+        "limits": "free non-commercial"
+      },
+      "legend": {
+        "subtypes": [],
+        "note": "no subtype rows — single purple diamond icon"
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "lat/lng": "billboard position (ground level)",
+          "all": "fixed purple warning diamond icon + 40km ellipse"
+        },
+        "hud": {
+          "vesselName": "part of entity name ('GFW: NAME (FLAG)')",
+          "flagState": "part of entity name"
+        }
+      },
+      "fields_loaded_not_displayed": {
+        "type": "stored as subtype but NOT used to differentiate visuals (all get same icon)",
+        "vesselId": "stored but not shown",
+        "start": "event start time, stored but not shown",
+        "end": "event end time, stored but not shown"
+      },
+      "fields_available_not_loaded": {
+        "event_info": "detailed event metadata (gap duration, distance traveled during gap)",
+        "distances": "distance from shore, distance from port. Contextual risk indicator",
+        "regions_info": "EEZ, RFMO, FAO area where event occurred. Jurisdictional context",
+        "encounter_info": "for encounter events: other vessel ID, distance, duration. Ship-to-ship transfer intelligence",
+        "vessel_details": "full vessel profile: MMSI, IMO, registry, length, tonnage, gear type",
+        "authorization_status": "whether vessel was authorized to fish in that area. Compliance indicator"
+      },
+      "api_capabilities_not_used": {
+        "vessel_search": "/v3/vessels — search vessel database by name, MMSI, IMO, flag, gear type",
+        "vessel_tracks": "/v3/vessels/{id}/tracks — full AIS track history of a vessel",
+        "fishing_effort": "/v3/4wings/tile — fishing effort heatmap tiles (gridded fishing hours)",
+        "encounters": "/v3/events?datasets=encounters — ship-to-ship meetings at sea",
+        "loitering": "/v3/events?datasets=loitering — vessels stopping in open ocean",
+        "port_visits": "/v3/events?datasets=port-visits — vessel port call history",
+        "eez_crossing": "vessel movement across Exclusive Economic Zone boundaries"
+      }
+    },
+    {
+      "id": "ioda",
+      "name": "IODA — Internet Outage Detection & Analysis",
+      "provider": "CAIDA / UC San Diego",
+      "category": "infrastructure",
+      "layer": "Outage",
+      "status": "LIVE",
+      "type": "near-real-time",
+      "refresh": "10 min (last 24h)",
+      "endpoints": [
+        "https://api.ioda.caida.org/dev/outages/alerts/country"
+      ],
+      "auth": {
+        "required": false,
+        "method": "none",
+        "env_keys": [],
+        "limits": "none"
+      },
+      "legend": {
+        "subtypes": ["critical", "warning"],
+        "colors": {
+          "critical": "red",
+          "warning": "orange"
+        }
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "level": "icon + scale (critical=1.4x red, warning=1.1x orange)",
+          "level_ellipse": "critical=300km, warning=200km radius",
+          "countryCode": "label text on map",
+          "lat/lng": "country centroid position"
+        },
+        "hud": {
+          "country": "metadata",
+          "countryCode": "shown as label",
+          "level": "severity",
+          "source": "'IODA'"
+        }
+      },
+      "fields_loaded_not_displayed": {
+        "datasource": "BGP/active-probing/merit-nt — stored but not shown. Could indicate detection method",
+        "startTime": "stored but not explicitly shown as time"
+      },
+      "fields_available_not_loaded": {
+        "condition": "alert condition details (threshold, current value)",
+        "time.from": "precise outage start time",
+        "time.until": "outage end time (if resolved)",
+        "method": "detection method details",
+        "scores": "severity scores from each data source",
+        "asn_level_data": "ASN-level outage detection (more granular than country)"
+      },
+      "api_capabilities_not_used": {
+        "signals_endpoint": "/signals/ — raw BGP/active-probing/darknet signals over time. Could show connectivity trends",
+        "events_endpoint": "/outages/events/ — aggregated outage events with timeline",
+        "asn_alerts": "/outages/alerts/asn — per-ASN outage alerts (finer granularity than country)",
+        "region_alerts": "/outages/alerts/region — continental/regional aggregation",
+        "historical_data": "query outages over custom date ranges for trend analysis"
+      }
+    },
+    {
+      "id": "cloudflare_radar",
+      "name": "Cloudflare Radar — Internet Outages",
+      "provider": "Cloudflare",
+      "category": "infrastructure",
+      "layer": "Outage",
+      "status": "LIVE",
+      "type": "near-real-time",
+      "refresh": "15 min (last 24h)",
+      "endpoints": [
+        "https://api.cloudflare.com/client/v4/radar/annotations/outages"
+      ],
+      "auth": {
+        "required": true,
+        "method": "Bearer token",
+        "env_keys": ["CLOUDFLARE_API_TOKEN"],
+        "limits": "free (Cloudflare account + Radar Read permission)"
+      },
+      "legend": {
+        "merged_into": "Outage layer (warning subtype)"
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "locations[0]": "centroid lookup for position",
+          "all": "fixed orange warning icon + 150km ellipse"
+        },
+        "hud": {
+          "asnName": "part of entity name",
+          "asn": "fallback identifier"
+        }
+      },
+      "fields_loaded_not_displayed": {
+        "outageType": "stored in properties but never shown in HUD",
+        "outageCause": "stored but never shown — could be 'Cable cut', 'Government shutdown', etc. HIGH VALUE",
+        "startDate": "stored but not shown",
+        "endDate": "stored but not shown",
+        "locations": "only first element used, rest ignored. Multiple-location outages are mispositioned"
+      },
+      "fields_available_not_loaded": {
+        "linkedUrl": "link to Cloudflare Radar page for the outage",
+        "asNs": "multiple affected ASNs (we only read primary asn)",
+        "description": "human-readable outage description"
+      },
+      "api_capabilities_not_used": {
+        "traffic_endpoint": "/radar/http/timeseries — HTTP traffic volume trends by country/ASN",
+        "attack_endpoint": "/radar/attacks/ — DDoS attack data (type, target, origin)",
+        "bgp_endpoint": "/radar/bgp/ — BGP route announcements, hijacks, leaks. INTELLIGENCE VALUE",
+        "dns_endpoint": "/radar/dns/ — DNS query trends and anomalies",
+        "quality_endpoint": "/radar/quality/ — connection quality metrics (speed, latency)",
+        "ranking_endpoint": "/radar/ranking/ — top domains and trending services"
+      }
+    },
+    {
+      "id": "osm_overpass",
+      "name": "OpenStreetMap Overpass — Critical Infrastructure",
+      "provider": "OpenStreetMap Foundation (via Overpass API mirrors)",
+      "category": "infrastructure",
+      "layer": "Infrastructure",
+      "status": "LIVE",
+      "type": "semi-static",
+      "refresh": "1h per bbox tile (2°×2° cells, LRU 80 tiles)",
+      "endpoints": [
+        "https://overpass.kumi.systems/api/interpreter",
+        "https://overpass-api.de/api/interpreter"
+      ],
+      "auth": {
+        "required": false,
+        "method": "none",
+        "env_keys": [],
+        "limits": "soft rate limits, max 50MB response"
+      },
+      "legend": {
+        "subtypes": ["power_plant", "power_substation", "power_line", "refinery", "desalination", "military"],
+        "colors": {
+          "power_plant": "yellow",
+          "refinery": "red",
+          "desalination": "blue",
+          "military": "gray",
+          "power_substation": "orange",
+          "power_line": "orange (line)"
+        }
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "type": "icon selection (lightning/factory/drop/shield/zap)",
+          "coordinates": "polyline geometry (power lines only)",
+          "lat/lng": "billboard position"
+        },
+        "hud": {
+          "name": "facility name",
+          "subtype": "facility type",
+          "source": "'OpenStreetMap'"
+        }
+      },
+      "fields_loaded_not_displayed": {},
+      "fields_available_not_loaded": {
+        "plant:source": "energy source for power plants (nuclear/coal/gas/solar/wind/hydro). HIGH VALUE — we query it but only for power-infra, not critical infra",
+        "voltage": "transmission voltage. Indicates grid importance (400kV = backbone, 110kV = distribution)",
+        "operator": "who operates the facility. Strategic intelligence",
+        "product": "what a refinery/factory produces",
+        "capacity": "generation capacity (MW) for power plants",
+        "construction_year": "facility age",
+        "wikidata": "Wikidata ID for cross-referencing with Wikipedia",
+        "start_date": "when facility was built/commissioned",
+        "military_type": "specific military installation type (airfield, barracks, naval base, range, training area)",
+        "landuse_details": "broader land use context around the facility",
+        "access": "public/private/military access restrictions"
+      },
+      "api_capabilities_not_used": {
+        "temporal_queries": "Overpass supports date-based queries to see historical OSM state",
+        "relation_queries": "query complex multipolygon relations (e.g. full military base perimeters)",
+        "tag_combinations": "much richer query combinations: amenity=fuel, aeroway=aerodrome, industrial=port, etc.",
+        "count_queries": "get counts without full geometry for quick density checks"
+      }
+    },
+    {
+      "id": "osm_pipelines",
+      "name": "OpenStreetMap Overpass — Oil & Gas Pipelines",
+      "provider": "OpenStreetMap Foundation (via Overpass API)",
+      "category": "infrastructure",
+      "layer": "Pipeline",
+      "status": "LIVE",
+      "type": "static",
+      "refresh": "one-shot fetch",
+      "endpoints": [
+        "https://overpass.kumi.systems/api/interpreter"
+      ],
+      "auth": {
+        "required": false,
+        "method": "none",
+        "env_keys": [],
+        "limits": "same as infrastructure"
+      },
+      "legend": {
+        "subtypes": ["oil", "gas"],
+        "colors": {
+          "oil": "red",
+          "gas": "dodgerblue"
+        }
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "substance": "line color (red=oil, blue=gas)",
+          "coordinates": "polyline geometry"
+        },
+        "hud": {
+          "name": "pipeline name",
+          "substance": "oil/gas",
+          "source": "'OpenStreetMap'"
+        }
+      },
+      "fields_loaded_not_displayed": {},
+      "fields_available_not_loaded": {
+        "operator": "pipeline operator company. Strategic intelligence",
+        "diameter": "pipe diameter. Indicates capacity/importance",
+        "pressure": "operating pressure",
+        "usage": "transmission vs distribution. Transmission = strategic backbone",
+        "destination": "where pipeline goes",
+        "start_date": "construction date",
+        "capacity": "throughput capacity",
+        "status_tag": "proposed/construction/operational/abandoned. Could filter to show only active",
+        "location": "underground/overground/underwater. Vulnerability indicator"
+      }
+    },
+    {
+      "id": "overture",
+      "name": "Overture Maps — Infrastructure Enrichment",
+      "provider": "Overture Maps Foundation (Linux Foundation)",
+      "category": "infrastructure",
+      "layer": "Infrastructure (enrichment, merged with Overpass)",
+      "status": "LIVE",
+      "type": "static",
+      "refresh": "version-tied DuckDB cache (default version 2026-03-18.0). New Overture release = re-download (10-25 min, 200-500 MB)",
+      "endpoints": [
+        "s3://overturemaps-us-west-2/release/{version}/"
+      ],
+      "auth": {
+        "required": false,
+        "method": "public S3 GeoParquet via DuckDB + httpfs",
+        "env_keys": ["OVERTURE_ENABLED=true (opt-in feature flag)"],
+        "limits": "max 50MB per DuckDB query, 65s timeout"
+      },
+      "legend": {
+        "merged_into": "Infrastructure layer (deduped against Overpass within 555m radius)"
+      },
+      "overture_themes_loaded": {
+        "base/land_use": {
+          "subtypes": {
+            "military": "→ mapped to type 'military' (shield icon)",
+            "resource_extraction": "→ mapped to type 'refinery' (factory icon)"
+          }
+        },
+        "base/infrastructure": {
+          "power": {
+            "classes": ["substation", "power_substation", "plant", "power_plant", "transformer", "switch", "compensator"],
+            "mapping": "substation/power_substation → 'power_substation'; all others → 'power_plant'"
+          },
+          "water": {
+            "classes": ["dam", "reservoir", "water_treatment", "wastewater"],
+            "mapping": "all → 'desalination' (water drop icon, icon reuse)"
+          },
+          "communication": {
+            "classes": ["communication_tower", "mobile_phone_tower"],
+            "mapping": "all → 'power_substation' (orange zap icon, icon reuse)"
+          },
+          "airport": {
+            "classes": ["aerodrome"],
+            "mapping": "all → 'military' (shield icon, icon reuse)"
+          }
+        }
+      },
+      "endpoint_filter": {
+        "note": "/api/infrastructure serves only: power_plant, refinery, desalination, military. Power substations and communication towers are loaded into DuckDB but filtered out at the REST endpoint level via INFRA_ENDPOINT_TYPES set.",
+        "served_types": ["power_plant", "refinery", "desalination", "military"],
+        "loaded_but_filtered_out": ["power_substation (from Overture, shown only via /api/power-infra)", "communication_tower (mapped to power_substation, only via /api/power-infra)"]
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "lat/lng": "billboard position (from DuckDB bbox centroid)",
+          "type": "icon selection (same as Overpass infrastructure icons)",
+          "name": "from Overture names.primary field"
+        },
+        "hud": {
+          "name": "facility name",
+          "subtype": "infrastructure type",
+          "source": "'overture' (distinguishes from Overpass-sourced records)"
+        }
+      },
+      "fields_loaded_not_displayed": {
+        "filename": "S3 parquet filename stored per record for future geometry-on-click feature (NOT implemented yet)",
+        "subtype_original": "original Overture subtype before mapping (lost in type conversion)",
+        "class_original": "original Overture class before mapping (lost in type conversion)"
+      },
+      "overture_themes_not_loaded": {
+        "buildings": "3D building footprints with height. Could enrich military base / refinery visualization with perimeter outlines",
+        "places": "points of interest: embassies, government buildings, airports, hospitals, ports. HIGH VALUE for intelligence overlay",
+        "addresses": "address data for facilities. Cross-referencing and identification",
+        "transportation": "road and rail network with functional classification. Supply routes, logistics corridors, bridge/tunnel chokepoints",
+        "land": "land use/land cover polygons. Could identify military/industrial zones by area, not just points",
+        "water": "water bodies, rivers, coastline. Strategic water infrastructure and natural boundaries",
+        "divisions": "administrative boundaries, geopolitical divisions. Could replace/supplement NaturalEarth borders"
+      }
+    },
+    {
+      "id": "tomtom",
+      "name": "TomTom — Traffic Flow Tiles",
+      "provider": "TomTom",
+      "category": "traffic",
+      "layer": "Traffic",
+      "status": "LIVE",
+      "type": "real-time",
+      "refresh": "on-demand tiles (60s cache-control)",
+      "endpoints": [
+        "https://api.tomtom.com/traffic/map/4/tile/flow/"
+      ],
+      "auth": {
+        "required": true,
+        "method": "API key",
+        "env_keys": ["TOMTOM_API_KEY"],
+        "limits": "50,000 tiles/day free"
+      },
+      "legend": {
+        "subtypes": [],
+        "note": "raster overlay — no individual features"
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "raster_tile": "semi-transparent overlay (alpha 0.6) showing color-coded traffic speed"
+        },
+        "hud": {
+          "none": "raster tiles — not clickable"
+        }
+      },
+      "fields_loaded_not_displayed": {
+        "_note": "Frontend uses raster PNG tiles only. Backend also serves PBF vector tiles via /api/traffic/tile/:z/:x/:y but no frontend layer renders them."
+      },
+      "fields_available_not_loaded": {
+        "currentSpeed": "current traffic speed per road segment (from PBF vector format)",
+        "freeFlowSpeed": "normal speed when no traffic. Needed to compute delay",
+        "currentTravelTime": "travel time for segment",
+        "freeFlowTravelTime": "normal travel time. Delay = current - freeflow",
+        "confidence": "data confidence score",
+        "roadClosure": "road closure flag. HIGH VALUE for logistics/military movement analysis",
+        "incidents": "TomTom incidents API has accidents, road works, closures"
+      },
+      "api_capabilities_not_used": {
+        "vector_tiles": "PBF format gives individual road segments with speed, travel time, closure data",
+        "incidents_api": "real-time traffic incidents: accidents, road closures, construction, weather events",
+        "routing_api": "actual route calculations with traffic-aware ETAs",
+        "traffic_stats": "historical traffic patterns by time of day/week"
+      }
+    },
+    {
+      "id": "here",
+      "name": "HERE Traffic — Flow Data",
+      "provider": "HERE Technologies",
+      "category": "traffic",
+      "layer": "Traffic (alt provider)",
+      "status": "LIVE",
+      "type": "real-time",
+      "refresh": "on-demand per bbox",
+      "endpoints": [
+        "https://data.traffic.hereapi.com/v7/flow"
+      ],
+      "auth": {
+        "required": true,
+        "method": "API key",
+        "env_keys": ["HERE_API_KEY"],
+        "limits": "250,000 transactions/month free"
+      },
+      "legend": {
+        "merged_into": "Traffic layer (raw data passed through, not actively visualized)"
+      },
+      "fields_displayed": {
+        "note": "full API response passed through to frontend but no dedicated visualization layer exists"
+      },
+      "fields_loaded_not_displayed": {
+        "results": "entire response array is returned but no frontend layer consumes it"
+      },
+      "fields_available_not_loaded": {
+        "currentSpeed": "km/h per road segment",
+        "freeFlowSpeed": "normal speed — needed for congestion calculation",
+        "jamFactor": "0-10 congestion scale. UNIQUE to HERE — high value for traffic intelligence. 10 = complete standstill",
+        "confidence": "measurement confidence",
+        "traversability": "whether road is traversable",
+        "shape": "road segment geometry coordinates (when locationReferencing=shape)",
+        "currentTravelTime": "seconds to traverse segment",
+        "freeFlowTravelTime": "normal travel time"
+      },
+      "api_capabilities_not_used": {
+        "incidents_api": "HERE incidents: accidents, construction, lane restrictions, weather",
+        "routing_api": "route calculation with real-time traffic",
+        "isoline_api": "reachability polygons (how far can you go in X minutes)",
+        "fleet_api": "fleet telematics data"
+      }
+    },
+    {
+      "id": "webcams_livenv",
+      "name": "Live-Environment-Streams — Webcams",
+      "provider": "willytop8 (GitHub community project)",
+      "category": "monitoring",
+      "layer": "Webcam",
+      "status": "LIVE",
+      "type": "real-time",
+      "refresh": "1h cache",
+      "endpoints": [
+        "https://raw.githubusercontent.com/willytop8/Live-Environment-Streams/main/streams.geojson"
+      ],
+      "auth": {
+        "required": false,
+        "method": "none",
+        "env_keys": [],
+        "limits": "none (static GeoJSON)"
+      },
+      "legend": {
+        "subtypes": [],
+        "note": "cyan camera icon, no subtypes"
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "lat/lng": "billboard position"
+        },
+        "hud": {
+          "name": "camera name",
+          "source": "source provider",
+          "url": "HLS stream (played in WebcamPlayer)",
+          "playerUrl": "embed player iframe",
+          "imageUrl": "preview thumbnail"
+        }
+      },
+      "fields_loaded_not_displayed": {
+        "quality": "stream quality rating — not shown anywhere",
+        "country": "camera country — not shown"
+      },
+      "fields_available_not_loaded": {
+        "category": "traffic/urban/coastal/mountain/marina. Could filter by purpose",
+        "description": "camera description text"
+      }
+    },
+    {
+      "id": "webcams_caltrans",
+      "name": "Caltrans — California Traffic Cameras",
+      "provider": "California Department of Transportation",
+      "category": "monitoring",
+      "layer": "Webcam",
+      "status": "LIVE",
+      "type": "real-time",
+      "refresh": "1h cache",
+      "endpoints": [
+        "https://cwwp2.dot.ca.gov/data/d{district}/cctv/cctvStatusD{XX}.json"
+      ],
+      "auth": {
+        "required": false,
+        "method": "none",
+        "env_keys": [],
+        "limits": "none"
+      },
+      "legend": {
+        "merged_into": "Webcam layer"
+      },
+      "fields_displayed": {
+        "same_as": "webcams_livenv"
+      },
+      "fields_loaded_not_displayed": {},
+      "fields_available_not_loaded": {
+        "location.description": "full location description (freeway, direction, cross street)",
+        "location.locationName": "detailed location name",
+        "imageData.imageURL": "still image capture URL (vs stream)",
+        "currentStatus": "camera operational status (active/inactive)"
+      }
+    },
+    {
+      "id": "windy_webcams",
+      "name": "Windy — Global Webcams",
+      "provider": "Windy.com",
+      "category": "monitoring",
+      "layer": "Webcam",
+      "status": "LIVE",
+      "type": "real-time",
+      "refresh": "30 min (image URLs expire in 10 min)",
+      "endpoints": [
+        "https://api.windy.com/webcams/api/v3/webcams"
+      ],
+      "auth": {
+        "required": true,
+        "method": "API key",
+        "env_keys": ["WINDY_API_KEY"],
+        "limits": "free tier: 50/request, max 1000 offset"
+      },
+      "legend": {
+        "merged_into": "Webcam layer"
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "lat/lng": "billboard position"
+        },
+        "hud": {
+          "title": "camera name",
+          "playerUrl": "embed iframe (live or day-lapse)",
+          "imageUrl": "preview/thumbnail image"
+        }
+      },
+      "fields_loaded_not_displayed": {},
+      "fields_available_not_loaded": {
+        "player.live.available": "whether live stream is actually available. Currently we prefer live but don't check",
+        "status": "webcam active/inactive status",
+        "lastUpdatedOn": "when webcam last sent an image",
+        "categories": "camera categories (traffic, beach, city, mountain, etc.)",
+        "url.current": "direct image URL (not embed)",
+        "url.edit": "link to edit webcam on windy.com"
+      },
+      "api_capabilities_not_used": {
+        "category_filter": "filter by camera category",
+        "country_filter": "filter by country",
+        "continent_filter": "filter by continent",
+        "exclude_filter": "exclude specific webcams",
+        "nearby_search": "search within radius of a point (we do use this, but limited)"
+      }
+    },
+    {
+      "id": "oilprices",
+      "name": "Yahoo Finance + EIA — Oil Prices",
+      "provider": "Yahoo Finance (real-time) + U.S. Energy Information Administration (official)",
+      "category": "commodities",
+      "layer": "Widget (OilPricesWidget)",
+      "status": "LIVE",
+      "type": "real-time",
+      "refresh": "5 min",
+      "endpoints": [
+        "yahoo-finance2 npm package (BZ=F, CL=F tickers)",
+        "https://api.eia.gov/v2/petroleum/pri/spt/data/"
+      ],
+      "auth": {
+        "required": false,
+        "method": "EIA key optional, Yahoo scraping",
+        "env_keys": ["EIA_API_KEY"],
+        "limits": "Yahoo has implicit rate limits"
+      },
+      "legend": {
+        "subtypes": [],
+        "note": "displayed as floating widget, not map layer"
+      },
+      "fields_displayed": {
+        "widget": {
+          "brent.price": "current Brent crude price in USD",
+          "wti.price": "current WTI crude price in USD",
+          "brent.change": "price change",
+          "brent.changePercent": "percentage change",
+          "wti.change": "price change",
+          "wti.changePercent": "percentage change",
+          "spread": "Brent-WTI spread",
+          "updatedAt": "last update timestamp"
+        }
+      },
+      "fields_loaded_not_displayed": {
+        "source": "yahoo vs eia fallback indicator — not shown to user"
+      },
+      "fields_available_not_loaded": {
+        "yahoo_historical": "full price history (daily OHLCV candles)",
+        "yahoo_volume": "trading volume. Liquidity/interest indicator",
+        "yahoo_day_range": "daily high/low range",
+        "yahoo_52week_range": "52-week high/low",
+        "eia_inventories": "US petroleum inventory levels (crude, gasoline, distillates). STRATEGIC VALUE",
+        "eia_production": "US daily production rates",
+        "eia_imports_exports": "petroleum trade flows",
+        "natural_gas_price": "Henry Hub natural gas spot price. Complementary commodity"
+      }
+    },
+    {
+      "id": "owid_energy",
+      "name": "Our World in Data — Country Energy Statistics",
+      "provider": "Our World in Data (Oxford University)",
+      "category": "energy",
+      "layer": "Data layer (no map visual)",
+      "status": "LIVE",
+      "type": "static/annual",
+      "refresh": "once at startup",
+      "endpoints": [
+        "https://owid-public.owid.io/data/energy/owid-energy-data.csv",
+        "https://api.worldbank.org/v2/country/all/indicator/EG.IMP.CONS.ZS"
+      ],
+      "auth": {
+        "required": false,
+        "method": "none",
+        "env_keys": [],
+        "limits": "none"
+      },
+      "legend": {
+        "subtypes": [],
+        "note": "no map visualization — data served via /api/energy endpoint"
+      },
+      "fields_displayed": {
+        "note": "data available via API but no dedicated map visualization exists"
+      },
+      "fields_loaded_not_displayed": {
+        "oil_production": "country-level oil production — loaded but not visualized on map",
+        "oil_consumption": "loaded but not visualized",
+        "fossil_fuel_consumption": "loaded but not visualized",
+        "energy_per_capita": "loaded but not visualized",
+        "coal_production": "loaded but not visualized",
+        "gas_production": "loaded but not visualized",
+        "renewables_share_energy": "loaded but not visualized",
+        "electricity_generation": "loaded but not visualized",
+        "carbon_intensity_elec": "loaded but not visualized",
+        "energy_import_dependency": "from World Bank, loaded but not visualized"
+      },
+      "fields_available_not_loaded": {
+        "_note": "OWID CSV has 100+ columns. We load ~12. Selected high-value missing fields:",
+        "nuclear_electricity": "nuclear power generation by country",
+        "hydropower_electricity": "hydro generation",
+        "solar_electricity": "solar generation",
+        "wind_electricity": "wind generation",
+        "biofuel_consumption": "biofuel usage",
+        "primary_energy_consumption": "total primary energy (broadest measure)",
+        "energy_cons_change_pct": "year-over-year change. Trend indicator",
+        "oil_share_energy": "share of oil in energy mix. Energy security indicator",
+        "gas_share_energy": "share of gas",
+        "coal_share_energy": "share of coal"
+      }
+    },
+    {
+      "id": "nasa_gibs",
+      "name": "NASA GIBS — Cloud Cover / True Color",
+      "provider": "NASA EOSDIS / GIBS",
+      "category": "imagery",
+      "layer": "Imagery overlay",
+      "status": "LIVE",
+      "type": "daily",
+      "refresh": "daily MODIS imagery",
+      "endpoints": [
+        "https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/"
+      ],
+      "auth": {
+        "required": false,
+        "method": "none",
+        "env_keys": [],
+        "limits": "none"
+      },
+      "legend": {
+        "subtypes": [],
+        "note": "imagery overlay toggle"
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "tile_imagery": "MODIS cloud cover overlay"
+        }
+      },
+      "fields_loaded_not_displayed": {},
+      "fields_available_not_loaded": {
+        "true_color": "MODIS_Terra_CorrectedReflectance_TrueColor — daily true color at 250m resolution",
+        "night_lights": "VIIRS Black Marble night lights imagery. Could show power outages visually",
+        "sea_surface_temp": "MODIS sea surface temperature. Maritime/climate context",
+        "snow_cover": "MODIS snow cover. Terrain/logistics context",
+        "vegetation_index": "MODIS NDVI — green vs barren land. Change detection over time",
+        "aerosol_optical_depth": "atmospheric haze/smoke detection. Correlates with fires and pollution",
+        "dust_score": "dust storm detection. Relevant for military operations"
+      },
+      "api_capabilities_not_used": {
+        "date_parameter": "date= parameter for historical imagery. Before/after comparison",
+        "multiple_layers": "100+ layers available: thermal, precipitation, sea ice, ozone, etc.",
+        "animation": "temporal animation of daily images"
+      }
+    },
+    {
+      "id": "openaq",
+      "name": "OpenAQ — Air Quality",
+      "provider": "OpenAQ Inc.",
+      "category": "environmental",
+      "layer": "Not active (code exists but not started)",
+      "status": "PLANNED",
+      "type": "near-real-time",
+      "refresh": "code exists but fetchAirQuality not called in service start()",
+      "endpoints": [
+        "https://api.openaq.org/v3/locations"
+      ],
+      "auth": {
+        "required": false,
+        "method": "none",
+        "env_keys": [],
+        "limits": "none"
+      },
+      "legend": {
+        "subtypes": [],
+        "note": "no layer exists yet"
+      },
+      "fields_displayed": {
+        "note": "service code exists but is not activated — no frontend layer"
+      },
+      "fields_loaded_not_displayed": {},
+      "fields_available_not_loaded": {
+        "pm25": "PM2.5 particulate matter — primary air quality indicator",
+        "pm10": "PM10 coarser particles",
+        "o3": "ground-level ozone",
+        "no2": "nitrogen dioxide — traffic/industrial indicator",
+        "so2": "sulfur dioxide — industrial/volcanic indicator",
+        "co": "carbon monoxide",
+        "sensor_values": "actual measured values from each sensor at each station",
+        "measurement_count": "number of measurements. Data reliability indicator"
+      },
+      "api_capabilities_not_used": {
+        "measurements_endpoint": "/v3/measurements — actual measurement values (not just station locations)",
+        "parameters_endpoint": "/v3/parameters — list of all measured parameters",
+        "latest_endpoint": "/v3/latest — most recent measurement per station",
+        "averages_endpoint": "temporal averages (hourly, daily) for trend analysis"
+      }
+    },
+    {
+      "id": "spectator_earth",
+      "name": "Spectator Earth — Satellite Imagery Catalog",
+      "provider": "Spectator Earth",
+      "category": "space",
+      "layer": "Satellite (enrichment only)",
+      "status": "LIVE",
+      "type": "static catalog",
+      "refresh": "24h lazy refresh (~55 satellites)",
+      "endpoints": [
+        "https://api.spectator.earth/satellite/"
+      ],
+      "auth": {
+        "required": true,
+        "method": "API key",
+        "env_keys": ["SPECTATOR_EARTH_API_KEY"],
+        "limits": "free tier"
+      },
+      "legend": {
+        "merged_into": "Satellite layer (footprint rendering)"
+      },
+      "fields_displayed": {
+        "used_for": "enriching CelesTrak satellites with sensor metadata for footprint cones"
+      },
+      "fields_loaded_not_displayed": {
+        "open": "whether satellite data is freely available — not shown",
+        "platform": "satellite platform/bus type — not shown"
+      },
+      "fields_available_not_loaded": {
+        "search_imagery": "Spectator has image search API — find actual captured imagery over an area",
+        "acquisition_plans": "planned satellite passes over a location",
+        "imagery_metadata": "resolution, bands, cloud cover for available imagery"
+      }
+    },
+    {
+      "id": "copernicus",
+      "name": "Copernicus / Sentinel Hub — High-Res Imagery",
+      "provider": "European Space Agency (ESA) / Copernicus",
+      "category": "imagery",
+      "layer": "Not integrated",
+      "status": "NEEDS_KEY",
+      "type": "near-real-time",
+      "refresh": "Sentinel-2 revisit: 5 days",
+      "endpoints": [
+        "https://dataspace.copernicus.eu"
+      ],
+      "auth": {
+        "required": true,
+        "method": "OAuth2",
+        "env_keys": [],
+        "limits": "10,000 Processing Units/month free"
+      },
+      "fields_available_not_loaded": {
+        "sentinel2_rgb": "10m resolution true color imagery",
+        "sentinel2_nir": "near-infrared band — vegetation health",
+        "sentinel2_swir": "short-wave infrared — burn scar detection",
+        "sentinel1_sar": "SAR imagery — see through clouds, detect ships/changes. VERY HIGH VALUE",
+        "change_detection": "compare two dates to detect construction, destruction, troop movements"
+      }
+    },
+    {
+      "id": "road511",
+      "name": "Road511 — US/Canada Traffic Cameras",
+      "provider": "Road511.com",
+      "category": "monitoring",
+      "layer": "Not integrated",
+      "status": "NEEDS_KEY",
+      "type": "real-time",
+      "endpoints": [
+        "https://api.road511.com"
+      ],
+      "auth": {
+        "required": true,
+        "method": "API key",
+        "env_keys": [],
+        "limits": "free developer key"
+      },
+      "fields_available_not_loaded": {
+        "cameras": "10,000+ cameras across 57 US/Canadian jurisdictions with GeoJSON + stream URLs"
+      }
+    },
+    {
+      "id": "nasa_dip_notams",
+      "name": "NASA DIP — Structured NOTAMs",
+      "provider": "NASA Ames Research Center",
+      "category": "aviation",
+      "layer": "Not integrated (service deleted)",
+      "status": "NEEDS_KEY",
+      "type": "near-real-time",
+      "endpoints": [
+        "https://dip.amesaero.nasa.gov"
+      ],
+      "auth": {
+        "required": true,
+        "method": "DIP account",
+        "env_keys": [],
+        "limits": "free registration"
+      },
+      "fields_available_not_loaded": {
+        "notam_polygon": "NOTAM geographic boundary (polygon/circle)",
+        "notam_type": "FDC, domestic, international, military NOTAMs",
+        "effective_date": "when restriction becomes active",
+        "expiration_date": "when it expires",
+        "altitude_limits": "affected altitude range",
+        "purpose": "flight restriction reason (VIP, military exercise, hazard, etc.)"
+      }
+    },
+    {
+      "id": "gem",
+      "name": "Global Energy Monitor — Major Facilities",
+      "provider": "Global Energy Monitor",
+      "category": "infrastructure",
+      "layer": "Not integrated",
+      "status": "PLANNED",
+      "type": "static",
+      "endpoints": [
+        "https://globalenergymonitor.org"
+      ],
+      "auth": {
+        "required": false,
+        "method": "download form (CC BY 4.0)",
+        "env_keys": [],
+        "limits": "none"
+      },
+      "fields_available_not_loaded": {
+        "coal_plants": "all coal plants worldwide with coordinates, capacity, status, owner",
+        "oil_gas_plants": "oil/gas power plants",
+        "refineries": "oil refineries with capacity",
+        "lng_terminals": "LNG import/export terminals. Strategic chokepoints",
+        "pipelines": "pipeline routes with capacity, operator, status"
+      }
+    },
+    {
+      "id": "ai_image",
+      "name": "AI Image Generation (OpenRouter)",
+      "provider": "OpenRouter / Google Gemini",
+      "category": "ai",
+      "layer": "UI feature (not a data source)",
+      "status": "LIVE",
+      "type": "on-demand",
+      "refresh": "on-demand",
+      "endpoints": [
+        "https://openrouter.ai/api/v1/chat/completions"
+      ],
+      "auth": {
+        "required": true,
+        "method": "Bearer token",
+        "env_keys": ["OPENROUTER_API_KEY"],
+        "limits": "pay-per-use"
+      },
+      "fields_displayed": {
+        "note": "generates artistic viewport captures, stored locally"
+      }
+    }
+  ],
+  "visualization_by_layer": {
+    "_note": "Визуализация привязана к слоям (layers), а не к источникам. Один слой может объединять несколько источников. Код иконок: frontend/src/cesium/. Цвета в формате CSS/Tailwind.",
+
+    "Aircraft": {
+      "sources": ["opensky"],
+      "render_method": "BillboardCollection (GPU-batched, 1 draw call, ~11K objects)",
+      "code_ref": "frontend/src/cesium/useDynamicLayers.ts",
+      "altitude": "aircraft.alt * 0.3048 (feet→meters)",
+      "rotation": "heading (degrees, negated)",
+      "stale_ttl": "5 min (cleanup every 30s)",
+      "subtypes": {
+        "airliner": {
+          "icon": "SVG airplane silhouette, top-down view",
+          "icon_fill": "#ffffff",
+          "icon_stroke": "black 1.2px",
+          "icon_size": "32x32",
+          "scale": 0.7,
+          "legend_color": "text-white"
+        },
+        "military": {
+          "icon": "SVG fighter jet silhouette (swept wings, tail fins)",
+          "icon_fill": "#facc15",
+          "icon_stroke": "black 1.2px",
+          "icon_size": "32x32",
+          "scale": 0.7,
+          "legend_color": "text-yellow-400"
+        },
+        "light": {
+          "icon": "SVG small aircraft + circle marker",
+          "icon_fill": "#60a5fa",
+          "icon_stroke": "black 1.2px",
+          "icon_size": "32x32",
+          "scale": 0.7,
+          "legend_color": "text-blue-400"
+        },
+        "general": {
+          "icon": "SVG generic airplane silhouette (same as airliner shape)",
+          "icon_fill": "#e5e7eb",
+          "icon_stroke": "black 1.2px",
+          "icon_size": "32x32",
+          "scale": 0.7,
+          "legend_color": "text-zinc-300"
+        }
+      }
+    },
+
+    "Vessel": {
+      "sources": ["aisstream"],
+      "render_method": "CustomDataSource + Entity API (SampledPositionProperty for interpolation)",
+      "code_ref": "frontend/src/cesium/useDynamicLayers.ts",
+      "altitude": "0 (surface)",
+      "rotation": "heading (degrees, negated)",
+      "stale_ttl": "5 min (cleanup every 30s)",
+      "trail": {
+        "type": "PathGraphics",
+        "lead_time": 0,
+        "trail_time_sec": 1800,
+        "width_px": 1.5,
+        "color": "Cesium.Color.CYAN.withAlpha(0.4)"
+      },
+      "subtypes": {
+        "cargo": {
+          "icon": "SVG cargo ship (rectangular hull + container boxes + keel)",
+          "icon_fill": "#e5e7eb",
+          "icon_detail": "#0f172a (container windows)",
+          "icon_keel": "#cbd5e1",
+          "icon_size": "32x32",
+          "scale": 0.7,
+          "legend_color": "text-zinc-200"
+        },
+        "tanker": {
+          "icon": "SVG tanker (rounded hull + circular ports + keel)",
+          "icon_fill": "#ef4444",
+          "icon_detail": "#0f172a (port holes)",
+          "icon_keel": "#b91c1c",
+          "icon_size": "32x32",
+          "scale": 0.7,
+          "legend_color": "text-red-500"
+        },
+        "passenger": {
+          "icon": "SVG cruise/ferry (rectangular hull + yellow windows + keel)",
+          "icon_fill": "#3b82f6",
+          "icon_detail": "#fef9c3 (windows)",
+          "icon_keel": "#1d4ed8",
+          "icon_size": "32x32",
+          "scale": 0.7,
+          "legend_color": "text-blue-500"
+        },
+        "fishing": {
+          "icon": "SVG fishing boat (triangular hull + mast + fishing line)",
+          "icon_fill": "#84cc16",
+          "icon_stroke": "#84cc16 1.5px",
+          "icon_size": "32x32",
+          "scale": 0.7,
+          "legend_color": "text-lime-500"
+        },
+        "military": {
+          "icon": "SVG warship (angular hull + turret tower + keel)",
+          "icon_fill": "#64748b",
+          "icon_detail": "#94a3b8 (upper), #475569 (lower/turret)",
+          "icon_size": "32x32",
+          "scale": 0.7,
+          "legend_color": "text-slate-400"
+        },
+        "unknown": {
+          "icon": "SVG generic vessel (simple rectangular hull + keel)",
+          "icon_fill": "#9ca3af",
+          "icon_keel": "#6b7280",
+          "icon_size": "32x32",
+          "scale": 0.7,
+          "legend_color": "text-zinc-500"
+        }
+      }
+    },
+
+    "Dark Vessel": {
+      "sources": ["aisstream_dark"],
+      "render_method": "CustomDataSource + Entity API (Billboard + Ellipse)",
+      "code_ref": "frontend/src/cesium/useDynamicLayers.ts",
+      "altitude": "0 (surface)",
+      "subtypes": {
+        "dark_vessel": {
+          "icon": "SVG red warning circle (outer ring + inner circle + exclamation mark)",
+          "icon_fill_outer": "#dc2626 opacity 0.3",
+          "icon_fill_inner": "#ef4444",
+          "icon_detail": "white exclamation mark",
+          "icon_size": "36x36",
+          "scale": 1.1,
+          "halo": {
+            "type": "Ellipse",
+            "radius_m": 50000,
+            "fill_color": "Cesium.Color.RED.withAlpha(0.08)",
+            "outline_color": "Cesium.Color.RED.withAlpha(0.3)",
+            "outline_width_px": 1
+          }
+        }
+      }
+    },
+
+    "Satellite": {
+      "sources": ["celestrak", "spectator_earth"],
+      "render_method": "CustomDataSource + Entity API (Billboard + Polyline trail + optional footprint cone)",
+      "code_ref": "frontend/src/cesium/useSatellitesLayer.ts",
+      "position": "SGP4-propagated from TLE every frame",
+      "trail": {
+        "type": "Polyline (150+ samples, precomputed ±2h)",
+        "color_per_type": true,
+        "alpha": 0.3
+      },
+      "footprint": {
+        "condition": "sensor.swathMeters > 0 (Spectator Earth enrichment)",
+        "type": "8-ray cone from satellite to ground perimeter",
+        "update_interval_ms": 250,
+        "separate_source_toggle": "satelliteFootprints"
+      },
+      "subtypes": {
+        "military": {
+          "icon": "SVG red crosshair",
+          "icon_fill": "red",
+          "icon_size": "32x32",
+          "scale": 1.4,
+          "trail_color": "Cesium.Color.RED.withAlpha(0.3)",
+          "legend_color": "text-red-500"
+        },
+        "recon": {
+          "icon": "SVG amber eye (overrides military if recon flag set)",
+          "icon_fill": "amber/fuchsia",
+          "icon_size": "32x32",
+          "scale": 1.8,
+          "trail_color": "Cesium.Color.RED.withAlpha(0.3)",
+          "legend_color": "text-fuchsia-400"
+        },
+        "commercial": {
+          "icon": "SVG cyan two-panel solar array",
+          "icon_fill": "cyan",
+          "icon_size": "32x32",
+          "scale": 1.4,
+          "trail_color": "Cesium.Color.CYAN.withAlpha(0.3)",
+          "legend_color": "text-cyan-400"
+        },
+        "civilian": {
+          "icon": "SVG lime truss structure",
+          "icon_fill": "lime",
+          "icon_size": "32x32",
+          "scale": 1.4,
+          "trail_color": "Cesium.Color.LIME.withAlpha(0.3)",
+          "legend_color": "text-lime-400"
+        }
+      }
+    },
+
+    "Conflict": {
+      "sources": ["acled"],
+      "render_method": "CustomDataSource + Entity API (Billboard + Ellipse halo)",
+      "code_ref": "frontend/src/cesium/useConflictsLayer.ts",
+      "altitude": "50m",
+      "refresh_interval": "5 min",
+      "subtypes": {
+        "explosions": {
+          "icon": "SVG red crosshair with explosion burst",
+          "icon_fill": "#ef4444",
+          "scale_logic": "fatalities > 10 → 1.4, fatalities > 0 → 1.1, else 0.9",
+          "halo": {
+            "type": "Ellipse",
+            "radius_m": "fatalities > 10 → 30000, else 15000",
+            "fill_alpha": 0.08,
+            "outline_alpha": 0.3
+          },
+          "legend_color": "text-red-500"
+        },
+        "battles": {
+          "icon": "SVG orange crosshair",
+          "icon_fill": "#f97316",
+          "scale_logic": "same fatalities-based scaling",
+          "halo": "same as explosions with orange color",
+          "legend_color": "text-orange-400"
+        },
+        "violence": {
+          "icon": "SVG yellow crosshair",
+          "icon_fill": "#eab308",
+          "scale_logic": "same fatalities-based scaling",
+          "halo": "same as explosions with yellow color",
+          "legend_color": "text-yellow-400"
+        }
+      }
+    },
+
+    "OSINT": {
+      "sources": ["gdacs", "usgs", "eonet"],
+      "render_method": "CustomDataSource + Entity API (Billboard + Ellipse + optional Polygon for nofly zones)",
+      "code_ref": "frontend/src/cesium/useOsintLayer.ts",
+      "altitude": "50m",
+      "refresh_interval": "5 min",
+      "alert_colors": {
+        "Red": "#ef4444",
+        "Orange": "#f97316",
+        "Green": "#84cc16"
+      },
+      "subtypes": {
+        "EQ": {
+          "icon": "SVG earthquake ripple rings",
+          "description": "concentric circles (seismic waves)",
+          "scale": 1.2,
+          "halo": "Ellipse with radiusKm if present, alert color fill (12% alpha), outline (40% alpha)"
+        },
+        "TC": {
+          "icon": "SVG cyclone spiral",
+          "description": "spiral arms pattern",
+          "scale": 1.2
+        },
+        "FL": {
+          "icon": "SVG flood waves",
+          "description": "horizontal wave lines",
+          "scale": 1.2
+        },
+        "VO": {
+          "icon": "SVG volcano",
+          "description": "triangle peak with eruption",
+          "scale": 1.2
+        },
+        "WF": {
+          "icon": "SVG wildfire flame",
+          "description": "flame shape",
+          "scale": 1.2
+        },
+        "DR": {
+          "icon": "SVG drought/sun",
+          "description": "cracked earth / sun symbol",
+          "scale": 1.2
+        }
+      },
+      "nofly_zones": {
+        "render_method": "Extruded Polygon (type === 'nofly' && polygon)",
+        "fill_color": "Cesium.Color.RED.withAlpha(0.3)",
+        "extrude_height_m": 20000,
+        "outline_color": "Cesium.Color.RED"
+      }
+    },
+
+    "Fire": {
+      "sources": ["firms"],
+      "render_method": "BillboardCollection (GPU-batched, ground-clamped, up to 60K points)",
+      "code_ref": "frontend/src/cesium/useFiresLayer.ts",
+      "altitude": "ground-clamped (CLAMP_TO_GROUND)",
+      "refresh_interval": "30 min",
+      "viewport_culling": "billboard.show toggled by camera frustum (150ms debounce)",
+      "subtypes": {
+        "high": {
+          "icon": "SVG radial gradient dot (center white → edge red)",
+          "icon_fill": "#ef4444 (red gradient)",
+          "icon_size": "16x16",
+          "scale_formula": "max(0.25, min(0.85, 0.25 + log2(FRP) * 0.07))",
+          "threshold": "FRP > 100 MW",
+          "legend_color": "text-red-500"
+        },
+        "medium": {
+          "icon": "SVG radial gradient dot (center white → edge orange)",
+          "icon_fill": "#f97316 (orange gradient)",
+          "icon_size": "16x16",
+          "scale_formula": "same log2-based formula",
+          "threshold": "FRP 30–100 MW",
+          "legend_color": "text-orange-400"
+        },
+        "low": {
+          "icon": "SVG radial gradient dot (center white → edge yellow)",
+          "icon_fill": "#eab308 (yellow gradient)",
+          "icon_size": "16x16",
+          "scale_formula": "same log2-based formula",
+          "threshold": "FRP < 30 MW",
+          "legend_color": "text-yellow-400"
+        }
+      }
+    },
+
+    "Jamming": {
+      "sources": ["gpsjam"],
+      "render_method": "Extruded Polygon (H3 hexagons, chunked 150/batch)",
+      "code_ref": "frontend/src/cesium/useJammingLayer.ts",
+      "refresh_interval": "6h",
+      "subtypes": {
+        "high": {
+          "geometry": "H3 cell polygon",
+          "fill_color": "Cesium.Color.RED.withAlpha(0.25)",
+          "outline_color": "Cesium.Color.RED.withAlpha(0.8)",
+          "outline_width_px": 1,
+          "extrude_height_m": 80000,
+          "threshold": "ratio ≥ 50%",
+          "legend_color": "text-red-500"
+        },
+        "medium": {
+          "geometry": "H3 cell polygon",
+          "fill_color": "Cesium.Color.ORANGE.withAlpha(0.2)",
+          "outline_color": "Cesium.Color.ORANGE.withAlpha(0.6)",
+          "outline_width_px": 1,
+          "extrude_height_m": 40000,
+          "threshold": "ratio 20–50%",
+          "legend_color": "text-orange-500"
+        },
+        "low": {
+          "geometry": "H3 cell polygon",
+          "fill_color": "Cesium.Color.YELLOW.withAlpha(0.15)",
+          "outline_color": "Cesium.Color.YELLOW.withAlpha(0.4)",
+          "outline_width_px": 1,
+          "extrude_height_m": 15000,
+          "threshold": "ratio 5–20%",
+          "legend_color": "text-yellow-500"
+        }
+      }
+    },
+
+    "Airspace": {
+      "sources": ["openaip"],
+      "render_method": "Dual Primitive (fill polygon + wireframe outline, chunked 300/batch)",
+      "code_ref": "frontend/src/cesium/useAirspaceLayer.ts",
+      "refresh_interval": "60 min",
+      "geometry": "Polygon with holes, lowerLimit → min(upperLimit, 20km) extrusion",
+      "subtypes": {
+        "restricted": {
+          "type_code": 1,
+          "fill_color": "Cesium.Color.RED.withAlpha(0.15)",
+          "outline_color": "Cesium.Color.RED.withAlpha(0.6)",
+          "outline_width_px": 1,
+          "legend_color": "text-red-500"
+        },
+        "danger": {
+          "type_code": 2,
+          "fill_color": "Cesium.Color.ORANGE.withAlpha(0.15)",
+          "outline_color": "Cesium.Color.ORANGE.withAlpha(0.6)",
+          "outline_width_px": 1,
+          "legend_color": "text-orange-400"
+        },
+        "prohibited": {
+          "type_code": 3,
+          "fill_color": "Cesium.Color.DARKRED.withAlpha(0.15)",
+          "outline_color": "Cesium.Color.DARKRED.withAlpha(0.6)",
+          "outline_width_px": 1,
+          "legend_color": "text-red-700"
+        },
+        "alert": {
+          "type_code": 17,
+          "fill_color": "Cesium.Color.YELLOW.withAlpha(0.15)",
+          "outline_color": "Cesium.Color.YELLOW.withAlpha(0.6)",
+          "outline_width_px": 1,
+          "legend_color": "text-yellow-400"
+        },
+        "warning": {
+          "type_code": 18,
+          "fill_color": "Cesium.Color.GOLD.withAlpha(0.15)",
+          "outline_color": "Cesium.Color.GOLD.withAlpha(0.6)",
+          "outline_width_px": 1,
+          "legend_color": "text-amber-400"
+        }
+      }
+    },
+
+    "Infrastructure": {
+      "sources": ["osm_overpass", "overture"],
+      "render_method": "BillboardCollection (points) + GroundPolylinePrimitive (power lines). Tile-based LRU cache (80 tiles, 2°×2°)",
+      "code_ref": "frontend/src/cesium/useInfrastructureLayer.ts",
+      "subtypes": {
+        "power_plant": {
+          "icon": "SVG yellow lightning bolt ⚡",
+          "icon_fill": "#facc15",
+          "icon_size": "32x32",
+          "scale": 1.0,
+          "legend_color": "text-yellow-400"
+        },
+        "power_substation": {
+          "icon": "SVG orange circle with zap symbol",
+          "icon_fill": "#f97316",
+          "icon_size": "32x32",
+          "scale": 1.0,
+          "legend_color": "text-orange-400"
+        },
+        "power_line": {
+          "render_method": "GroundPolylinePrimitive (batched, per-tile)",
+          "line_color": "Cesium.Color.ORANGE.withAlpha(0.6)",
+          "line_width_px": 2.0,
+          "legend_color": "text-orange-300"
+        },
+        "refinery": {
+          "icon": "SVG red factory silhouette with chimney",
+          "icon_fill": "#ef4444",
+          "icon_size": "32x32",
+          "scale": 1.0,
+          "legend_color": "text-red-500"
+        },
+        "desalination": {
+          "icon": "SVG blue water drop 💧",
+          "icon_fill": "#3b82f6",
+          "icon_size": "32x32",
+          "scale": 1.0,
+          "legend_color": "text-blue-400"
+        },
+        "military": {
+          "icon": "SVG gray shield with checkmark",
+          "icon_fill": "#6b7280",
+          "icon_size": "32x32",
+          "scale": 1.0,
+          "legend_color": "text-zinc-400"
+        },
+        "communication_tower": {
+          "icon": "SVG cyan antenna (vertical mast + guy wires + dot + base)",
+          "icon_fill": "#06b6d4",
+          "icon_size": "32x32",
+          "scale": 1.0,
+          "legend_color": "text-cyan-400",
+          "note": "Overture maps communication_tower → power_substation at backend, but frontend has dedicated icon. Overpass can send as native type"
+        },
+        "aerodrome": {
+          "icon": "SVG gray airplane silhouette (top-down, civilian style)",
+          "icon_fill": "#9ca3af",
+          "icon_size": "32x32",
+          "scale": 1.0,
+          "legend_color": "text-zinc-400",
+          "note": "Overture maps aerodrome → military at backend. Frontend has dedicated icon. Risk: civilian airports shown as military"
+        },
+        "dam": {
+          "icon": "SVG blue waves + rectangular barrier (dam wall + water flows)",
+          "icon_fill": "#3b82f6",
+          "icon_size": "32x32",
+          "scale": 1.0,
+          "legend_color": "text-blue-400",
+          "note": "Overture maps dam/reservoir/water_treatment → desalination at backend. Frontend has dedicated dam icon"
+        }
+      }
+    },
+
+    "Pipeline": {
+      "sources": ["osm_pipelines"],
+      "render_method": "Batched PolylineGeometry (single Primitive, one GPU call). PolylineColorAppearance",
+      "code_ref": "frontend/src/cesium/usePipelinesLayer.ts",
+      "subtypes": {
+        "oil": {
+          "line_color": "Cesium.Color.RED.withAlpha(0.6)",
+          "line_width_px": 2.0,
+          "legend_color": "text-red-500"
+        },
+        "gas": {
+          "line_color": "Cesium.Color.DODGERBLUE.withAlpha(0.6)",
+          "line_width_px": 2.0,
+          "legend_color": "text-blue-400"
+        }
+      }
+    },
+
+    "Cable": {
+      "sources": ["telegeography"],
+      "render_method": "GroundPolylinePrimitive (GPU-batched, ground-clamped, single draw call)",
+      "code_ref": "frontend/src/cesium/useCablesLayer.ts",
+      "subtypes": {
+        "submarine": {
+          "line_color": "Cesium.Color.DEEPSKYBLUE.withAlpha(0.4)",
+          "line_width_px": 2.0,
+          "no_subtype_filtering": true
+        }
+      }
+    },
+
+    "Outage": {
+      "sources": ["ioda", "cloudflare_radar"],
+      "render_method": "CustomDataSource + Entity API (Billboard + Ellipse + Label)",
+      "code_ref": "frontend/src/cesium/useOutagesLayer.ts",
+      "refresh_interval": "5 min",
+      "subtypes": {
+        "critical": {
+          "source": "IODA only",
+          "icon": "SVG red lightning bolt",
+          "icon_fill": "#ef4444",
+          "scale": 1.4,
+          "halo": {
+            "type": "Ellipse",
+            "radius_m": 300000,
+            "fill_alpha": 0.10,
+            "outline_alpha": 0.40
+          },
+          "label": {
+            "text": "country code",
+            "font": "11px monospace",
+            "fill_color": "white"
+          },
+          "legend_color": "text-red-500"
+        },
+        "warning": {
+          "source": "IODA + Cloudflare",
+          "icon": "SVG orange lightning bolt",
+          "icon_fill": "#f97316",
+          "scale_ioda": 1.1,
+          "scale_cloudflare": 1.0,
+          "halo": {
+            "type": "Ellipse",
+            "radius_m_ioda": 200000,
+            "radius_m_cloudflare": 150000,
+            "fill_alpha_ioda": 0.10,
+            "fill_alpha_cloudflare": 0.07,
+            "outline_alpha_ioda": 0.40,
+            "outline_alpha_cloudflare": 0.30
+          },
+          "legend_color": "text-orange-400"
+        }
+      }
+    },
+
+    "GFW": {
+      "sources": ["gfw"],
+      "render_method": "CustomDataSource + Entity API (Billboard + Ellipse)",
+      "code_ref": "frontend/src/cesium/useGFWLayer.ts",
+      "altitude": "0 (surface)",
+      "refresh_interval": "30 min",
+      "subtypes": {
+        "gap": {
+          "icon": "SVG purple warning diamond ◆",
+          "icon_fill": "#a855f7",
+          "scale": 1.0,
+          "halo": {
+            "type": "Ellipse",
+            "radius_m": 40000,
+            "fill_color": "purple withAlpha(0.06)",
+            "outline_color": "purple withAlpha(0.25)"
+          },
+          "note": "ALL event types currently get this same visual — no differentiation between gap/encounter/loitering"
+        }
+      }
+    },
+
+    "Webcam": {
+      "sources": ["webcams_livenv", "webcams_caltrans", "windy_webcams"],
+      "render_method": "BillboardCollection (GPU-batched, ground-clamped)",
+      "code_ref": "frontend/src/cesium/useWebcamsLayer.ts",
+      "refresh_interval": "1h",
+      "subtypes": {
+        "camera": {
+          "icon": "SVG cyan video camera 📹",
+          "icon_fill": "#06b6d4",
+          "icon_size": "32x32",
+          "scale": 0.5,
+          "no_subtype_filtering": true,
+          "note": "all cameras get same icon regardless of source or type"
+        }
+      }
+    },
+
+    "Traffic": {
+      "sources": ["tomtom", "here"],
+      "render_method": "UrlTemplateImageryProvider (raster PNG tiles, alpha 0.6)",
+      "code_ref": "frontend/src/cesium/useTrafficLayer.ts",
+      "zoom_gate": "hidden when camera altitude > 100 km",
+      "tile_levels": "0–18",
+      "subtypes": {},
+      "note": "raster overlay — no individual features or subtypes. Not clickable."
+    },
+
+    "Border": {
+      "sources": ["naturalearth"],
+      "render_method": "Cesium.Wall (extruded vertical wall geometry)",
+      "code_ref": "frontend/src/cesium/useBordersLayer.ts",
+      "subtypes": {
+        "country": {
+          "wall_height_m": 80000,
+          "fill_color": "Cesium.Color.CYAN.withAlpha(0.12)",
+          "outline_color": "Cesium.Color.CYAN.withAlpha(0.4)",
+          "outline_width_px": 1
+        }
+      }
+    },
+
+    "OilPricesWidget": {
+      "sources": ["oilprices"],
+      "render_method": "React floating widget (not a map layer)",
+      "code_ref": "frontend/src/components/OilPricesWidget.tsx",
+      "subtypes": {},
+      "note": "positioned in UI corner, shows Brent/WTI prices with change indicators"
+    }
+  },
+
+  "visual_overlap_analysis": {
+    "_note": "Анализ дублирующихся данных, пересекающихся визуалов и некорректного переиспользования иконок",
+
+    "data_duplicates": [
+      {
+        "issue": "Fire data shows from 3 independent sources simultaneously",
+        "layers_affected": ["Fire", "OSINT"],
+        "detail": "NASA FIRMS показывает ~60K точек пожаров. Одновременно EONET (через OSINT) показывает wildfire events как отдельные маркеры WF. GDACS тоже может показать крупный wildfire с зоной поражения. Один и тот же лесной пожар отображается: (1) как облако красных/оранжевых/желтых точек FIRMS, (2) как маркер WF с иконкой пламени от EONET, (3) как alert от GDACS с ellipse зоной",
+        "recommendation": "Объединить под единый узел 'Fires & Wildfires'. FIRMS = heatmap-слой детекции, EONET/GDACS = event-маркеры с зонами поражения. Разные уровни детализации, но пользователь должен видеть их как одну категорию"
+      },
+      {
+        "issue": "Dark vessel detection from 2 independent systems",
+        "layers_affected": ["Dark Vessel", "GFW"],
+        "detail": "Наш алгоритм (AIS gap > 1h) и Global Fishing Watch (gap events dataset) оба детектируют суда, отключающие AIS. Одно судно может одновременно показываться: (1) как красный круг с восклицательным знаком (Dark Vessel, scale 1.1, 50km halo), (2) как фиолетовый ромб (GFW, scale 1.0, 40km halo). Разные иконки, разные цвета, разные размеры для одного явления",
+        "recommendation": "Объединить под 'Maritime Anomalies'. Subtype: ais_gap (наш), gfw_gap, gfw_encounter, gfw_loitering. Сейчас GFW вообще не различает типы событий визуально"
+      },
+      {
+        "issue": "Internet outages from 2 sources with different granularity",
+        "layers_affected": ["Outage"],
+        "detail": "IODA (country-level, 300km ellipse) и Cloudflare (ASN-level, 150km ellipse) уже объединены в один слой, но: (1) разный масштаб ellipse для одного severity, (2) Cloudflare outageType/outageCause загружены но НЕ показываются, (3) locations[] у Cloudflare — только первый элемент используется",
+        "recommendation": "Показывать outageCause в HUD. Различать визуально country-level (IODA) vs ASN-level (Cloudflare)"
+      },
+      {
+        "issue": "Earthquake data from 2-3 sources",
+        "layers_affected": ["OSINT"],
+        "detail": "USGS показывает все M2.5+ землетрясения. GDACS показывает крупные землетрясения как alerts с impact radius. EONET может тоже показать geophysical events. Одно сильное землетрясение = до 3 маркеров от разных источников",
+        "recommendation": "Backend dedup по proximity + time window. Или приоритезация: GDACS alert (если есть) > USGS point"
+      }
+    ],
+
+    "icon_misuse": [
+      {
+        "issue": "Overture backend collapses types that frontend can render distinctly",
+        "detail": "Frontend has dedicated icons for communication_tower (cyan antenna), aerodrome (gray plane), dam (blue waves). But Overture service maps: communication→power_substation, airport→military, water→desalination. So Overture-sourced records get WRONG icons, while Overpass-sourced records get CORRECT icons.",
+        "affected": [
+          "communication_tower → collapsed to power_substation (orange zap instead of cyan antenna)",
+          "aerodrome → collapsed to military (shield instead of plane). Civilian airports shown as military bases",
+          "dam/reservoir/water_treatment → collapsed to desalination (water drop instead of wave/dam)"
+        ],
+        "recommendation": "Fix backend overture.service.ts mapInfraPointType() to return native types: communication_tower, aerodrome, dam. Frontend already has the icons. Add these types to INFRA_ENDPOINT_TYPES set."
+      }
+    ],
+
+    "visual_inconsistencies": [
+      {
+        "issue": "Crosshair icon reused for 3 different data types",
+        "layers": ["Satellite (military)", "Conflict (all subtypes)"],
+        "detail": "Военные спутники = красный crosshair, scale 1.4. Конфликты ACLED = crosshair в красном/оранжевом/желтом, scale 0.9-1.4. На дальнем зуме при включённых обоих слоях конфликт может быть визуально спутан со спутником",
+        "recommendation": "Для конфликтов использовать другую форму: explosion burst для взрывов, crossed swords для сражений, warning triangle для насилия"
+      },
+      {
+        "issue": "Red color overloaded across 8+ subtypes",
+        "subtypes_using_red": [
+          "Satellite military (#ef4444)",
+          "Conflict explosions (#ef4444)",
+          "Fire high FRP (#ef4444)",
+          "Jamming high (#ef4444)",
+          "Airspace restricted (#ef4444)",
+          "Outage critical (#ef4444)",
+          "Tanker vessel (#ef4444)",
+          "Dark vessel (#dc2626)",
+          "Pipeline oil (red line)",
+          "Refinery (#ef4444)"
+        ],
+        "detail": "При включении всех слоёв красный цвет теряет информационную ценность — всё красное",
+        "recommendation": "Разнести по цветовым семействам: конфликты = красный, природные = оранжевый, инфраструктура = теплый жёлтый, аномалии = пурпурный"
+      },
+      {
+        "issue": "Scale inconsistency across layers",
+        "detail": "Aircraft = 0.7, Vessels = 0.7, Satellites = 1.4-1.8, Conflicts = 0.9-1.4, Fires = 0.25-0.85, Webcams = 0.5, Infrastructure = 1.0. Нет единой системы — объекты разных слоёв не сопоставимы по размеру при одинаковом зуме",
+        "recommendation": "Определить 3 размерных класса: small (0.5-0.7), medium (1.0), large (1.4) с понятной семантикой"
+      }
+    ],
+
+    "layers_that_could_share_visual_type": [
+      {
+        "visual_type": "Moving entity with trail",
+        "currently_separate": ["Aircraft", "Vessel", "Satellite"],
+        "shared_pattern": "billboard с rotation по heading + polyline trail за объектом",
+        "note": "Все три уже используют этот паттерн, но с разной реализацией: Aircraft = BillboardCollection, Vessel = Entity+PathGraphics, Satellite = Entity+Polyline. Визуально паттерн единый"
+      },
+      {
+        "visual_type": "Event marker with impact halo",
+        "currently_separate": ["Conflict", "OSINT", "Dark Vessel", "GFW", "Outage"],
+        "shared_pattern": "billboard иконка + ellipse halo с radius, coded by severity",
+        "note": "Все 5 слоёв используют Billboard + Ellipse. Различаются иконкой и цветом. Можно унифицировать HUD-панель для всех event-type объектов"
+      },
+      {
+        "visual_type": "Ground line network",
+        "currently_separate": ["Pipeline", "Cable", "Infrastructure (power_line)"],
+        "shared_pattern": "GroundPolylinePrimitive / PolylineGeometry, 2px line, color by substance",
+        "note": "Три типа линейной инфраструктуры. Визуально одинаковый паттерн, различаются цветом"
+      },
+      {
+        "visual_type": "3D extruded zone",
+        "currently_separate": ["Jamming", "Airspace"],
+        "shared_pattern": "extruded polygon fill + wireframe outline, color coded by severity",
+        "note": "Jamming = H3 hexagons, Airspace = irregular polygons. Но визуальный паттерн одинаковый: полупрозрачная стена"
+      }
+    ]
+  },
+
+  "summary": {
+    "total_sources": 27,
+    "live_sources": 21,
+    "planned_sources": 4,
+    "needs_key_sources": 3,
+    "categories": {
+      "aviation": ["opensky", "openaip", "nasa_dip_notams"],
+      "maritime": ["aisstream", "aisstream_dark", "gfw"],
+      "space": ["celestrak", "spectator_earth"],
+      "disasters": ["gdacs", "usgs", "eonet", "firms"],
+      "conflicts": ["acled"],
+      "infrastructure": ["telegeography", "osm_overpass", "osm_pipelines", "overture", "gem"],
+      "electronic_warfare": ["gpsjam"],
+      "traffic": ["tomtom", "here"],
+      "monitoring": ["webcams_livenv", "webcams_caltrans", "windy_webcams", "road511"],
+      "commodities": ["oilprices"],
+      "energy": ["owid_energy"],
+      "environmental": ["openaq"],
+      "imagery": ["nasa_gibs", "copernicus"],
+      "reference": ["naturalearth"],
+      "ai": ["ai_image"]
+    },
+    "high_value_unused_fields": [
+      "OpenSky: squawk (transponder emergency codes — 7700/7600/7500)",
+      "OpenSky: category (aircraft type classification — far better than name heuristic)",
+      "OpenSky: vertical_rate (climb/descent indicator)",
+      "AISStream: vessel Name, CallSign, IMO number (we only show MMSI)",
+      "AISStream: NavigationalStatus (at anchor, moored, aground, man overboard!)",
+      "AISStream: Destination + ETA (intelligence gold)",
+      "AISStream: MaximumStaticDraught (cargo load indicator)",
+      "CelesTrak: COUNTRY_CODE, LAUNCH_DATE, CLASSIFICATION_TYPE, RCS_SIZE",
+      "USGS: depth (shallow=destructive), tsunami flag, PAGER alert, felt reports",
+      "GDACS: population_affected, resources (reports/satellite imagery links)",
+      "ACLED: civilian_targeting flag, interaction codes, admin1/2/3 granularity",
+      "FIRMS: type (vegetation fire vs volcano vs industrial flare)",
+      "FIRMS: daynight (night detections have different confidence)",
+      "Submarine Cables: owners, capacity, landing_points",
+      "Cloudflare: outageCause (cable cut, government shutdown, etc.)",
+      "GFW: encounter_info (ship-to-ship transfers), vessel_tracks, fishing_effort heatmaps",
+      "HERE: jamFactor (0-10 congestion scale — unique metric)",
+      "OpenAQ: actual PM2.5/PM10/O3/NO2 sensor values (code exists but service not started)",
+      "NASA GIBS: night_lights (VIIRS Black Marble — shows power outages)",
+      "OpenAIP: byNotam flag, icaoClass, activity status",
+      "Overture Maps: buildings, places, transportation (only using infrastructure subset)"
+    ],
+    "layers_with_no_subtype_filtering": [
+      "Traffic (raster)",
+      "Borders (static)",
+      "Cables (single style)",
+      "Webcams (single icon)",
+      "GFW (single icon — could differentiate gap/encounter/loitering)",
+      "Satellite Footprints"
+    ],
+    "data_loaded_but_no_map_visual": [
+      "OWID Energy (12 country-level fields loaded, no choropleth map)",
+      "HERE Traffic (full API response passed through, no vector layer)",
+      "OpenAQ Air Quality (service code exists, not activated)"
+    ]
+  }
+}

@@ -1,0 +1,581 @@
+{
+  "$schema": "User-facing layer settings — hierarchical tree for UI, map layers only",
+  "_design": {
+    "master_record": "sources-catalog.json — source of truth for what exists and how it's visualized",
+    "this_file": "defines user-facing grouping tree for the settings panel. Only map layers — widgets and UI tools (oil prices, AI image) are NOT here, they have their own toggle buttons in the toolbar",
+    "tree_depth": "domain → layer → subtype. Each level is independently toggleable"
+  },
+
+  "tree": [
+    {
+      "id": "air",
+      "title": "Air Domain",
+      "icon": "plane",
+      "children": [
+        {
+          "id": "aircraft",
+          "title": "Aircraft Tracking",
+          "catalog_layer": "Aircraft",
+          "enabled_by_default": true,
+          "sources": [
+            {
+              "source_id": "opensky",
+              "title": "OpenSky Network",
+              "data_type": "real-time",
+              "refresh": "90s",
+              "auth": [
+                { "key": "OPENSKY_USERNAME", "label": "Username", "type": "text", "required": true, "signup_url": "https://opensky-network.org" },
+                { "key": "OPENSKY_PASSWORD", "label": "Password", "type": "password", "required": true }
+              ]
+            }
+          ],
+          "subtypes": [
+            { "id": "airliner", "title": "Airliners", "enabled": true, "color": "#ffffff" },
+            { "id": "military", "title": "Military Aircraft", "enabled": true, "color": "#facc15" },
+            { "id": "light", "title": "Light / GA", "enabled": true, "color": "#60a5fa" },
+            { "id": "general", "title": "General Aviation", "enabled": true, "color": "#e5e7eb" }
+          ],
+          "enrichment": [
+            { "id": "aircraft_photo", "title": "Aircraft Photos", "enabled": true },
+            { "id": "aircraft_route", "title": "Route Info", "enabled": true }
+          ]
+        },
+        {
+          "id": "airspace",
+          "title": "Restricted Airspace",
+          "catalog_layer": "Airspace",
+          "enabled_by_default": false,
+          "sources": [
+            {
+              "source_id": "openaip",
+              "title": "OpenAIP",
+              "data_type": "semi-static",
+              "refresh": "1h",
+              "auth": [
+                { "key": "OPENAIP_API_KEY", "label": "API Key", "type": "password", "required": true, "signup_url": "https://www.openaip.net/" }
+              ]
+            }
+          ],
+          "subtypes": [
+            { "id": "restricted", "title": "Restricted", "enabled": true, "color": "#ef4444" },
+            { "id": "danger", "title": "Danger", "enabled": true, "color": "#f97316" },
+            { "id": "prohibited", "title": "Prohibited", "enabled": true, "color": "#991b1b" },
+            { "id": "alert", "title": "Alert", "enabled": true, "color": "#eab308" },
+            { "id": "warning", "title": "Warning", "enabled": true, "color": "#d97706" }
+          ]
+        },
+        {
+          "id": "jamming",
+          "title": "GNSS Jamming Zones",
+          "catalog_layer": "Jamming",
+          "enabled_by_default": true,
+          "sources": [
+            {
+              "source_id": "gpsjam",
+              "title": "GPSJam.org (ADS-B NIC analysis)",
+              "data_type": "daily",
+              "refresh": "6h",
+              "auth": []
+            }
+          ],
+          "subtypes": [
+            { "id": "high", "title": "Severe (>50%)", "enabled": true, "color": "#ef4444" },
+            { "id": "medium", "title": "Moderate (20-50%)", "enabled": true, "color": "#f97316" },
+            { "id": "low", "title": "Low (5-20%)", "enabled": true, "color": "#eab308" }
+          ]
+        }
+      ]
+    },
+
+    {
+      "id": "maritime",
+      "title": "Maritime Domain",
+      "icon": "anchor",
+      "children": [
+        {
+          "id": "vessels",
+          "title": "Vessel Tracking",
+          "catalog_layer": "Vessel",
+          "enabled_by_default": true,
+          "sources": [
+            {
+              "source_id": "aisstream",
+              "title": "AISStream (AIS WebSocket)",
+              "data_type": "real-time",
+              "refresh": "continuous",
+              "auth": [
+                { "key": "AISSTREAM_API_KEY", "label": "API Key", "type": "password", "required": true, "signup_url": "https://aisstream.io/" }
+              ]
+            }
+          ],
+          "subtypes": [
+            { "id": "cargo", "title": "Cargo", "enabled": true, "color": "#e5e7eb" },
+            { "id": "tanker", "title": "Tanker", "enabled": true, "color": "#ef4444" },
+            { "id": "passenger", "title": "Passenger", "enabled": true, "color": "#3b82f6" },
+            { "id": "fishing", "title": "Fishing", "enabled": true, "color": "#84cc16" },
+            { "id": "military", "title": "Military", "enabled": true, "color": "#64748b" },
+            { "id": "unknown", "title": "Unknown", "enabled": true, "color": "#9ca3af" }
+          ]
+        },
+        {
+          "id": "maritime_anomalies",
+          "title": "Maritime Anomalies",
+          "note": "Dark vessels and suspicious activity — two detection systems for one phenomenon",
+          "children": [
+            {
+              "id": "dark_vessels",
+              "title": "AIS Silent (Own Detection)",
+              "catalog_layer": "Dark Vessel",
+              "enabled_by_default": true,
+              "sources": [
+                {
+                  "source_id": "aisstream_dark",
+                  "title": "AIS gap detection (>1h silent)",
+                  "data_type": "derived",
+                  "auth": []
+                }
+              ],
+              "subtypes": [
+                { "id": "dark_vessel", "title": "Silent Vessel", "enabled": true, "color": "#dc2626" }
+              ]
+            },
+            {
+              "id": "gfw_events",
+              "title": "Fishing Watch Events",
+              "catalog_layer": "GFW",
+              "enabled_by_default": false,
+              "sources": [
+                {
+                  "source_id": "gfw",
+                  "title": "Global Fishing Watch",
+                  "data_type": "near-real-time",
+                  "refresh": "1h",
+                  "auth": [
+                    { "key": "GFW_TOKEN", "label": "Bearer Token", "type": "password", "required": true, "signup_url": "https://globalfishingwatch.org/our-apis/tokens" }
+                  ]
+                }
+              ],
+              "subtypes": [
+                { "id": "gap", "title": "AIS Gap Events", "enabled": true, "color": "#a855f7" }
+              ],
+              "visual_issue": "GFW uses single purple diamond for ALL event types. Could differentiate: gap, encounter, loitering, port_visit"
+            }
+          ]
+        }
+      ]
+    },
+
+    {
+      "id": "space",
+      "title": "Space Domain",
+      "icon": "satellite",
+      "children": [
+        {
+          "id": "satellites",
+          "title": "Satellite Tracking",
+          "catalog_layer": "Satellite",
+          "enabled_by_default": true,
+          "sources": [
+            {
+              "source_id": "spacetrack",
+              "title": "Space-Track.org (US Space Command, primary)",
+              "data_type": "cached",
+              "refresh": "24h",
+              "auth": [
+                { "key": "SPACETRACK_EMAIL", "label": "Email", "type": "text", "required": false, "signup_url": "https://www.space-track.org/auth/createAccount" },
+                { "key": "SPACETRACK_PASSWORD", "label": "Password", "type": "password", "required": false }
+              ],
+              "note": "Optional primary source. Falls back to CelesTrak → Ivan TLE if not configured."
+            },
+            {
+              "source_id": "celestrak",
+              "title": "CelesTrak (mirror, auto-fallback)",
+              "data_type": "cached",
+              "refresh": "24h",
+              "auth": [],
+              "note": "Public mirror. Rate-limits aggressively — may get 403 bans."
+            },
+            {
+              "source_id": "ivan_tle",
+              "title": "tle.ivanstanojevic.me (last resort fallback)",
+              "data_type": "cached",
+              "auth": [],
+              "note": "Free JSON API. Used only if Space-Track and CelesTrak both fail."
+            },
+            {
+              "source_id": "spectator_earth",
+              "title": "Spectator Earth (sensor specs)",
+              "data_type": "enrichment",
+              "refresh": "24h",
+              "auth": [
+                { "key": "SPECTATOR_EARTH_API_KEY", "label": "API Key", "type": "password", "required": false, "signup_url": "https://app.spectator.earth/" }
+              ]
+            }
+          ],
+          "subtypes": [
+            { "id": "military", "title": "Military", "enabled": true, "color": "#ef4444" },
+            { "id": "recon", "title": "Reconnaissance", "enabled": true, "color": "#d946ef" },
+            { "id": "commercial", "title": "Commercial", "enabled": true, "color": "#06b6d4" },
+            { "id": "civilian", "title": "Civilian", "enabled": true, "color": "#84cc16" }
+          ],
+          "extra_toggles": [
+            { "id": "satellite_footprints", "title": "Sensor Footprint Cones", "enabled": true },
+            { "id": "satellite_trails", "title": "Orbital Trails (±2h)", "enabled": true }
+          ]
+        }
+      ]
+    },
+
+    {
+      "id": "ground_events",
+      "title": "Ground Events",
+      "icon": "alert-triangle",
+      "children": [
+        {
+          "id": "conflicts",
+          "title": "Armed Conflicts",
+          "catalog_layer": "Conflict",
+          "enabled_by_default": true,
+          "sources": [
+            {
+              "source_id": "acled",
+              "title": "ACLED",
+              "data_type": "near-real-time",
+              "refresh": "30 min (last 7 days)",
+              "auth": [
+                { "key": "ACLED_EMAIL", "label": "Email", "type": "text", "required": true, "signup_url": "https://developer.acleddata.com/" },
+                { "key": "ACLED_KEY", "label": "API Key", "type": "password", "required": true }
+              ]
+            }
+          ],
+          "subtypes": [
+            { "id": "explosions", "title": "Explosions / Remote Violence", "enabled": true, "color": "#ef4444" },
+            { "id": "battles", "title": "Battles", "enabled": true, "color": "#f97316" },
+            { "id": "violence", "title": "Violence against Civilians", "enabled": true, "color": "#eab308" }
+          ]
+        },
+        {
+          "id": "disasters",
+          "title": "Natural Disasters",
+          "catalog_layer": "OSINT",
+          "enabled_by_default": true,
+          "sources": [
+            { "source_id": "gdacs", "title": "GDACS (UN/EC Alerts)", "auth": [] },
+            { "source_id": "usgs", "title": "USGS Earthquakes", "auth": [] },
+            { "source_id": "eonet", "title": "NASA EONET", "auth": [] }
+          ],
+          "subtypes": [
+            { "id": "EQ", "title": "Earthquakes", "enabled": true, "color": "#ef4444" },
+            { "id": "TC", "title": "Tropical Cyclones", "enabled": true, "color": "#f97316" },
+            { "id": "FL", "title": "Floods", "enabled": true, "color": "#3b82f6" },
+            { "id": "VO", "title": "Volcanoes", "enabled": true, "color": "#f97316" },
+            { "id": "WF", "title": "Wildfires", "enabled": true, "color": "#ef4444" },
+            { "id": "DR", "title": "Droughts", "enabled": true, "color": "#eab308" }
+          ],
+          "data_overlap": "WF subtype overlaps with Fire layer (FIRMS). GDACS/EONET show event-level markers, FIRMS shows individual hotspot detections"
+        },
+        {
+          "id": "fires",
+          "title": "Fire Hotspot Detection",
+          "catalog_layer": "Fire",
+          "enabled_by_default": true,
+          "sources": [
+            { "source_id": "firms", "title": "NASA FIRMS (VIIRS satellite)", "data_type": "near-real-time", "refresh": "30 min", "auth": [] }
+          ],
+          "subtypes": [
+            { "id": "high", "title": "High FRP (>100 MW)", "enabled": true, "color": "#ef4444" },
+            { "id": "medium", "title": "Medium FRP (30-100 MW)", "enabled": true, "color": "#f97316" },
+            { "id": "low", "title": "Low FRP (<30 MW)", "enabled": true, "color": "#eab308" }
+          ],
+          "data_overlap": "Overlaps with OSINT WF subtype. Different granularity: FIRMS = 60K individual hotspot points, OSINT WF = named wildfire events with impact zones"
+        }
+      ]
+    },
+
+    {
+      "id": "infrastructure",
+      "title": "Infrastructure",
+      "icon": "factory",
+      "children": [
+        {
+          "id": "energy_grid",
+          "title": "Energy Grid",
+          "children": [
+            {
+              "id": "power_generation",
+              "title": "Power Plants",
+              "catalog_layer": "Infrastructure",
+              "catalog_subtype_filter": ["power_plant"],
+              "enabled_by_default": false,
+              "sources": [
+                { "source_id": "osm_overpass", "title": "OpenStreetMap", "auth": [] },
+                { "source_id": "overture", "title": "Overture Maps", "auth": [{ "key": "OVERTURE_ENABLED", "label": "Enable Overture", "type": "toggle", "required": false }] }
+              ],
+              "subtypes": [
+                { "id": "power_plant", "title": "Power Plant", "enabled": true, "color": "#facc15" }
+              ]
+            },
+            {
+              "id": "power_transmission",
+              "title": "Transmission Grid",
+              "catalog_layer": "Infrastructure",
+              "catalog_subtype_filter": ["power_substation", "power_line"],
+              "enabled_by_default": false,
+              "sources": [
+                { "source_id": "osm_overpass", "title": "OpenStreetMap", "auth": [] },
+                { "source_id": "overture", "title": "Overture Maps", "auth": [] }
+              ],
+              "subtypes": [
+                { "id": "power_substation", "title": "Substations", "enabled": true, "color": "#f97316" },
+                { "id": "power_line", "title": "Power Lines", "enabled": true, "color": "#f97316" }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "oil_gas",
+          "title": "Oil & Gas",
+          "children": [
+            {
+              "id": "refineries",
+              "title": "Refineries",
+              "catalog_layer": "Infrastructure",
+              "catalog_subtype_filter": ["refinery"],
+              "enabled_by_default": false,
+              "sources": [
+                { "source_id": "osm_overpass", "title": "OpenStreetMap", "auth": [] },
+                { "source_id": "overture", "title": "Overture Maps", "auth": [] }
+              ],
+              "subtypes": [
+                { "id": "refinery", "title": "Refinery", "enabled": true, "color": "#ef4444" }
+              ]
+            },
+            {
+              "id": "pipelines",
+              "title": "Pipelines",
+              "catalog_layer": "Pipeline",
+              "enabled_by_default": false,
+              "sources": [
+                { "source_id": "osm_pipelines", "title": "OpenStreetMap", "auth": [] }
+              ],
+              "subtypes": [
+                { "id": "oil", "title": "Oil Pipelines", "enabled": true, "color": "#ef4444" },
+                { "id": "gas", "title": "Gas Pipelines", "enabled": true, "color": "#3b82f6" }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "military_sites",
+          "title": "Military Installations",
+          "catalog_layer": "Infrastructure",
+          "catalog_subtype_filter": ["military"],
+          "enabled_by_default": false,
+          "sources": [
+            { "source_id": "osm_overpass", "title": "OpenStreetMap", "auth": [] },
+            { "source_id": "overture", "title": "Overture Maps", "auth": [] }
+          ],
+          "subtypes": [
+            { "id": "military", "title": "Military Base", "enabled": true, "color": "#6b7280" },
+            { "id": "aerodrome", "title": "Aerodromes", "enabled": true, "color": "#9ca3af" }
+          ],
+          "visual_note": "Frontend has dedicated aerodrome icon (gray plane). Overture collapses aerodrome→military at backend"
+        },
+        {
+          "id": "water_infra",
+          "title": "Water Infrastructure",
+          "catalog_layer": "Infrastructure",
+          "catalog_subtype_filter": ["desalination"],
+          "enabled_by_default": false,
+          "sources": [
+            { "source_id": "osm_overpass", "title": "OpenStreetMap", "auth": [] },
+            { "source_id": "overture", "title": "Overture Maps", "auth": [] }
+          ],
+          "subtypes": [
+            { "id": "desalination", "title": "Desalination Plants", "enabled": true, "color": "#3b82f6" },
+            { "id": "dam", "title": "Dams & Reservoirs", "enabled": true, "color": "#3b82f6" }
+          ],
+          "visual_note": "Frontend has separate dam icon (blue waves). Overture still collapses all water→desalination at backend level"
+        },
+        {
+          "id": "telecom_infra",
+          "title": "Telecom Infrastructure",
+          "children": [
+            {
+              "id": "comm_towers",
+              "title": "Communication Towers",
+              "catalog_layer": "Infrastructure",
+              "catalog_subtype_filter": ["communication_tower"],
+              "enabled_by_default": false,
+              "sources": [
+                { "source_id": "osm_overpass", "title": "OpenStreetMap", "auth": [] },
+                { "source_id": "overture", "title": "Overture Maps", "auth": [] }
+              ],
+              "subtypes": [
+                { "id": "communication_tower", "title": "Cell / Radio Tower", "enabled": true, "color": "#06b6d4" }
+              ],
+              "visual_note": "Frontend has dedicated cyan antenna icon. Overture collapses to power_substation at backend"
+            },
+            {
+              "id": "cables",
+              "title": "Submarine Cables",
+              "catalog_layer": "Cable",
+              "enabled_by_default": false,
+              "sources": [
+                { "source_id": "telegeography", "title": "TeleGeography", "auth": [] }
+              ],
+              "subtypes": []
+            }
+          ]
+        }
+      ]
+    },
+
+    {
+      "id": "connectivity",
+      "title": "Connectivity",
+      "icon": "wifi-off",
+      "children": [
+        {
+          "id": "outages",
+          "title": "Internet Outages",
+          "catalog_layer": "Outage",
+          "enabled_by_default": true,
+          "sources": [
+            { "source_id": "ioda", "title": "IODA (BGP analysis, country-level)", "data_type": "near-real-time", "refresh": "10 min", "auth": [] },
+            {
+              "source_id": "cloudflare_radar",
+              "title": "Cloudflare Radar (ASN-level)",
+              "data_type": "near-real-time",
+              "refresh": "15 min",
+              "auth": [
+                { "key": "CLOUDFLARE_API_TOKEN", "label": "API Token", "type": "password", "required": true, "signup_url": "https://dash.cloudflare.com/" }
+              ]
+            }
+          ],
+          "subtypes": [
+            { "id": "critical", "title": "Critical Outage", "enabled": true, "color": "#ef4444" },
+            { "id": "warning", "title": "Warning / Anomaly", "enabled": true, "color": "#f97316" }
+          ]
+        }
+      ]
+    },
+
+    {
+      "id": "situational",
+      "title": "Situational Awareness",
+      "icon": "eye",
+      "children": [
+        {
+          "id": "traffic",
+          "title": "Traffic Flow",
+          "catalog_layer": "Traffic",
+          "enabled_by_default": false,
+          "note": "raster overlay, visible only below 100km altitude",
+          "sources": [
+            {
+              "source_id": "tomtom",
+              "title": "TomTom Traffic Tiles",
+              "data_type": "real-time",
+              "refresh": "60s",
+              "auth": [
+                { "key": "TOMTOM_API_KEY", "label": "API Key", "type": "password", "required": true, "signup_url": "https://developer.tomtom.com/" }
+              ]
+            },
+            {
+              "source_id": "here",
+              "title": "HERE Traffic Flow (backend-only, no frontend layer yet)",
+              "data_type": "real-time",
+              "backend_only": true,
+              "auth": [
+                { "key": "HERE_API_KEY", "label": "API Key", "type": "password", "required": false, "signup_url": "https://developer.here.com/" }
+              ]
+            }
+          ],
+          "subtypes": []
+        },
+        {
+          "id": "webcams",
+          "title": "Live Cameras",
+          "catalog_layer": "Webcam",
+          "enabled_by_default": false,
+          "sources": [
+            { "source_id": "webcams_livenv", "title": "Live-Environment-Streams (5K+ cams)", "auth": [] },
+            { "source_id": "webcams_caltrans", "title": "Caltrans (California DOT)", "auth": [] },
+            {
+              "source_id": "windy_webcams",
+              "title": "Windy (65K+ global cameras)",
+              "auth": [
+                { "key": "WINDY_API_KEY", "label": "API Key", "type": "password", "required": true, "signup_url": "https://api.windy.com/" }
+              ]
+            }
+          ],
+          "subtypes": []
+        },
+        {
+          "id": "borders",
+          "title": "Country Borders",
+          "catalog_layer": "Border",
+          "enabled_by_default": true,
+          "sources": [
+            { "source_id": "naturalearth", "title": "Natural Earth (110m)", "auth": [] }
+          ],
+          "subtypes": []
+        },
+        {
+          "id": "imagery",
+          "title": "Satellite Imagery",
+          "catalog_layer": "Imagery overlay",
+          "enabled_by_default": false,
+          "sources": [
+            { "source_id": "nasa_gibs", "title": "NASA GIBS (MODIS cloud cover)", "auth": [] }
+          ],
+          "subtypes": []
+        }
+      ]
+    }
+  ],
+
+  "planned_sources": {
+    "_note": "Not yet connected. Show as disabled rows with 'Setup' badge in respective tree nodes",
+    "items": [
+      { "source_id": "copernicus", "title": "Copernicus Sentinel (10m imagery)", "target_node": "situational.imagery", "status": "NEEDS_KEY" },
+      { "source_id": "road511", "title": "Road511 (US/Canada cameras)", "target_node": "situational.webcams", "status": "NEEDS_KEY" },
+      { "source_id": "nasa_dip_notams", "title": "NASA DIP NOTAMs", "target_node": "air.airspace", "status": "NEEDS_KEY" },
+      { "source_id": "openaq", "title": "OpenAQ (Air Quality)", "target_node": "ground_events", "status": "PLANNED" },
+      { "source_id": "gem", "title": "Global Energy Monitor", "target_node": "infrastructure.energy_grid", "status": "PLANNED" }
+    ]
+  },
+
+  "api_key_summary": {
+    "_note": "All API keys referenced across the tree, for a centralized key management panel",
+    "keys": [
+      { "key": "OPENSKY_USERNAME", "provider": "OpenSky Network", "signup_url": "https://opensky-network.org", "used_by": ["aircraft"] },
+      { "key": "OPENSKY_PASSWORD", "provider": "OpenSky Network", "used_by": ["aircraft"] },
+      { "key": "AISSTREAM_API_KEY", "provider": "AISStream.io", "signup_url": "https://aisstream.io/", "used_by": ["vessels", "dark_vessels"] },
+      { "key": "SPECTATOR_EARTH_API_KEY", "provider": "Spectator Earth", "signup_url": "https://app.spectator.earth/", "used_by": ["satellites"], "optional": true },
+      { "key": "ACLED_EMAIL", "provider": "ACLED", "signup_url": "https://developer.acleddata.com/", "used_by": ["conflicts"] },
+      { "key": "ACLED_KEY", "provider": "ACLED", "used_by": ["conflicts"] },
+      { "key": "OPENAIP_API_KEY", "provider": "OpenAIP", "signup_url": "https://www.openaip.net/", "used_by": ["airspace"] },
+      { "key": "GFW_TOKEN", "provider": "Global Fishing Watch", "signup_url": "https://globalfishingwatch.org/our-apis/tokens", "used_by": ["gfw_events"] },
+      { "key": "CLOUDFLARE_API_TOKEN", "provider": "Cloudflare", "signup_url": "https://dash.cloudflare.com/", "used_by": ["outages"] },
+      { "key": "TOMTOM_API_KEY", "provider": "TomTom", "signup_url": "https://developer.tomtom.com/", "used_by": ["traffic"] },
+      { "key": "HERE_API_KEY", "provider": "HERE", "signup_url": "https://developer.here.com/", "used_by": ["traffic"], "optional": true },
+      { "key": "WINDY_API_KEY", "provider": "Windy", "signup_url": "https://api.windy.com/", "used_by": ["webcams"] }
+    ]
+  },
+
+  "ui_behavior": {
+    "tree_toggle_cascade": "toggling a parent node enables/disables ALL children recursively",
+    "leaf_toggle": "toggling a leaf layer enables/disables all its subtypes",
+    "subtype_toggle": "individual subtype visibility within an enabled layer",
+    "source_toggle": "if a layer has multiple sources, each source can be toggled independently",
+    "auth_state": {
+      "key_set": "show masked value (****abcd) + Change + Remove",
+      "key_missing": "show grayed layer + 'API Key Required' badge + input field + signup link",
+      "key_invalid": "show red 'Error' badge with retry"
+    },
+    "persistence": "localStorage key 'worldview-layer-settings'",
+    "reset": "'Reset to Defaults' restores enabled_by_default values"
+  }
+}
