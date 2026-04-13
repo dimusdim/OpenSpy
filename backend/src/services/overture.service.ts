@@ -133,6 +133,10 @@ export interface OvertureStatus {
 export class OvertureService {
     private db: any = null;
     private ready = false;
+    // Mutex queue: DuckDB Node.js binding deadlocks when multiple
+    // db.all() calls run concurrently on the same Database handle.
+    // This queue serializes all queries so only one runs at a time.
+    private _queryQueue: Promise<any> = Promise.resolve();
     private readonly version: string;
 
     // Observable status
@@ -565,21 +569,27 @@ export class OvertureService {
     // -----------------------------------------------------------------------
 
     private exec(sql: string): Promise<void> {
-        return new Promise((resolve, reject) => {
+        const run = () => new Promise<void>((resolve, reject) => {
             if (!this.db) return reject(new Error('DuckDB not initialized'));
             this.db.run(sql, (err: Error | null) => {
                 if (err) reject(err); else resolve();
             });
         });
+        this._queryQueue = this._queryQueue.then(() => run(), () => run());
+        return this._queryQueue as Promise<void>;
     }
 
     private query<T = any>(sql: string): Promise<T[]> {
-        return new Promise((resolve, reject) => {
+        // Serialize through the queue — DuckDB's Node.js binding deadlocks
+        // when multiple db.all() calls overlap on a single Database handle.
+        const run = () => new Promise<T[]>((resolve, reject) => {
             if (!this.db) return reject(new Error('DuckDB not initialized'));
             this.db.all(sql, (err: Error | null, rows: T[]) => {
                 if (err) reject(err); else resolve(rows ?? []);
             });
         });
+        this._queryQueue = this._queryQueue.then(() => run(), () => run());
+        return this._queryQueue as Promise<T[]>;
     }
 
     private async countTable(table: string): Promise<number> {

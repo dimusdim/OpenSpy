@@ -10,6 +10,11 @@ export interface GFWEvent {
     vesselId: string;
     vesselName: string;
     flagState: string;
+    confidence: number | null;
+    duration: number | null;       // seconds
+    vesselOwner: string | null;
+    vesselMmsi: string | null;
+    vesselType: string | null;
 }
 
 export class GFWService {
@@ -66,6 +71,13 @@ export class GFWService {
                 const lng = pos.lon ?? pos.lng ?? pos.longitude;
                 if (lat == null || lng == null) continue;
 
+                // Compute duration in seconds if both timestamps exist
+                let duration: number | null = null;
+                if (ev.start && ev.end) {
+                    const ms = new Date(ev.end).getTime() - new Date(ev.start).getTime();
+                    if (!isNaN(ms) && ms > 0) duration = Math.round(ms / 1000);
+                }
+
                 records.push({
                     id: `gfw-${ev.id || records.length}`,
                     lat: parseFloat(lat),
@@ -76,6 +88,11 @@ export class GFWService {
                     vesselId: ev.vessel?.id || '',
                     vesselName: ev.vessel?.name || '',
                     flagState: ev.vessel?.flag || ev.vessel?.flagState || '',
+                    confidence: ev.confidence ?? ev.score ?? null,
+                    duration,
+                    vesselOwner: ev.vessel?.owner || null,
+                    vesselMmsi: ev.vessel?.mmsi || ev.vessel?.ssvid || null,
+                    vesselType: ev.vessel?.vesselType || ev.vessel?.type || null,
                 });
             }
 

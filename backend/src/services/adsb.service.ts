@@ -40,6 +40,48 @@ function aisTypeToClass(t: number | null | undefined): 'cargo' | 'tanker' | 'pas
 }
 
 /**
+ * Cached static data from AIS ShipStaticData messages.
+ * PositionReport arrives frequently but carries no name/destination;
+ * ShipStaticData arrives ~once every 6 min per vessel and fills these.
+ */
+interface VesselStaticData {
+    cls: string;
+    name?: string;
+    callSign?: string;
+    imo?: number;
+    destination?: string;
+    eta?: string;
+    draught?: number;
+    length?: number;
+    beam?: number;
+}
+
+/**
+ * Map AIS NavigationalStatus integer (ITU-R M.1371) to human-readable text.
+ */
+function mapNavStatus(status: number | null | undefined): string {
+    if (status == null || status === 15) return '';
+    const map: Record<number, string> = {
+        0: 'Under way using engine',
+        1: 'At anchor',
+        2: 'Not under command',
+        3: 'Restricted manoeuvrability',
+        4: 'Constrained by draught',
+        5: 'Moored',
+        6: 'Aground',
+        7: 'Engaged in fishing',
+        8: 'Under way sailing',
+        9: 'Reserved (HSC)',
+        10: 'Reserved (WIG)',
+        11: 'Power-driven towing astern',
+        12: 'Power-driven pushing/towing',
+        13: 'Reserved',
+        14: 'AIS-SART/MOB/EPIRB',
+    };
+    return map[status] || '';
+}
+
+/**
  * Classify an aircraft from its callsign + altitude (m) + ground speed (m/s).
  * Heuristic only — OpenSky's free /states/all does not include the ADS-B
  * emitter category, so we infer from flight envelope. Order matters:
@@ -86,7 +128,7 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
     // MMSI → vessel class string. Populated lazily from ShipStaticData messages,
     // which arrive far less frequently than PositionReport. Backed by a disk
     // cache (see VESSEL_TYPES_CACHE_FILE) so restarts retain learned classes.
-    private vesselTypes = new Map<string, string>();
+    private vesselTypes = new Map<string, VesselStaticData>();
     private vesselTypesDirty = false;
     private osintEvents: any[] = [];
 
@@ -204,9 +246,14 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
         try {
             if (fs.existsSync(VESSEL_TYPES_CACHE_FILE)) {
                 const raw = fs.readFileSync(VESSEL_TYPES_CACHE_FILE, 'utf-8');
-                const parsed = JSON.parse(raw) as Record<string, string>;
-                for (const [mmsi, cls] of Object.entries(parsed)) {
-                    this.vesselTypes.set(mmsi, cls);
+                const parsed = JSON.parse(raw) as Record<string, string | VesselStaticData>;
+                for (const [mmsi, val] of Object.entries(parsed)) {
+                    // Backward compat: old cache stored plain class string
+                    if (typeof val === 'string') {
+                        this.vesselTypes.set(mmsi, { cls: val });
+                    } else {
+                        this.vesselTypes.set(mmsi, val);
+                    }
                 }
                 console.log(`[VesselCache] Loaded ${this.vesselTypes.size} cached vessel classes from disk.`);
             }
@@ -227,7 +274,7 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
                     if (k !== undefined) this.vesselTypes.delete(k);
                 }
             }
-            const obj: Record<string, string> = {};
+            const obj: Record<string, VesselStaticData> = {};
             this.vesselTypes.forEach((v, k) => { obj[k] = v; });
             fs.writeFileSync(VESSEL_TYPES_CACHE_FILE, JSON.stringify(obj));
             this.vesselTypesDirty = false;
@@ -392,7 +439,12 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
                             alt: alt * 3.28084,
                             heading: heading || 0,
                             type: classifyAircraft(callsign, alt, velocity),
-                            speed: velocity ? velocity * 3.6 : 0
+                            speed: velocity ? velocity * 3.6 : 0,
+                            // New fields from state vector
+                            onGround: s[8] === true,
+                            verticalRate: s[11] ?? null,    // m/s
+                            squawk: s[14] || null,           // 4-digit string
+                            lastContact: s[4] || null,       // unix timestamp
                         });
                     });
                     
@@ -473,13 +525,33 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
                          const stat = parsed.Message.ShipStaticData;
                          const id = String(stat.UserID);
                          const cls = aisTypeToClass(stat.Type);
-                         const prev = this.vesselTypes.get(id);
-                         if (prev !== cls) {
-                             this.vesselTypes.set(id, cls);
-                             this.vesselTypesDirty = true;
-                         }
+                         const dim = stat.Dimension || {};
+                         const staticData: VesselStaticData = {
+                             cls,
+                             name: stat.Name || undefined,
+                             callSign: stat.CallSign || undefined,
+                             imo: stat.ImoNumber || undefined,
+                             destination: stat.Destination || undefined,
+                             eta: stat.Eta ? `${stat.Eta.Month}/${stat.Eta.Day} ${stat.Eta.Hour}:${String(stat.Eta.Minute).padStart(2,'0')}` : undefined,
+                             draught: stat.MaximumStaticDraught || undefined,
+                             length: (dim.A && dim.B) ? dim.A + dim.B : undefined,
+                             beam: (dim.C && dim.D) ? dim.C + dim.D : undefined,
+                         };
+                         this.vesselTypes.set(id, staticData);
+                         this.vesselTypesDirty = true;
+                         // Update live vessel with new static data
                          const existing = this.vessels.get(id);
-                         if (existing) existing.type = cls;
+                         if (existing) {
+                             existing.type = cls;
+                             existing.name = staticData.name;
+                             existing.callSign = staticData.callSign;
+                             existing.imo = staticData.imo;
+                             existing.destination = staticData.destination;
+                             existing.eta = staticData.eta;
+                             existing.draught = staticData.draught;
+                             existing.length = staticData.length;
+                             existing.beam = staticData.beam;
+                         }
                          return;
                      }
 
@@ -492,13 +564,27 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
                          const lastSeen = this.vesselLastSeen.get(id);
                          if (lastSeen && now - lastSeen < SimulatorService.AIS_VESSEL_THROTTLE_MS) return;
 
+                         const cached = this.vesselTypes.get(id);
                          this.vessels.set(id, {
                              id,
                              lat: report.Latitude,
                              lng: report.Longitude,
                              heading: report.TrueHeading || 0,
-                             type: this.vesselTypes.get(id) || 'unknown',
-                             speed: report.Sog || 0
+                             type: cached?.cls || 'unknown',
+                             speed: report.Sog || 0,
+                             // AIS PositionReport fields
+                             navigationStatus: mapNavStatus(report.NavigationalStatus),
+                             rateOfTurn: report.RateOfTurn ?? null,
+                             cog: report.Cog ?? null,
+                             // Static data from ShipStaticData cache
+                             name: cached?.name || null,
+                             callSign: cached?.callSign || null,
+                             imo: cached?.imo || null,
+                             destination: cached?.destination || null,
+                             eta: cached?.eta || null,
+                             draught: cached?.draught || null,
+                             length: cached?.length || null,
+                             beam: cached?.beam || null,
                          });
 
                          this.vesselLastSeen.set(id, now);

@@ -94,19 +94,17 @@ export class AIImageService {
         const isFlux = model.includes('flux');
         const modalities = isGemini ? ['image', 'text'] : ['image'];
 
-        // Gemini: OMIT aspect_ratio → auto-inherits from input image
-        // FLUX:   pass width/height + safety_tolerance: 6
-        // Other:  use closest standard aspect_ratio
+        // OpenRouter image_config supports ONLY:
+        //   aspect_ratio: "1:1"|"2:3"|"3:2"|"4:3"|"16:9" etc.
+        //   image_size: "1K"|"2K"|"4K"
+        // width/height are NOT supported — OpenRouter silently ignores them
+        // and returns 1024x1024. All models use the same params.
         let imageConfig: Record<string, any>;
         if (isGemini) {
+            // Gemini auto-inherits aspect ratio from input image
             imageConfig = { image_size: '2K' };
-        } else if (isFlux) {
-            // BFL FLUX API uses width/height (multiples of 16, max 4MP).
-            // No aspect_ratio param — only explicit pixel dimensions.
-            const w = Math.min(2048, Math.round(imageWidth / 16) * 16);
-            const h = Math.min(2048, Math.round(imageHeight / 16) * 16);
-            imageConfig = { width: w, height: h };
         } else {
+            // FLUX, and any other model: aspect_ratio + image_size
             imageConfig = { aspect_ratio: aspectRatio, image_size: '2K' };
         }
 

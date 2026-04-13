@@ -35,6 +35,7 @@ import { AirspaceService } from './services/airspace.service';
 import { GFWService } from './services/gfw.service';
 import { CloudflareService } from './services/cloudflare.service';
 import { WindyService } from './services/windy.service';
+import { GDELTService } from './services/gdelt.service';
 import { setupAIImageRoutes } from './routes/ai-image';
 
 // CORS origin whitelist — comma-separated list in ALLOWED_ORIGINS env var.
@@ -83,6 +84,79 @@ app.post('/api/settings', (req, res) => {
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(SETTINGS_FILE, JSON.stringify(req.body, null, 2));
         res.json({ ok: true });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// API Keys management — read/update .env keys at runtime
+// ---------------------------------------------------------------------------
+
+const ENV_FILE = path.resolve(__dirname, '../.env');
+
+// Known API key env vars and their display labels
+const API_KEY_DEFS: Record<string, { label: string; envVars: string[] }> = {
+    aviation: { label: 'OpenSky Network', envVars: ['OPENSKY_USERNAME', 'OPENSKY_PASSWORD'] },
+    maritime: { label: 'AISStream', envVars: ['AISSTREAM_API_KEY'] },
+    satellites: { label: 'Space-Track.org', envVars: ['SPACETRACK_USERNAME', 'SPACETRACK_PASSWORD'] },
+    webcams: { label: 'Windy API', envVars: ['WINDY_API_KEY'] },
+    traffic: { label: 'TomTom', envVars: ['TOMTOM_API_KEY'] },
+    conflicts: { label: 'ACLED', envVars: ['ACLED_KEY', 'ACLED_EMAIL'] },
+    airspace: { label: 'OpenAIP', envVars: ['OPENAIP_API_KEY'] },
+    gfw: { label: 'Global Fishing Watch', envVars: ['GFW_TOKEN'] },
+};
+
+app.get('/api/keys', (_req, res) => {
+    // Return which keys are configured (masked) vs missing
+    const result: Record<string, { label: string; keys: Record<string, { set: boolean; masked: string }> }> = {};
+    for (const [source, def] of Object.entries(API_KEY_DEFS)) {
+        const keys: Record<string, { set: boolean; masked: string }> = {};
+        for (const envVar of def.envVars) {
+            const val = process.env[envVar] || '';
+            keys[envVar] = {
+                set: val.length > 0,
+                masked: val.length > 0 ? val.slice(0, 3) + '•'.repeat(Math.max(0, val.length - 3)) : '',
+            };
+        }
+        result[source] = { label: def.label, keys };
+    }
+    res.json(result);
+});
+
+app.post('/api/keys', (req, res) => {
+    try {
+        const updates: Record<string, string> = req.body;
+        if (!updates || typeof updates !== 'object') {
+            return res.status(400).json({ error: 'Expected { ENV_VAR: value } object' });
+        }
+
+        // Read existing .env
+        let envContent = '';
+        if (fs.existsSync(ENV_FILE)) {
+            envContent = fs.readFileSync(ENV_FILE, 'utf-8');
+        }
+
+        // Update each key
+        for (const [key, value] of Object.entries(updates)) {
+            // Validate key is in our known list
+            const isKnown = Object.values(API_KEY_DEFS).some(d => d.envVars.includes(key));
+            if (!isKnown) continue;
+
+            // Update process.env immediately (no restart needed for new connections)
+            process.env[key] = value;
+
+            // Update .env file
+            const regex = new RegExp(`^${key}=.*$`, 'm');
+            if (regex.test(envContent)) {
+                envContent = envContent.replace(regex, `${key}=${value}`);
+            } else {
+                envContent += `\n${key}=${value}`;
+            }
+        }
+
+        fs.writeFileSync(ENV_FILE, envContent);
+        res.json({ ok: true, message: 'Keys updated. Some services may need reconnection.' });
     } catch (err: any) {
         res.status(500).json({ error: err.message });
     }
@@ -192,6 +266,7 @@ const energyService = new EnergyService();
 const tomtomService = new TomTomService();
 const hereTrafficService = new HereTrafficService();
 const acledService = new ACLEDService();
+const gdeltService = new GDELTService();
 const airspaceService = new AirspaceService();
 const gfwService = new GFWService();
 const cloudflareService = new CloudflareService();
@@ -269,40 +344,27 @@ app.get('/api/infrastructure', async (req, res) => {
         return;
     }
     try {
-        // Fire both sources in parallel. Overture's promise resolves to []
-        // when the service is disabled or errors out, so Overpass stays
-        // authoritative under every failure mode.
-        const [overpassSettled, overtureRecords] = await Promise.all([
-            infrastructureService.getInfrastructure(south, west, north, east)
-                .then((data) => ({ ok: true as const, data }))
-                .catch((err) => ({ ok: false as const, err })),
-            overtureService.getInfrastructureInBbox(south, west, north, east),
-        ]);
+        // Overture is local DuckDB — instant. Overpass is external HTTP — slow.
+        // Don't block response on Overpass: return Overture immediately,
+        // merge Overpass only if it finishes within a tight timeout.
+        const overtureRecords = await overtureService.getInfrastructureInBbox(south, west, north, east);
 
-        if (!overpassSettled.ok) {
-            console.error('[Infrastructure] Overpass failed:', overpassSettled.err?.message || overpassSettled.err);
-            // If Overpass failed but Overture returned data, hand the
-            // Overture slice to the client — it's better than a hard 502.
-            if (overtureRecords.length > 0) {
-                res.json(overtureRecords.map((r) => ({
-                    id: r.id,
-                    lat: r.lat,
-                    lng: r.lng,
-                    name: r.name,
-                    type: r.type,
-                })));
-                return;
-            }
-            res.status(502).json({ error: 'Failed to fetch infrastructure data (upstream Overpass unavailable)' });
-            return;
+        // Fire Overpass with a 5s timeout — if it responds fast, merge;
+        // otherwise return Overture-only (better than waiting 60s).
+        const OVERPASS_FAST_TIMEOUT = 5000;
+        let overpassRecords: any[] = [];
+        try {
+            overpassRecords = await Promise.race([
+                infrastructureService.getInfrastructure(south, west, north, east),
+                new Promise<any[]>((_, reject) =>
+                    setTimeout(() => reject(new Error('Overpass too slow')), OVERPASS_FAST_TIMEOUT)
+                ),
+            ]);
+        } catch {
+            // Overpass slow or failed — proceed with Overture only
         }
 
-        const overpassRecords = overpassSettled.data;
         const deduped = dedupAgainstOverture(overpassRecords, overtureRecords);
-        // Merge: Overture first (canonical), then remaining Overpass records.
-        // Frontend InfraRecord shape: the Overture helper record matches
-        // field-for-field minus the `source` tag, which the frontend safely
-        // ignores.
         const merged = [
             ...overtureRecords.map((r) => ({
                 id: r.id,
@@ -520,6 +582,11 @@ app.get('/api/conflicts', (_req, res) => {
     res.json(acledService.getEvents());
 });
 
+// GDELT real-time conflict events (no auth, 15-min updates)
+app.get('/api/gdelt-conflicts', (_req, res) => {
+    res.json(gdeltService.getEvents());
+});
+
 // OpenAIP restricted airspace / no-fly zones
 app.get('/api/airspace', (_req, res) => {
     res.json(airspaceService.getZones());
@@ -658,6 +725,7 @@ app.get('/api/status', (_req, res) => {
         maritime: adsbHealth.maritime,
         airspace: airspaceService.getHealth(),
         conflicts: acledService.getHealth(),
+        gdelt: gdeltService.getHealth(),
         gfw: gfwService.getHealth(),
         outages: { status: outagesStatus, note: outagesNote, count: outagesCount },
         // Services without real health getters still fall back to env check
@@ -699,6 +767,7 @@ async function bootstrap() {
     oilPricesService.start();
     energyService.start();
     acledService.start();
+    gdeltService.start();
     airspaceService.start();
     gfwService.start();
     cloudflareService.start();

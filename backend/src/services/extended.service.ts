@@ -23,6 +23,9 @@ interface FireRecord {
   confidence: string;
   frp: number;
   source: string;
+  daynight: string;    // 'D' or 'N'
+  acqTime: string;     // 'HHMM'
+  fireType: number;    // 0=vegetation, 1=volcano, 2=industrial, 3=offshore
 }
 
 interface AirQualityRecord {
@@ -124,6 +127,9 @@ export class ExtendedDataService {
       const brightIdx = header.indexOf('bright_ti4');
       const confIdx = header.indexOf('confidence');
       const frpIdx = header.indexOf('frp');
+      const dnIdx = header.indexOf('daynight');
+      const timeIdx = header.indexOf('acq_time');
+      const typeIdx = header.indexOf('type');
 
       if (latIdx === -1 || lngIdx === -1) {
         console.warn('[ExtendedDataService] FIRMS CSV missing lat/lng columns');
@@ -147,6 +153,9 @@ export class ExtendedDataService {
           confidence: confIdx !== -1 ? cols[confIdx] : '',
           frp: frpIdx !== -1 ? parseFloat(cols[frpIdx]) || 0 : 0,
           source: 'NASA FIRMS',
+          daynight: dnIdx !== -1 ? cols[dnIdx] : '',
+          acqTime: timeIdx !== -1 ? cols[timeIdx] : '',
+          fireType: typeIdx !== -1 ? parseInt(cols[typeIdx]) || 0 : 0,
         });
       }
 
