@@ -3,39 +3,11 @@ import * as Cesium from 'cesium';
 import { io, Socket } from 'socket.io-client';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
+import { getAviIcon, getShipIcon, DARK_VESSEL_ICON } from '../icons/map-icons';
 
-// Wraps an inline SVG body in a data URI (32x32 aircraft icons).
-const svgUri = (body: string) => `data:image/svg+xml,` + encodeURIComponent(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" stroke="black" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`
-);
+const getAviSVG = getAviIcon;
 
-// Wraps a complete SVG string in a data URI (used for enhanced vessel icons).
-const svgDataUri = (svgContent: string) => `data:image/svg+xml,` + encodeURIComponent(svgContent);
-
-// Aircraft icons — pre-built data URIs, reused for all billboards of same type.
-const AVI_ICONS: Record<string, string> = {
-    airliner: svgUri(`<path d="M12 2 L10 11 L2 14 L2 16 L10 14 L10 20 L7 22 L7 23 L12 22 L17 23 L17 22 L14 20 L14 14 L22 16 L22 14 L14 11 Z" fill="#ffffff"/>`),
-    military: svgUri(`<path d="M12 2 L8 13 L2 18 L2 20 L9 17 L9 21 L7 22 L7 23 L12 22 L17 23 L17 22 L15 21 L15 17 L22 20 L22 18 L16 13 Z" fill="#facc15"/>`),
-    light:    svgUri(`<circle cx="12" cy="12" r="2" fill="#60a5fa"/><path d="M12 4 L11 11 L4 12 L4 13 L11 13 L11 19 L9 20 L9 21 L12 20 L15 21 L15 20 L13 19 L13 13 L20 13 L20 12 L13 11 Z" fill="#60a5fa"/>`),
-    general:  svgUri(`<path d="M12 2 L10 11 L2 14 L2 16 L10 14 L10 20 L7 22 L7 23 L12 22 L17 23 L17 22 L14 20 L14 14 L22 16 L22 14 L14 11 Z" fill="#e5e7eb"/>`),
-};
-const getAviSVG = (type: string) => AVI_ICONS[type] || AVI_ICONS.general;
-
-// Vessel icons — enhanced top-down ship silhouettes (32x32 output, 48x48 viewBox).
-const VESSEL_ICONS: Record<string, string> = {
-    cargo:     svgDataUri(`<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 48 48"><path d="M24 3 C24 3 19 5 17 9 L15 38 C15 42 19 45 24 45 C29 45 33 42 33 38 L31 9 C29 5 24 3 24 3 Z" fill="#d1d5db" stroke="#6b7280" stroke-width="1"/><rect x="17" y="12" width="14" height="24" rx="1.5" fill="#e5e7eb" stroke="#9ca3af" stroke-width="0.6"/><rect x="18" y="13" width="5" height="4.5" rx="0.5" fill="#f97316" stroke="#9a3412" stroke-width="0.4"/><rect x="25" y="13" width="5" height="4.5" rx="0.5" fill="#3b82f6" stroke="#1e40af" stroke-width="0.4"/><rect x="18" y="18.5" width="5" height="4.5" rx="0.5" fill="#22c55e" stroke="#166534" stroke-width="0.4"/><rect x="25" y="18.5" width="5" height="4.5" rx="0.5" fill="#ef4444" stroke="#991b1b" stroke-width="0.4"/><rect x="18" y="24" width="5" height="4.5" rx="0.5" fill="#8b5cf6" stroke="#5b21b6" stroke-width="0.4"/><rect x="25" y="24" width="5" height="4.5" rx="0.5" fill="#f97316" stroke="#9a3412" stroke-width="0.4"/><rect x="18" y="29.5" width="5" height="4.5" rx="0.5" fill="#3b82f6" stroke="#1e40af" stroke-width="0.4"/><rect x="25" y="29.5" width="5" height="4.5" rx="0.5" fill="#22c55e" stroke="#166534" stroke-width="0.4"/><rect x="20" y="35" width="8" height="5" rx="1" fill="#374151" stroke="#1f2937" stroke-width="0.6"/><rect x="21" y="36" width="1.5" height="1.2" rx="0.2" fill="#67e8f9" opacity="0.7"/><rect x="23.25" y="36" width="1.5" height="1.2" rx="0.2" fill="#67e8f9" opacity="0.7"/><rect x="25.5" y="36" width="1.5" height="1.2" rx="0.2" fill="#67e8f9" opacity="0.7"/><line x1="21" y1="13" x2="21" y2="10" stroke="#6b7280" stroke-width="0.8"/><line x1="19" y1="10" x2="23" y2="10" stroke="#6b7280" stroke-width="0.8"/><line x1="27" y1="13" x2="27" y2="10" stroke="#6b7280" stroke-width="0.8"/><line x1="25" y1="10" x2="29" y2="10" stroke="#6b7280" stroke-width="0.8"/><line x1="22" y1="7" x2="26" y2="7" stroke="#9ca3af" stroke-width="0.8" stroke-linecap="round"/></svg>`),
-    tanker:    svgDataUri(`<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 48 48"><path d="M24 3 C24 3 18 6 16 10 L14 38 C14 42 18 45 24 45 C30 45 34 42 34 38 L32 10 C30 6 24 3 24 3 Z" fill="#dc2626" stroke="#991b1b" stroke-width="1"/><rect x="17" y="14" width="14" height="22" rx="2" fill="#ef4444" stroke="#991b1b" stroke-width="0.7"/><rect x="19" y="30" width="10" height="6" rx="1" fill="#1e293b" stroke="#0f172a" stroke-width="0.7"/><rect x="20" y="31" width="2" height="1.5" rx="0.3" fill="#67e8f9" opacity="0.8"/><rect x="23" y="31" width="2" height="1.5" rx="0.3" fill="#67e8f9" opacity="0.8"/><rect x="26" y="31" width="2" height="1.5" rx="0.3" fill="#67e8f9" opacity="0.8"/><circle cx="21" cy="17" r="2.2" fill="#b91c1c" stroke="#991b1b" stroke-width="0.5"/><circle cx="27" cy="17" r="2.2" fill="#b91c1c" stroke="#991b1b" stroke-width="0.5"/><circle cx="21" cy="22" r="2.2" fill="#b91c1c" stroke="#991b1b" stroke-width="0.5"/><circle cx="27" cy="22" r="2.2" fill="#b91c1c" stroke="#991b1b" stroke-width="0.5"/><circle cx="21" cy="27" r="2.2" fill="#b91c1c" stroke="#991b1b" stroke-width="0.5"/><circle cx="27" cy="27" r="2.2" fill="#b91c1c" stroke="#991b1b" stroke-width="0.5"/><line x1="24" y1="14" x2="24" y2="30" stroke="#991b1b" stroke-width="1" stroke-dasharray="2 1"/><line x1="22" y1="8" x2="26" y2="8" stroke="#fca5a5" stroke-width="1" stroke-linecap="round"/><line x1="21" y1="10" x2="27" y2="10" stroke="#fca5a5" stroke-width="0.7" stroke-linecap="round"/><line x1="24" y1="30" x2="24" y2="27" stroke="#475569" stroke-width="0.8"/><circle cx="24" cy="26.5" r="0.6" fill="#67e8f9"/><path d="M20 43 Q24 46 28 43" fill="none" stroke="white" stroke-width="0.5" opacity="0.3"/></svg>`),
-    passenger: svgDataUri(`<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 48 48"><path d="M24 3 C24 3 18 6 16 10 L14 38 C14 42 18 45 24 45 C30 45 34 42 34 38 L32 10 C30 6 24 3 24 3 Z" fill="#f8fafc" stroke="#2563eb" stroke-width="1.2"/><path d="M24 43 C19 43 16 41 15 38 L17 38 C18 40 20 41 24 41 C28 41 30 40 31 38 L33 38 C32 41 29 43 24 43 Z" fill="#2563eb" opacity="0.6"/><rect x="17" y="10" width="14" height="28" rx="3" fill="#e2e8f0" stroke="#94a3b8" stroke-width="0.5"/><rect x="17.5" y="13" width="1.2" height="1" rx="0.2" fill="#fef08a"/><rect x="17.5" y="15.5" width="1.2" height="1" rx="0.2" fill="#fef08a"/><rect x="17.5" y="18" width="1.2" height="1" rx="0.2" fill="#fef08a"/><rect x="17.5" y="20.5" width="1.2" height="1" rx="0.2" fill="#fef08a"/><rect x="17.5" y="23" width="1.2" height="1" rx="0.2" fill="#fef08a"/><rect x="17.5" y="25.5" width="1.2" height="1" rx="0.2" fill="#fef08a"/><rect x="17.5" y="28" width="1.2" height="1" rx="0.2" fill="#fef08a"/><rect x="29.3" y="13" width="1.2" height="1" rx="0.2" fill="#fef08a"/><rect x="29.3" y="15.5" width="1.2" height="1" rx="0.2" fill="#fef08a"/><rect x="29.3" y="18" width="1.2" height="1" rx="0.2" fill="#fef08a"/><rect x="29.3" y="20.5" width="1.2" height="1" rx="0.2" fill="#fef08a"/><rect x="29.3" y="23" width="1.2" height="1" rx="0.2" fill="#fef08a"/><rect x="29.3" y="25.5" width="1.2" height="1" rx="0.2" fill="#fef08a"/><rect x="29.3" y="28" width="1.2" height="1" rx="0.2" fill="#fef08a"/><rect x="20" y="14" width="8" height="5" rx="1.5" fill="#bfdbfe" stroke="#2563eb" stroke-width="0.5"/><rect x="21" y="15" width="6" height="3" rx="1" fill="#93c5fd" stroke="#3b82f6" stroke-width="0.3"/><rect x="22" y="22" width="4" height="3" rx="0.5" fill="#1e40af" stroke="#1e3a5f" stroke-width="0.5"/><line x1="22" y1="23.5" x2="26" y2="23.5" stroke="#f8fafc" stroke-width="0.6"/><rect x="20" y="8" width="8" height="4" rx="1" fill="#1e3a5f" stroke="#1e40af" stroke-width="0.6"/><rect x="21" y="9" width="1.5" height="1" rx="0.2" fill="#fef08a" opacity="0.9"/><rect x="23.25" y="9" width="1.5" height="1" rx="0.2" fill="#fef08a" opacity="0.9"/><rect x="25.5" y="9" width="1.5" height="1" rx="0.2" fill="#fef08a" opacity="0.9"/><rect x="20" y="30" width="8" height="6" rx="1" fill="#e2e8f0" stroke="#94a3b8" stroke-width="0.4"/><circle cx="24" cy="33" r="2.5" fill="none" stroke="#2563eb" stroke-width="0.5"/><text x="24" y="34" text-anchor="middle" font-size="3" fill="#2563eb" font-family="sans-serif">H</text><line x1="22" y1="6" x2="26" y2="6" stroke="#2563eb" stroke-width="0.8" stroke-linecap="round"/></svg>`),
-    fishing:   svgDataUri(`<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 48 48"><path d="M24 5 C24 5 20 7 19 10 L17 38 C17 41 20 44 24 44 C28 44 31 41 31 38 L29 10 C28 7 24 5 24 5 Z" fill="#84cc16" stroke="#4d7c0f" stroke-width="1"/><rect x="19" y="12" width="10" height="24" rx="1.5" fill="#a3e635" stroke="#65a30d" stroke-width="0.5"/><rect x="21" y="12" width="6" height="5" rx="1" fill="#365314" stroke="#1a2e05" stroke-width="0.6"/><rect x="22" y="13" width="1.2" height="1" rx="0.2" fill="#67e8f9" opacity="0.7"/><rect x="24.4" y="13" width="1.2" height="1" rx="0.2" fill="#67e8f9" opacity="0.7"/><line x1="24" y1="18" x2="24" y2="14" stroke="#4d7c0f" stroke-width="1.2"/><line x1="24" y1="14" x2="32" y2="10" stroke="#4d7c0f" stroke-width="1"/><line x1="32" y1="10" x2="32" y2="14" stroke="#65a30d" stroke-width="0.5" stroke-dasharray="1 1"/><path d="M20 28 Q24 32 28 28" fill="none" stroke="#4d7c0f" stroke-width="0.6" stroke-dasharray="1.5 1"/><path d="M20 31 Q24 35 28 31" fill="none" stroke="#4d7c0f" stroke-width="0.6" stroke-dasharray="1.5 1"/><path d="M20 34 Q24 38 28 34" fill="none" stroke="#4d7c0f" stroke-width="0.6" stroke-dasharray="1.5 1"/><circle cx="22" cy="25" r="1.8" fill="#65a30d" stroke="#4d7c0f" stroke-width="0.5"/><circle cx="26" cy="25" r="1.8" fill="#65a30d" stroke="#4d7c0f" stroke-width="0.5"/><line x1="20.2" y1="25" x2="23.8" y2="25" stroke="#4d7c0f" stroke-width="0.3"/><line x1="24.2" y1="25" x2="27.8" y2="25" stroke="#4d7c0f" stroke-width="0.3"/><line x1="24" y1="18" x2="24" y2="22" stroke="#4d7c0f" stroke-width="0.8"/><circle cx="24" cy="18" r="0.5" fill="#a3e635"/></svg>`),
-    military:  svgDataUri(`<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 48 48"><path d="M24 2 C24 2 21 4 20 7 L18 12 L16 36 C16 40 19 44 24 44 C29 44 32 40 32 36 L30 12 L28 7 C27 4 24 2 24 2 Z" fill="#475569" stroke="#334155" stroke-width="1"/><path d="M20 10 L18 36 C18 39 20 42 24 42 C28 42 30 39 30 36 L28 10 Z" fill="#64748b" stroke="#475569" stroke-width="0.5"/><circle cx="24" cy="11" r="2.5" fill="#334155" stroke="#1e293b" stroke-width="0.6"/><line x1="24" y1="11" x2="24" y2="5" stroke="#334155" stroke-width="1.5" stroke-linecap="round"/><rect x="20" y="17" width="8" height="8" rx="1" fill="#334155" stroke="#1e293b" stroke-width="0.6"/><rect x="21" y="18" width="1.2" height="0.8" rx="0.2" fill="#67e8f9" opacity="0.6"/><rect x="23.4" y="18" width="1.2" height="0.8" rx="0.2" fill="#67e8f9" opacity="0.6"/><rect x="25.8" y="18" width="1.2" height="0.8" rx="0.2" fill="#67e8f9" opacity="0.6"/><line x1="24" y1="17" x2="24" y2="14" stroke="#94a3b8" stroke-width="0.8"/><line x1="21" y1="14.5" x2="27" y2="14.5" stroke="#94a3b8" stroke-width="0.6"/><rect x="22" y="14" width="4" height="1" rx="0.3" fill="#94a3b8" stroke="#64748b" stroke-width="0.3"/><rect x="21" y="26" width="2.5" height="2.5" rx="0.3" fill="#1e293b" stroke="#475569" stroke-width="0.4"/><rect x="24.5" y="26" width="2.5" height="2.5" rx="0.3" fill="#1e293b" stroke="#475569" stroke-width="0.4"/><rect x="21" y="29.5" width="2.5" height="2.5" rx="0.3" fill="#1e293b" stroke="#475569" stroke-width="0.4"/><rect x="24.5" y="29.5" width="2.5" height="2.5" rx="0.3" fill="#1e293b" stroke="#475569" stroke-width="0.4"/><circle cx="24" cy="35" r="1.8" fill="#334155" stroke="#1e293b" stroke-width="0.5"/><line x1="24" y1="35" x2="24" y2="38" stroke="#334155" stroke-width="1" stroke-linecap="round"/><rect x="20" y="37" width="8" height="4" rx="0.5" fill="#475569" stroke="#334155" stroke-width="0.4"/><circle cx="24" cy="39" r="1.5" fill="none" stroke="#94a3b8" stroke-width="0.4"/><rect x="22" y="22" width="1.5" height="2" rx="0.3" fill="#1e293b"/><rect x="24.5" y="22" width="1.5" height="2" rx="0.3" fill="#1e293b"/></svg>`),
-    unknown:   svgDataUri(`<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 48 48"><path d="M24 5 C24 5 20 7 18 11 L16 37 C16 41 19 44 24 44 C29 44 32 41 32 37 L30 11 C28 7 24 5 24 5 Z" fill="#9ca3af" stroke="#6b7280" stroke-width="1"/><rect x="19" y="13" width="10" height="22" rx="1.5" fill="#d1d5db" stroke="#9ca3af" stroke-width="0.5"/><rect x="21" y="30" width="6" height="4" rx="1" fill="#4b5563" stroke="#374151" stroke-width="0.6"/><rect x="22" y="31" width="1.2" height="1" rx="0.2" fill="#67e8f9" opacity="0.5"/><rect x="24.4" y="31" width="1.2" height="1" rx="0.2" fill="#67e8f9" opacity="0.5"/><rect x="20" y="15" width="8" height="5" rx="0.5" fill="#b5b5b5" stroke="#9ca3af" stroke-width="0.4"/><rect x="20" y="22" width="8" height="5" rx="0.5" fill="#b5b5b5" stroke="#9ca3af" stroke-width="0.4"/><line x1="24" y1="30" x2="24" y2="27" stroke="#6b7280" stroke-width="0.8"/><text x="24" y="20" text-anchor="middle" font-size="5" fill="#4b5563" font-family="sans-serif" font-weight="bold">?</text></svg>`),
-};
-const getShipSVG = (type: string) => VESSEL_ICONS[type] || VESSEL_ICONS.unknown;
-
-// Dark vessel icon: ominous ship silhouette with red warning badge from dark-vessel.svg
-const DARK_VESSEL_ICON = `data:image/svg+xml,` + encodeURIComponent(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 48 48"><path d="M24 4 C24 4 20 7 18 10 L16 36 C16 40 19 43 24 43 C29 43 32 40 32 36 L30 10 C28 7 24 4 24 4 Z" fill="#1f2937" stroke="#dc2626" stroke-width="1.2"/><path d="M20 12 L18 36 C18 39 20 41 24 41 C28 41 30 39 30 36 L28 12 Z" fill="#374151" stroke="#1f2937" stroke-width="0.5"/><rect x="20" y="18" width="8" height="7" rx="1" fill="#111827" stroke="#1f2937" stroke-width="0.6"/><rect x="21" y="19.5" width="1.5" height="0.8" rx="0.2" fill="#374151" opacity="0.5"/><rect x="23.25" y="19.5" width="1.5" height="0.8" rx="0.2" fill="#374151" opacity="0.5"/><rect x="25.5" y="19.5" width="1.5" height="0.8" rx="0.2" fill="#374151" opacity="0.5"/><line x1="24" y1="18" x2="24" y2="15" stroke="#4b5563" stroke-width="0.8"/><line x1="22" y1="8" x2="26" y2="8" stroke="#6b7280" stroke-width="0.8" stroke-linecap="round"/><rect x="20" y="33" width="8" height="5" rx="0.5" fill="#111827" stroke="#1f2937" stroke-width="0.4"/><circle cx="21.5" cy="28" r="1.8" fill="#111827" stroke="#374151" stroke-width="0.4"/><circle cx="26.5" cy="28" r="1.8" fill="#111827" stroke="#374151" stroke-width="0.4"/><circle cx="35" cy="10" r="7" fill="#ef4444" stroke="#991b1b" stroke-width="1"/><rect x="33.5" y="5.5" width="3" height="5.5" rx="1.5" fill="#fff"/><circle cx="35" cy="13.5" r="1.3" fill="#fff"/></svg>`
-);
+const getShipSVG = getShipIcon;
 
 // Metadata stored per aircraft for picking and EntityHUD.
 interface AircraftMeta {
@@ -49,6 +21,11 @@ interface AircraftMeta {
     lat: number;
     lng: number;
     alt: number;
+    // New fields from OpenSky state vector
+    squawk: string | null;
+    verticalRate: number | null;  // m/s
+    onGround: boolean;
+    lastContact: number | null;   // unix timestamp
 }
 
 // Global registry so Globe.tsx picking can look up aircraft metadata by billboard.
@@ -346,6 +323,10 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                         lat: ac.lat,
                         lng: ac.lng,
                         alt: ac.alt,
+                        squawk: ac.squawk || null,
+                        verticalRate: ac.verticalRate ?? null,
+                        onGround: ac.onGround === true,
+                        lastContact: ac.lastContact || null,
                     });
 
                     // Yield every AVI_CHUNK_SIZE aircraft so input events
@@ -407,7 +388,7 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                     const initialShowTrails = useTimelineStore.getState().showTrajectories;
                     entity = maritimeDs.entities.add({
                         id: v.id,
-                        name: `Ship ${v.id}`,
+                        name: v.name || `Ship ${v.id}`,
                         position: positionProperty as any,
                         show: showVessel,
                         properties: new Cesium.PropertyBag({
@@ -415,6 +396,18 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                             subtype: v.type,
                             speed: v.speed,
                             heading: v.heading || 0,
+                            // New AIS fields
+                            vesselName: v.name || null,
+                            callSign: v.callSign || null,
+                            imo: v.imo || null,
+                            navigationStatus: v.navigationStatus || null,
+                            destination: v.destination || null,
+                            eta: v.eta || null,
+                            rateOfTurn: v.rateOfTurn ?? null,
+                            draught: v.draught || null,
+                            vesselLength: v.length || null,
+                            beam: v.beam || null,
+                            cog: v.cog ?? null,
                         }),
                         billboard: {
                             image: getShipSVG(v.type),
@@ -476,7 +469,31 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                         } else {
                             (entity.properties as any).heading = new Cesium.ConstantProperty(v.heading || 0);
                         }
+                        // Update AIS enriched fields from backend
+                        const aisFields: Record<string, any> = {
+                            vesselName: v.name || null,
+                            callSign: v.callSign || null,
+                            imo: v.imo || null,
+                            navigationStatus: v.navigationStatus || null,
+                            destination: v.destination || null,
+                            eta: v.eta || null,
+                            rateOfTurn: v.rateOfTurn ?? null,
+                            draught: v.draught || null,
+                            vesselLength: v.length || null,
+                            beam: v.beam || null,
+                            cog: v.cog ?? null,
+                        };
+                        for (const [key, val] of Object.entries(aisFields)) {
+                            const prop = (entity.properties as any)[key];
+                            if (prop instanceof Cesium.ConstantProperty) {
+                                prop.setValue(val);
+                            } else {
+                                (entity.properties as any)[key] = new Cesium.ConstantProperty(val);
+                            }
+                        }
                     }
+                    // Update entity name
+                    if (v.name) entity.name = v.name;
                 }
 
                 const positionProperty = entity.position as Cesium.SampledPositionProperty;
@@ -539,6 +556,7 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
 
                     let entity = darkVesselDs.entities.getById(darkId);
                     if (!entity) {
+                        if (dv.lat == null || dv.lng == null || isNaN(dv.lat) || isNaN(dv.lng)) continue;
                         const darkSinceDate = new Date(dv.darkSince);
                         const darkMinutes = Math.round((Date.now() - dv.darkSince) / 60000);
                         darkVesselDs.entities.add({
@@ -665,24 +683,34 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
         });
     }, [showTrajectories]);
 
-    // ---- Effect 4: per-subtype visibility (aviation + maritime) ----
+    // ---- Effect 4: per-subtype visibility + entity isolation (aviation + maritime + dark) ----
+    const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
     useEffect(() => {
-        const hasAviationFilters = Object.keys(subtypeVisibility).some(k => k.startsWith('aviation:'));
-        if (hasAviationFilters) {
-            aviBillboardMap.current.forEach((bb, id) => {
-                const meta = aircraftMetaMap.get(id);
-                if (meta) {
-                    bb.show = subtypeVisibility[`aviation:${meta.type}`] !== false;
-                }
+        // Aviation subtype filtering + Solo isolation
+        aviBillboardMap.current.forEach((bb, id) => {
+            const meta = aircraftMetaMap.get(id);
+            if (!meta) return;
+            const subtypeOk = subtypeVisibility[`aviation:${meta.type}`] !== false;
+            const soloOk = !isolatedEntityId || isolatedEntityId === id;
+            bb.show = subtypeOk && soloOk;
+        });
+
+        // Maritime subtype filtering + Solo isolation
+        if (maritimeDsRef.current) {
+            maritimeDsRef.current.entities.values.forEach(e => {
+                const sub = (e.properties as any)?.subtype?.getValue?.() ?? 'unknown';
+                const subtypeOk = subtypeVisibility[`maritime:${sub}`] !== false;
+                const soloOk = !isolatedEntityId || isolatedEntityId === e.id;
+                e.show = subtypeOk && soloOk;
             });
         }
 
-        const hasMaritimeFilters = Object.keys(subtypeVisibility).some(k => k.startsWith('maritime:'));
-        if (hasMaritimeFilters && maritimeDsRef.current) {
-            maritimeDsRef.current.entities.values.forEach(e => {
-                const sub = (e.properties as any)?.subtype?.getValue?.() ?? 'unknown';
-                e.show = subtypeVisibility[`maritime:${sub}`] !== false;
+        // Dark vessel filtering (follows maritime visibility)
+        if (darkVesselDsRef.current) {
+            darkVesselDsRef.current.entities.values.forEach(e => {
+                const soloOk = !isolatedEntityId || isolatedEntityId === e.id;
+                e.show = soloOk;
             });
         }
-    }, [subtypeVisibility]);
+    }, [subtypeVisibility, isolatedEntityId]);
 }

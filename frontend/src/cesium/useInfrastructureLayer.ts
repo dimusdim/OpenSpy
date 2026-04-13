@@ -3,63 +3,7 @@ import * as Cesium from 'cesium';
 import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
-
-// ---------------------------------------------------------------------------
-// SVG billboard icons per infrastructure type
-// ---------------------------------------------------------------------------
-
-const svgUri = (body: string) =>
-  `data:image/svg+xml,` +
-  encodeURIComponent(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`
-  );
-
-const ICONS: Record<string, string> = {
-  // Yellow lightning bolt — power plant
-  power_plant: svgUri(
-    `<polygon points="13,2 3,14 12,14 11,22 21,10 12,10" fill="#eab308" stroke="#000" stroke-width="1"/>`
-  ),
-  // Red factory — refinery
-  refinery: svgUri(
-    `<rect x="4" y="12" width="16" height="10" fill="#ef4444" stroke="#000" stroke-width="1" rx="1"/>` +
-    `<rect x="6" y="6" width="3" height="6" fill="#ef4444" stroke="#000" stroke-width="1"/>` +
-    `<rect x="11" y="8" width="3" height="4" fill="#ef4444" stroke="#000" stroke-width="1"/>` +
-    `<line x1="7.5" y1="2" x2="7.5" y2="6" stroke="#666" stroke-width="1.5"/>` +
-    `<line x1="12.5" y1="4" x2="12.5" y2="8" stroke="#666" stroke-width="1.5"/>`
-  ),
-  // Blue water drop — desalination
-  desalination: svgUri(
-    `<path d="M12 2 C12 2 5 12 5 16 a7 7 0 0 0 14 0 C19 12 12 2 12 2 Z" fill="#3b82f6" stroke="#000" stroke-width="1"/>`
-  ),
-  // Gray shield — military
-  military: svgUri(
-    `<path d="M12 2 L4 6 V12 C4 17 8 21 12 22 C16 21 20 17 20 12 V6 Z" fill="#6b7280" stroke="#000" stroke-width="1"/>` +
-    `<path d="M9 12 L11 14 L15 10" stroke="#fff" stroke-width="2" fill="none"/>`
-  ),
-  // Orange circle with zap — power substation (OSM via Overpass)
-  power_substation: svgUri(
-    `<circle cx="12" cy="12" r="9" fill="#f97316" fill-opacity="0.8" stroke="#000" stroke-width="1"/>` +
-    `<polygon points="13,5 8,13 11,13 10,19 16,11 13,11" fill="#fff" stroke="none"/>`
-  ),
-  // Cyan antenna — communication tower
-  communication_tower: svgUri(
-    `<line x1="12" y1="2" x2="12" y2="18" stroke="#06b6d4" stroke-width="2"/>` +
-    `<line x1="6" y1="8" x2="12" y2="2" stroke="#06b6d4" stroke-width="1.5"/>` +
-    `<line x1="18" y1="8" x2="12" y2="2" stroke="#06b6d4" stroke-width="1.5"/>` +
-    `<circle cx="12" cy="4" r="2" fill="#06b6d4" stroke="#000" stroke-width="0.5"/>` +
-    `<rect x="9" y="18" width="6" height="4" fill="#06b6d4" stroke="#000" stroke-width="0.5" rx="1"/>`
-  ),
-  // Gray plane — aerodrome
-  aerodrome: svgUri(
-    `<path d="M12 2 L14 8 L22 10 L14 12 L14 18 L18 20 L18 22 L12 20 L6 22 L6 20 L10 18 L10 12 L2 10 L10 8 Z" fill="#9ca3af" stroke="#000" stroke-width="0.8"/>`
-  ),
-  // Blue waves — dam / water infrastructure
-  dam: svgUri(
-    `<path d="M2 12 Q6 8 12 12 Q18 16 22 12" stroke="#3b82f6" stroke-width="2" fill="none"/>` +
-    `<path d="M2 16 Q6 12 12 16 Q18 20 22 16" stroke="#3b82f6" stroke-width="2" fill="none"/>` +
-    `<rect x="4" y="4" width="16" height="6" fill="#3b82f6" fill-opacity="0.3" stroke="#3b82f6" stroke-width="1" rx="1"/>`
-  ),
-};
+import { INFRA_ICONS } from '../icons/map-icons';
 
 const POWER_LINE_COLOR = Cesium.Color.ORANGE.withAlpha(0.6);
 
@@ -168,6 +112,9 @@ const INFRA_FETCH_TIMEOUT_MS = 70_000;
 // Camera altitude above which infrastructure icons are hidden.
 // Below this altitude, tiles load and billboards appear.
 const INFRA_ALTITUDE_CUTOFF_KM = 200;
+const INFRA_HEIGHT_BATCH_SIZE = 64;
+const INFRA_HEIGHT_SAMPLE_WIDTH_M = 2.0;
+const INFRA_ICON_SURFACE_OFFSET_M = 6.0;
 
 const INFRA_SUBTYPES: InfraMeta['subtype'][] = [
   'power_plant',
@@ -186,6 +133,118 @@ function emptyCounts(): Record<string, number> {
     acc[sub] = 0;
     return acc;
   }, {});
+}
+
+type InfraBillboardSeed = {
+  logicalId: string;
+  meta: InfraMeta;
+  lat: number;
+  lng: number;
+  image: string;
+  scale: number;
+};
+
+function collectHeightSampleExclusions(scene: Cesium.Scene): object[] {
+  const excluded: object[] = [];
+
+  for (let i = 0; i < scene.primitives.length; i++) {
+    const primitive = scene.primitives.get(i) as { isCesium3DTileset?: boolean };
+    if (!primitive?.isCesium3DTileset) excluded.push(primitive);
+  }
+
+  for (let i = 0; i < scene.groundPrimitives.length; i++) {
+    excluded.push(scene.groundPrimitives.get(i));
+  }
+
+  return excluded;
+}
+
+async function resolveBillboardPositions(
+  scene: Cesium.Scene,
+  seeds: InfraBillboardSeed[]
+): Promise<Cesium.Cartesian3[]> {
+  const fallback = seeds.map((seed) =>
+    Cesium.Cartesian3.fromDegrees(seed.lng, seed.lat, INFRA_ICON_SURFACE_OFFSET_M)
+  );
+
+  if (
+    seeds.length === 0 ||
+    scene.mode !== Cesium.SceneMode.SCENE3D ||
+    !scene.sampleHeightSupported
+  ) {
+    return fallback;
+  }
+
+  const excluded = collectHeightSampleExclusions(scene);
+  const resolved = fallback.slice();
+  const unresolvedIndices: number[] = [];
+
+  try {
+    for (let start = 0; start < seeds.length; start += INFRA_HEIGHT_BATCH_SIZE) {
+      const end = Math.min(start + INFRA_HEIGHT_BATCH_SIZE, seeds.length);
+
+      for (let i = start; i < end; i++) {
+        const seed = seeds[i];
+        const cartographic = Cesium.Cartographic.fromDegrees(seed.lng, seed.lat);
+        const sampledHeight = scene.sampleHeight(
+          cartographic,
+          excluded,
+          INFRA_HEIGHT_SAMPLE_WIDTH_M
+        );
+
+        if (typeof sampledHeight === 'number' && Number.isFinite(sampledHeight)) {
+          resolved[i] = Cesium.Cartesian3.fromDegrees(
+            seed.lng,
+            seed.lat,
+            sampledHeight + INFRA_ICON_SURFACE_OFFSET_M
+          );
+        } else {
+          unresolvedIndices.push(i);
+        }
+      }
+
+      if (end < seeds.length) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+    }
+
+    for (let start = 0; start < unresolvedIndices.length; start += INFRA_HEIGHT_BATCH_SIZE) {
+      const end = Math.min(start + INFRA_HEIGHT_BATCH_SIZE, unresolvedIndices.length);
+      const indices = unresolvedIndices.slice(start, end);
+      const cartographics = indices.map((index) => {
+        const seed = seeds[index];
+        return Cesium.Cartographic.fromDegrees(seed.lng, seed.lat);
+      });
+      const sampled = await scene.sampleHeightMostDetailed(
+        cartographics,
+        excluded,
+        INFRA_HEIGHT_SAMPLE_WIDTH_M
+      );
+
+      for (let i = 0; i < sampled.length; i++) {
+        const cartographic = sampled[i];
+        if (!cartographic || typeof cartographic.height !== 'number' || !Number.isFinite(cartographic.height)) {
+          continue;
+        }
+
+        const seed = seeds[indices[i]];
+        resolved[indices[i]] = Cesium.Cartesian3.fromDegrees(
+          seed.lng,
+          seed.lat,
+          cartographic.height + INFRA_ICON_SURFACE_OFFSET_M
+        );
+      }
+
+      if (end < unresolvedIndices.length) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+    }
+  } catch (err) {
+    console.warn('[Infrastructure] height sampling failed, falling back to ellipsoid anchors:', err);
+    return fallback;
+  }
+
+  return resolved;
 }
 
 /**
@@ -273,6 +332,7 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
   const isSourceOn = useTimelineStore((s) => s.sources.infrastructure);
   const isVisible = useTimelineStore((s) => s.visibility.infrastructure);
   const subtypeVisibility = useTimelineStore((s) => s.subtypeVisibility);
+  const isolatedEntityId = useTimelineStore((s) => s.isolatedEntityId);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tilesRef = useRef<Map<string, TileState>>(new Map());
   // Cells with fetches currently in flight.
@@ -297,14 +357,16 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
   // tile. Called on tile load (with current store state) and on subtype
   // visibility change (over every loaded tile).
   const applyTileVisibility = useCallback(
-    (tile: TileState, vis: Record<string, boolean>) => {
+    (tile: TileState, vis: Record<string, boolean>, soloId: string | null = null) => {
       const isSubShown = (sub: string) => vis[`infrastructure:${sub}`] !== false;
 
       const applyBillboard = (bb: Cesium.Billboard) => {
         const logicalId = infraInstanceToLogical.get(bb.id as string) ?? (bb.id as string);
         const meta = infraMetaMap.get(logicalId);
         if (!meta) return;
-        bb.show = isSubShown(meta.subtype);
+        const subtypeOk = isSubShown(meta.subtype);
+        const soloOk = !soloId || soloId === logicalId;
+        bb.show = subtypeOk && soloOk;
       };
       if (tile.mainBillboards) {
         for (let i = 0; i < tile.mainBillboards.length; i++) {
@@ -507,7 +569,7 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
           try {
             const records: any[] = mainResult.value.data ?? [];
             if (records.length > 0) {
-              const collection = new Cesium.BillboardCollection({ scene: v.scene });
+              const billboardSeeds: InfraBillboardSeed[] = [];
               for (let ri = 0; ri < records.length; ri++) {
                 const rec = records[ri];
                 const subtype = (rec.type || 'military') as InfraMeta['subtype'];
@@ -522,19 +584,61 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
                   source: isOverture ? 'Overture Maps' : 'OpenStreetMap',
                   description: rec.name || rec.type,
                 };
-                const instanceId = registerLogical(rec.id, meta);
-                collection.add({
-                  // Height 0 — CLAMP_TO_GROUND will project to terrain /
-                  // 3D-tile surface at render time.
-                  position: Cesium.Cartesian3.fromDegrees(rec.lng, rec.lat, 0),
-                  image: ICONS[subtype] || ICONS.military,
+                billboardSeeds.push({
+                  logicalId: rec.id,
+                  meta,
+                  lat: rec.lat,
+                  lng: rec.lng,
+                  image: INFRA_ICONS[subtype] || INFRA_ICONS.military,
                   scale: 0.9,
-                  id: instanceId,
-                  heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
-                  verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
                 });
 
                 if ((ri + 1) % INFRA_TILE_CHUNK_SIZE === 0 && ri + 1 < records.length) {
+                  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+                  if (v.isDestroyed() || !activeRef.current) {
+                    inFlightCellsRef.current.delete(key);
+                    return;
+                  }
+                  if (myGen !== genRef.current) {
+                    inFlightCellsRef.current.delete(key);
+                    return;
+                  }
+                  if (!useTimelineStore.getState().sources.infrastructure) {
+                    inFlightCellsRef.current.delete(key);
+                    return;
+                  }
+                }
+              }
+              const resolvedPositions = await resolveBillboardPositions(v.scene, billboardSeeds);
+              if (v.isDestroyed() || !activeRef.current) {
+                inFlightCellsRef.current.delete(key);
+                return;
+              }
+              if (myGen !== genRef.current) {
+                inFlightCellsRef.current.delete(key);
+                return;
+              }
+              if (!useTimelineStore.getState().sources.infrastructure) {
+                inFlightCellsRef.current.delete(key);
+                return;
+              }
+
+              const collection = new Cesium.BillboardCollection({ scene: v.scene });
+              for (let bi = 0; bi < billboardSeeds.length; bi++) {
+                const seed = billboardSeeds[bi];
+                const instanceId = registerLogical(seed.logicalId, seed.meta);
+                collection.add({
+                  position: resolvedPositions[bi],
+                  image: seed.image,
+                  scale: seed.scale,
+                  id: instanceId,
+                  heightReference: Cesium.HeightReference.NONE,
+                  verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+                  // Keep icons visible even when the sampled mesh is slightly above the anchor.
+                  disableDepthTestDistance: Number.POSITIVE_INFINITY,
+                });
+
+                if ((bi + 1) % INFRA_TILE_CHUNK_SIZE === 0 && bi + 1 < billboardSeeds.length) {
                   await new Promise<void>((resolve) => setTimeout(resolve, 0));
                   if (v.isDestroyed() || !activeRef.current) {
                     inFlightCellsRef.current.delete(key);
@@ -568,7 +672,7 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
         if (pwrResult.status === 'fulfilled' && pwrResult.value) {
           try {
             const pwrRecords: any[] = pwrResult.value.data ?? [];
-            const powerBillboardCollection = new Cesium.BillboardCollection({ scene: v.scene });
+            const powerBillboardSeeds: InfraBillboardSeed[] = [];
             const powerLineInstances: Cesium.GeometryInstance[] = [];
 
             for (let pri = 0; pri < pwrRecords.length; pri++) {
@@ -622,19 +726,62 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
                   source: 'OpenStreetMap',
                   description: `${rec.name || subtype}${rec.source ? ' (' + rec.source + ')' : ''}`,
                 };
-                const instanceId = registerLogical(rec.id, meta);
-                powerBillboardCollection.add({
-                  // Height 0 + CLAMP_TO_GROUND + BOTTOM origin.
-                  position: Cesium.Cartesian3.fromDegrees(rec.lng, rec.lat, 0),
-                  image: subtype === 'power_substation' ? ICONS.power_substation : ICONS.power_plant,
+                powerBillboardSeeds.push({
+                  logicalId: rec.id,
+                  meta,
+                  lat: rec.lat,
+                  lng: rec.lng,
+                  image: subtype === 'power_substation' ? INFRA_ICONS.power_substation : INFRA_ICONS.power_plant,
                   scale: 0.85,
-                  id: instanceId,
-                  heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
-                  verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
                 });
               }
 
               if ((pri + 1) % INFRA_TILE_CHUNK_SIZE === 0 && pri + 1 < pwrRecords.length) {
+                await new Promise<void>((resolve) => setTimeout(resolve, 0));
+                if (v.isDestroyed() || !activeRef.current) {
+                  inFlightCellsRef.current.delete(key);
+                  return;
+                }
+                if (myGen !== genRef.current) {
+                  inFlightCellsRef.current.delete(key);
+                  return;
+                }
+                if (!useTimelineStore.getState().sources.infrastructure) {
+                  inFlightCellsRef.current.delete(key);
+                  return;
+                }
+              }
+            }
+
+            const powerBillboardCollection = new Cesium.BillboardCollection({ scene: v.scene });
+            const resolvedPowerPositions = await resolveBillboardPositions(v.scene, powerBillboardSeeds);
+            if (v.isDestroyed() || !activeRef.current) {
+              inFlightCellsRef.current.delete(key);
+              return;
+            }
+            if (myGen !== genRef.current) {
+              inFlightCellsRef.current.delete(key);
+              return;
+            }
+            if (!useTimelineStore.getState().sources.infrastructure) {
+              inFlightCellsRef.current.delete(key);
+              return;
+            }
+
+            for (let pbi = 0; pbi < powerBillboardSeeds.length; pbi++) {
+              const seed = powerBillboardSeeds[pbi];
+              const instanceId = registerLogical(seed.logicalId, seed.meta);
+              powerBillboardCollection.add({
+                position: resolvedPowerPositions[pbi],
+                image: seed.image,
+                scale: seed.scale,
+                id: instanceId,
+                heightReference: Cesium.HeightReference.NONE,
+                verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+                disableDepthTestDistance: Number.POSITIVE_INFINITY,
+              });
+
+              if ((pbi + 1) % INFRA_TILE_CHUNK_SIZE === 0 && pbi + 1 < powerBillboardSeeds.length) {
                 await new Promise<void>((resolve) => setTimeout(resolve, 0));
                 if (v.isDestroyed() || !activeRef.current) {
                   inFlightCellsRef.current.delete(key);
@@ -683,7 +830,7 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
 
       // Apply current subtype visibility before the new primitives hit
       // the next render — no flash for disabled subtypes.
-      applyTileVisibility(tile, useTimelineStore.getState().subtypeVisibility);
+      applyTileVisibility(tile, useTimelineStore.getState().subtypeVisibility, useTimelineStore.getState().isolatedEntityId);
       if (tile.powerLinePrimitive && !tile.powerLinePrimitive.ready) {
         const prim = tile.powerLinePrimitive;
         const waitReady = (firedTimerId?: ReturnType<typeof setTimeout>) => {
@@ -696,7 +843,7 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
             pendingTimersRef.current.add(t);
             return;
           }
-          applyTileVisibility(tile, useTimelineStore.getState().subtypeVisibility);
+          applyTileVisibility(tile, useTimelineStore.getState().subtypeVisibility, useTimelineStore.getState().isolatedEntityId);
         };
         waitReady();
       }
@@ -913,12 +1060,12 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
     });
   }, [isSourceOn, isVisible]);
 
-  // ---- Effect 4: per-subtype visibility ----
+  // ---- Effect 4: per-subtype visibility + Solo isolation ----
   useEffect(() => {
     tilesRef.current.forEach((tile) => {
-      applyTileVisibility(tile, subtypeVisibility);
+      applyTileVisibility(tile, subtypeVisibility, isolatedEntityId);
     });
-  }, [subtypeVisibility, applyTileVisibility]);
+  }, [subtypeVisibility, isolatedEntityId, applyTileVisibility]);
 
   // ---- Effect 5: source-off scene clear ----
   // On source-off, evict every loaded tile + reset the in-memory maps

@@ -3,31 +3,28 @@ import * as Cesium from 'cesium';
 import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
-
-// Enhanced conflict marker icons — each type has a distinct shape.
-const ICON_EXPLOSIONS = `data:image/svg+xml,` + encodeURIComponent(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 48 48"><circle cx="24" cy="24" r="20" fill="#ef4444" opacity="0.12"/><polygon points="24,2 27,14 34,6 30,16 42,12 33,20 46,24 33,28 42,36 30,32 34,42 27,34 24,46 21,34 14,42 18,32 6,36 15,28 2,24 15,20 6,12 18,16 14,6 21,14" fill="#ef4444" stroke="#991b1b" stroke-width="0.8"/><polygon points="24,10 27,18 32,13 29,19 38,18 31,22 38,24 31,26 38,30 29,29 32,35 27,30 24,38 21,30 16,35 19,29 10,30 17,26 10,24 17,22 10,18 19,19 16,13 21,18" fill="#f97316" stroke="#ea580c" stroke-width="0.5"/><circle cx="24" cy="24" r="5" fill="#fbbf24" stroke="#f59e0b" stroke-width="0.5"/><circle cx="24" cy="24" r="2.5" fill="#fef3c7" opacity="0.8"/><circle cx="24" cy="24" r="1" fill="#ffffff"/></svg>`
-);
-// Battles icon: assault rifle silhouette from conflict-battles.svg
-const ICON_BATTLES = `data:image/svg+xml,` + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 48 48"><path d="M2 22 L10 22 L10 18 L6 16 L2 18 Z" fill="#f97316" stroke="#000" stroke-width="0.8" stroke-linejoin="round"/><path d="M10 18 L10 24 L34 24 L36 20 L34 18 L10 18 Z" fill="#f97316" stroke="#000" stroke-width="0.8" stroke-linejoin="round"/><rect x="34" y="19" width="12" height="3" rx="0.5" fill="#f97316" stroke="#000" stroke-width="0.8"/><rect x="45" y="18" width="2" height="5" rx="0.3" fill="#f97316" stroke="#000" stroke-width="0.8"/><rect x="42" y="16" width="1.5" height="3" rx="0.3" fill="#f97316" stroke="#000" stroke-width="0.8"/><rect x="14" y="16" width="1.5" height="2" rx="0.3" fill="#f97316" stroke="#000" stroke-width="0.8"/><path d="M22 24 L24 24 L26 36 L20 36 Z" fill="#f97316" stroke="#000" stroke-width="0.8" stroke-linejoin="round"/><path d="M28 24 L30 24 L31 34 L27 34 Z" fill="#f97316" stroke="#000" stroke-width="0.8" stroke-linejoin="round"/><path d="M25 24 Q26 28 29 28 L29 24" fill="none" stroke="#000" stroke-width="0.8"/><rect x="20" y="16.5" width="14" height="1.5" rx="0.5" fill="#f97316" stroke="#000" stroke-width="0.6"/></svg>`);
-// Violence icon: skull and crossbones from conflict-violence.svg
-const ICON_VIOLENCE = `data:image/svg+xml,` + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 48 48"><path d="M8 10 L40 38" stroke="#eab308" stroke-width="4" stroke-linecap="round" fill="none"/><circle cx="7" cy="8" r="2.5" fill="#eab308" stroke="#000" stroke-width="0.8"/><circle cx="10" cy="11" r="2.5" fill="#eab308" stroke="#000" stroke-width="0.8"/><circle cx="41" cy="40" r="2.5" fill="#eab308" stroke="#000" stroke-width="0.8"/><circle cx="38" cy="37" r="2.5" fill="#eab308" stroke="#000" stroke-width="0.8"/><path d="M40 10 L8 38" stroke="#eab308" stroke-width="4" stroke-linecap="round" fill="none"/><circle cx="41" cy="8" r="2.5" fill="#eab308" stroke="#000" stroke-width="0.8"/><circle cx="38" cy="11" r="2.5" fill="#eab308" stroke="#000" stroke-width="0.8"/><circle cx="7" cy="40" r="2.5" fill="#eab308" stroke="#000" stroke-width="0.8"/><circle cx="10" cy="37" r="2.5" fill="#eab308" stroke="#000" stroke-width="0.8"/><ellipse cx="24" cy="18" rx="12" ry="11" fill="#eab308" stroke="#000" stroke-width="1"/><path d="M14 22 L14 28 Q16 32 20 30 L22 32 L24 30 L26 32 L28 30 Q32 32 34 28 L34 22" fill="#eab308" stroke="#000" stroke-width="1"/><ellipse cx="19" cy="17" rx="3.5" ry="4" fill="#000"/><ellipse cx="29" cy="17" rx="3.5" ry="4" fill="#000"/><path d="M22 23 L24 21 L26 23" fill="#000" stroke="#000" stroke-width="0.5"/><line x1="18" y1="28" x2="30" y2="28" stroke="#000" stroke-width="0.6"/><line x1="21" y1="26" x2="21" y2="30" stroke="#000" stroke-width="0.5"/><line x1="24" y1="26" x2="24" y2="32" stroke="#000" stroke-width="0.5"/><line x1="27" y1="26" x2="27" y2="30" stroke="#000" stroke-width="0.5"/></svg>`);
-
-function getConflictIcon(eventType: string): string {
-    if (eventType.includes('Explosions') || eventType.includes('Remote violence')) return ICON_EXPLOSIONS;
-    if (eventType === 'Battles') return ICON_BATTLES;
-    return ICON_VIOLENCE; // Violence against civilians
-}
+import { getConflictIcon } from '../icons/map-icons';
 
 function getConflictColor(eventType: string): Cesium.Color {
     if (eventType.includes('Explosions') || eventType.includes('Remote violence')) return Cesium.Color.RED;
-    if (eventType === 'Battles') return Cesium.Color.ORANGE;
+    if (eventType === 'Battles' || eventType === 'Fight') return Cesium.Color.ORANGE;
+    if (eventType === 'Assault' || eventType === 'Mass Violence') return Cesium.Color.RED;
+    if (eventType === 'Protest') return Cesium.Color.YELLOW;
+    if (eventType === 'Threaten') return Cesium.Color.fromCssColorString('#f59e0b'); // amber
+    if (eventType === 'Force posture') return Cesium.Color.fromCssColorString('#a855f7'); // purple
+    if (eventType === 'Coerce') return Cesium.Color.fromCssColorString('#f97316'); // deep orange
     return Cesium.Color.YELLOW;
 }
 
 function getSubtypeKey(eventType: string): string {
     if (eventType.includes('Explosions') || eventType.includes('Remote violence')) return 'explosions';
-    if (eventType === 'Battles') return 'battles';
+    if (eventType === 'Battles' || eventType === 'Fight') return 'battles';
+    if (eventType === 'Assault') return 'assaults';
+    if (eventType === 'Mass Violence') return 'mass_violence';
+    if (eventType === 'Protest') return 'protests';
+    if (eventType === 'Threaten') return 'threats';
+    if (eventType === 'Force posture') return 'force_posture';
+    if (eventType === 'Coerce') return 'coercion';
     return 'violence';
 }
 
@@ -62,21 +59,44 @@ export function useConflictsLayer(viewer: Cesium.Viewer | null) {
             const ds = dsRef.current;
             if (!ds) return;
             try {
-                const res = await axios.get(`${API_URL}/api/conflicts`);
+                // Fetch ACLED + GDELT in parallel, merge results
+                const [acledRes, gdeltRes] = await Promise.allSettled([
+                    axios.get(`${API_URL}/api/conflicts`),
+                    axios.get(`${API_URL}/api/gdelt-conflicts`),
+                ]);
                 if (!active) return;
 
-                const events = res.data;
-                // Successful fetch (even empty) == streaming. Don't fall back
-                // to 'connecting' — that overwrites 'auth-missing' propagated
-                // from /api/status when the ACLED key isn't configured.
+                const acledEvents = acledRes.status === 'fulfilled' ? acledRes.value.data : [];
+                const gdeltEvents = gdeltRes.status === 'fulfilled' ? gdeltRes.value.data : [];
+
+                // Normalize GDELT events to match ACLED shape for rendering
+                const normalizedGdelt = gdeltEvents.map((ev: any) => ({
+                    ...ev,
+                    event_type: ev.eventType || ev.event_type || 'Unknown',
+                    sub_event_type: ev.subEventType || ev.sub_event_type || '',
+                    fatalities: ev.fatalities || 0,
+                    country: ev.country || ev.location || '',
+                    actor1: ev.actor1 || '',
+                    actor2: ev.actor2 || '',
+                    event_date: ev.date || ev.event_date || '',
+                    notes: ev.sourceUrl ? `Source: ${ev.sourceUrl}` : '',
+                    source: 'GDELT',
+                }));
+
+                const events = [
+                    ...acledEvents.map((ev: any) => ({ ...ev, source: 'ACLED' })),
+                    ...normalizedGdelt,
+                ];
+
                 useTimelineStore.getState().setStreamMetric('conflicts', {
                     count: events.length,
-                    status: 'streaming',
+                    status: events.length > 0 ? 'streaming' : 'connecting',
                 });
 
                 ds.entities.removeAll();
 
                 for (const ev of events) {
+                    if (ev.lat == null || ev.lng == null || isNaN(ev.lat) || isNaN(ev.lng)) continue;
                     const color = getConflictColor(ev.event_type);
                     const subtypeKey = getSubtypeKey(ev.event_type);
 
@@ -143,13 +163,15 @@ export function useConflictsLayer(viewer: Cesium.Viewer | null) {
     }, [isSourceOn, isVisible]);
 
     // ---- Effect 4: per-subtype visibility ----
+    const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
     useEffect(() => {
         if (!dsRef.current) return;
         dsRef.current.entities.values.forEach(e => {
             const sub = (e.properties as any)?.subtype?.getValue?.() ?? 'violence';
-            e.show = subtypeVisibility[`conflicts:${sub}`] !== false;
+            const subtypeOk = subtypeVisibility[`conflicts:${sub}`] !== false;
+            e.show = subtypeOk && (!isolatedEntityId || isolatedEntityId === e.id);
         });
-    }, [subtypeVisibility]);
+    }, [subtypeVisibility, isolatedEntityId]);
 
     // ---- Effect 5: source-off scene clear ----
     useEffect(() => {

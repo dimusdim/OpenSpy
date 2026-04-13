@@ -3,9 +3,7 @@ import * as Cesium from 'cesium';
 import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
-
-// GFW dark/gap event icon: no-fishing sign from gfw-event.svg
-const GFW_ICON = `data:image/svg+xml,` + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 48 48"><circle cx="24" cy="24" r="20" fill="none" stroke="#8b5cf6" stroke-width="2.5"/><path d="M12 24 Q18 16 28 18 L34 14 L34 20 Q38 24 34 28 L34 34 L28 30 Q18 32 12 24 Z" fill="#a78bfa" stroke="#7c3aed" stroke-width="0.8"/><circle cx="18" cy="23" r="1.8" fill="#8b5cf6"/><circle cx="18" cy="23" r="0.8" fill="#1e1b4b"/><path d="M33 16 L36 14 L34 20" fill="none" stroke="#7c3aed" stroke-width="0.6"/><path d="M33 32 L36 34 L34 28" fill="none" stroke="#7c3aed" stroke-width="0.6"/><line x1="10" y1="38" x2="38" y2="10" stroke="#8b5cf6" stroke-width="3" stroke-linecap="round"/></svg>`);
+import { GFW_ICON } from '../icons/map-icons';
 
 export function useGFWLayer(viewer: Cesium.Viewer | null) {
     const isSourceOn = useTimelineStore(s => s.sources.gfw);
@@ -50,6 +48,7 @@ export function useGFWLayer(viewer: Cesium.Viewer | null) {
                 ds.entities.removeAll();
 
                 for (const ev of events) {
+                    if (ev.lat == null || ev.lng == null || isNaN(ev.lat) || isNaN(ev.lng)) continue;
                     ds.entities.add({
                         id: ev.id,
                         name: `GFW: ${ev.vesselName || 'Unknown Vessel'} (${ev.flagState || '??'})`,
@@ -62,6 +61,11 @@ export function useGFWLayer(viewer: Cesium.Viewer | null) {
                             flagState: ev.flagState,
                             start: ev.start,
                             end: ev.end,
+                            confidence: ev.confidence ?? null,
+                            duration: ev.duration ?? null,
+                            vesselOwner: ev.vesselOwner || null,
+                            vesselMmsi: ev.vesselMmsi || null,
+                            vesselType: ev.vesselType || null,
                         }),
                         billboard: {
                             image: GFW_ICON,
@@ -96,9 +100,21 @@ export function useGFWLayer(viewer: Cesium.Viewer | null) {
 
     // ---- Effect 3: layer visibility ----
     // Effective show = sources && visibility.
+    const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
     useEffect(() => {
-        if (dsRef.current) dsRef.current.show = isSourceOn && isVisible;
-    }, [isSourceOn, isVisible]);
+        if (!dsRef.current) return;
+        const globalShow = isSourceOn && isVisible;
+        dsRef.current.show = globalShow;
+        if (globalShow && isolatedEntityId) {
+            dsRef.current.entities.values.forEach(e => {
+                e.show = isolatedEntityId === e.id;
+            });
+        } else if (globalShow) {
+            dsRef.current.entities.values.forEach(e => {
+                e.show = true;
+            });
+        }
+    }, [isSourceOn, isVisible, isolatedEntityId]);
 
     // ---- Effect 4: source-off scene clear ----
     useEffect(() => {

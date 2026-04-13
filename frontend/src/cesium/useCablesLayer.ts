@@ -43,6 +43,9 @@ export interface CableMeta {
     subtype: 'submarine';
     source: 'TeleGeography';
     description: string;
+    owners: string;
+    length: string;
+    year: string;
 }
 
 // logicalId -> meta. Looked up by Globe.tsx picking + EntityHUD.
@@ -174,6 +177,7 @@ export function useCablesLayer(viewer: Cesium.Viewer | null) {
                     // anchor. GeoJSON coords are [lng, lat].
                     const firstLine = lines[0];
                     const mid = firstLine[Math.floor(firstLine.length / 2)];
+                    const props = feature.properties || {};
                     cableMetaMap.set(logicalId, {
                         id: logicalId,
                         name,
@@ -183,6 +187,9 @@ export function useCablesLayer(viewer: Cesium.Viewer | null) {
                         subtype: 'submarine',
                         source: 'TeleGeography',
                         description: name,
+                        owners: props.owners || '',
+                        length: props.length || props.cable_length || '',
+                        year: props.rfs || props.year || '',
                     });
 
                     lines.forEach((line, partIdx) => {

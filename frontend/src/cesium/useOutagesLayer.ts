@@ -3,14 +3,7 @@ import * as Cesium from 'cesium';
 import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
-
-// Enhanced outage marker icons — pre-built data URIs per severity level.
-const ICON_CRITICAL = `data:image/svg+xml,` + encodeURIComponent(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 48 48"><circle cx="24" cy="24" r="22" fill="#ef4444" opacity="0.1"/><circle cx="24" cy="24" r="19" fill="#ef4444" opacity="0.15"/><circle cx="24" cy="24" r="22" fill="none" stroke="#ef4444" stroke-width="0.6" opacity="0.3"/><circle cx="24" cy="24" r="19" fill="none" stroke="#ef4444" stroke-width="0.4" opacity="0.4"/><circle cx="24" cy="24" r="15" fill="#991b1b" stroke="#ef4444" stroke-width="1.2"/><circle cx="24" cy="24" r="12" fill="#b91c1c" stroke="#dc2626" stroke-width="0.5"/><polygon points="27,8 19,24 23,24 20,40 32,22 27,22 30,10" fill="#fbbf24" stroke="#f59e0b" stroke-width="0.8"/><polygon points="27,11 21,23 24,23 22,36 30,23 27,23 29,13" fill="#fde68a" opacity="0.4"/><circle cx="17" cy="18" r="0.8" fill="#fbbf24" opacity="0.6"/><circle cx="31" cy="30" r="0.8" fill="#fbbf24" opacity="0.6"/><circle cx="17" cy="30" r="0.6" fill="#fbbf24" opacity="0.4"/><circle cx="31" cy="18" r="0.6" fill="#fbbf24" opacity="0.4"/></svg>`
-);
-const ICON_WARNING = `data:image/svg+xml,` + encodeURIComponent(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 48 48"><circle cx="24" cy="24" r="20" fill="#f97316" opacity="0.1"/><circle cx="24" cy="24" r="20" fill="none" stroke="#f97316" stroke-width="0.5" opacity="0.3"/><circle cx="24" cy="24" r="15" fill="#7c2d12" stroke="#f97316" stroke-width="1.2"/><circle cx="24" cy="24" r="12" fill="#9a3412" stroke="#ea580c" stroke-width="0.5"/><polygon points="27,8 19,24 23,24 20,40 32,22 27,22 30,10" fill="#fbbf24" stroke="#f59e0b" stroke-width="0.8"/><polygon points="27,11 21,23 24,23 22,36 30,23 27,23 29,13" fill="#fde68a" opacity="0.4"/><circle cx="18" cy="19" r="0.6" fill="#fbbf24" opacity="0.4"/><circle cx="30" cy="29" r="0.6" fill="#fbbf24" opacity="0.4"/></svg>`
-);
+import { OUTAGE_ICON_CRITICAL, OUTAGE_ICON_WARNING } from '../icons/map-icons';
 
 // Subset of country centroids for mapping Cloudflare location codes to coordinates.
 const COUNTRY_CENTROIDS_MINI: Record<string, [number, number]> = {
@@ -103,7 +96,7 @@ export function useOutagesLayer(viewer: Cesium.Viewer | null) {
                             startTime: o.startTime,
                         }),
                         billboard: {
-                            image: isCritical ? ICON_CRITICAL : ICON_WARNING,
+                            image: isCritical ? OUTAGE_ICON_CRITICAL : OUTAGE_ICON_WARNING,
                             scale: isCritical ? 1.4 : 1.1,
                         },
                         // Pulsing ellipse around country centroid
@@ -163,7 +156,7 @@ export function useOutagesLayer(viewer: Cesium.Viewer | null) {
                             endDate: cf.endDate || '',
                         }),
                         billboard: {
-                            image: ICON_WARNING,
+                            image: OUTAGE_ICON_WARNING,
                             scale: 1.0,
                         },
                         ellipse: {
@@ -220,13 +213,15 @@ export function useOutagesLayer(viewer: Cesium.Viewer | null) {
     }, [isSourceOn, isVisible]);
 
     // ---- Effect 4: per-subtype visibility ----
+    const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
     useEffect(() => {
         if (!dsRef.current) return;
         dsRef.current.entities.values.forEach(e => {
             const sub = (e.properties as any)?.subtype?.getValue?.() ?? 'warning';
-            e.show = subtypeVisibility[`outages:${sub}`] !== false;
+            const subtypeOk = subtypeVisibility[`outages:${sub}`] !== false;
+            e.show = subtypeOk && (!isolatedEntityId || isolatedEntityId === e.id);
         });
-    }, [subtypeVisibility]);
+    }, [subtypeVisibility, isolatedEntityId]);
 
     // ---- Effect 5: source-off scene clear ----
     useEffect(() => {

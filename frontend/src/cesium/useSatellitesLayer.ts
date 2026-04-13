@@ -3,26 +3,7 @@ import * as Cesium from 'cesium';
 import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
-
-// ---------------------------------------------------------------------------
-// Satellite icons — 32×32 SVG data URIs
-// ---------------------------------------------------------------------------
-const satDataUri = (svgContent: string) => `data:image/svg+xml,` + encodeURIComponent(svgContent);
-
-const SAT_ICONS: Record<string, string> = {
-    military: satDataUri(`<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24"><polygon points="10,6 14,6 15,8 15,16 14,18 10,18 9,16 9,8" fill="#ef4444" stroke="#000000" stroke-width="1.2"/><line x1="9" y1="10" x2="15" y2="10" stroke="#000000" stroke-width="0.5" opacity="0.6"/><line x1="9" y1="14" x2="15" y2="14" stroke="#000000" stroke-width="0.5" opacity="0.6"/><rect x="1" y="9" width="7" height="6" rx="0.5" fill="#ef4444" stroke="#000000" stroke-width="1"/><line x1="3.3" y1="9" x2="3.3" y2="15" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="5.6" y1="9" x2="5.6" y2="15" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="1" y1="12" x2="8" y2="12" stroke="#000000" stroke-width="0.3" opacity="0.5"/><rect x="16" y="9" width="7" height="6" rx="0.5" fill="#ef4444" stroke="#000000" stroke-width="1"/><line x1="18.3" y1="9" x2="18.3" y2="15" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="20.6" y1="9" x2="20.6" y2="15" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="16" y1="12" x2="23" y2="12" stroke="#000000" stroke-width="0.3" opacity="0.5"/><circle cx="12" cy="12" r="2" fill="#000000" stroke="#000000" stroke-width="0.6" opacity="0.7"/><circle cx="12" cy="12" r="1" fill="#ffffff" opacity="0.9"/><rect x="10.5" y="3.5" width="3" height="2" rx="0.5" fill="#ef4444" stroke="#000000" stroke-width="0.8"/><line x1="12" y1="6" x2="12" y2="5.5" stroke="#000000" stroke-width="0.6"/><polygon points="11,18 13,18 13.5,20 10.5,20" fill="#ef4444" stroke="#000000" stroke-width="0.6" opacity="0.8"/></svg>`),
-    commercial: satDataUri(`<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24"><rect x="9" y="8" width="6" height="8" rx="1" fill="#06b6d4" stroke="#000000" stroke-width="1.2"/><line x1="9" y1="10.5" x2="15" y2="10.5" stroke="#000000" stroke-width="0.4" opacity="0.6"/><line x1="9" y1="13.5" x2="15" y2="13.5" stroke="#000000" stroke-width="0.4" opacity="0.6"/><rect x="0.5" y="8.5" width="7.5" height="7" rx="0.5" fill="#06b6d4" stroke="#000000" stroke-width="1"/><line x1="2.5" y1="8.5" x2="2.5" y2="15.5" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="4.5" y1="8.5" x2="4.5" y2="15.5" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="6.5" y1="8.5" x2="6.5" y2="15.5" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="0.5" y1="12" x2="8" y2="12" stroke="#000000" stroke-width="0.3" opacity="0.5"/><rect x="16" y="8.5" width="7.5" height="7" rx="0.5" fill="#06b6d4" stroke="#000000" stroke-width="1"/><line x1="18" y1="8.5" x2="18" y2="15.5" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="20" y1="8.5" x2="20" y2="15.5" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="22" y1="8.5" x2="22" y2="15.5" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="16" y1="12" x2="23.5" y2="12" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="12" y1="8" x2="12" y2="4.5" stroke="#000000" stroke-width="0.8"/><ellipse cx="12" cy="3.5" rx="3" ry="1.2" fill="#06b6d4" stroke="#000000" stroke-width="0.8"/><circle cx="12" cy="3.5" r="0.5" fill="#ffffff" opacity="0.9"/><line x1="12" y1="3.5" x2="12" y2="1.5" stroke="#000000" stroke-width="0.5" opacity="0.7"/><line x1="9" y1="9" x2="7" y2="7" stroke="#000000" stroke-width="0.5" opacity="0.6"/><circle cx="6.8" cy="6.8" r="0.3" fill="#000000" opacity="0.6"/><line x1="15" y1="9" x2="17" y2="7" stroke="#000000" stroke-width="0.5" opacity="0.6"/><circle cx="17.2" cy="6.8" r="0.3" fill="#000000" opacity="0.6"/><polygon points="11,16 13,16 13.5,18 10.5,18" fill="#06b6d4" stroke="#000000" stroke-width="0.5" opacity="0.7"/></svg>`),
-    civilian: satDataUri(`<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24"><rect x="11" y="5" width="2" height="14" rx="0.5" fill="#84cc16" stroke="#000000" stroke-width="1.2"/><line x1="11" y1="8" x2="13" y2="10" stroke="#000000" stroke-width="0.4" opacity="0.6"/><line x1="13" y1="8" x2="11" y2="10" stroke="#000000" stroke-width="0.4" opacity="0.6"/><line x1="11" y1="13" x2="13" y2="15" stroke="#000000" stroke-width="0.4" opacity="0.6"/><line x1="13" y1="13" x2="11" y2="15" stroke="#000000" stroke-width="0.4" opacity="0.6"/><rect x="1" y="7" width="9" height="3" rx="0.5" fill="#84cc16" stroke="#000000" stroke-width="1"/><line x1="3.25" y1="7" x2="3.25" y2="10" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="5.5" y1="7" x2="5.5" y2="10" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="7.75" y1="7" x2="7.75" y2="10" stroke="#000000" stroke-width="0.3" opacity="0.5"/><rect x="1" y="14" width="9" height="3" rx="0.5" fill="#84cc16" stroke="#000000" stroke-width="1"/><line x1="3.25" y1="14" x2="3.25" y2="17" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="5.5" y1="14" x2="5.5" y2="17" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="7.75" y1="14" x2="7.75" y2="17" stroke="#000000" stroke-width="0.3" opacity="0.5"/><rect x="14" y="7" width="9" height="3" rx="0.5" fill="#84cc16" stroke="#000000" stroke-width="1"/><line x1="16.25" y1="7" x2="16.25" y2="10" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="18.5" y1="7" x2="18.5" y2="10" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="20.75" y1="7" x2="20.75" y2="10" stroke="#000000" stroke-width="0.3" opacity="0.5"/><rect x="14" y="14" width="9" height="3" rx="0.5" fill="#84cc16" stroke="#000000" stroke-width="1"/><line x1="16.25" y1="14" x2="16.25" y2="17" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="18.5" y1="14" x2="18.5" y2="17" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="20.75" y1="14" x2="20.75" y2="17" stroke="#000000" stroke-width="0.3" opacity="0.5"/><rect x="10" y="3" width="4" height="2" rx="0.5" fill="#84cc16" stroke="#000000" stroke-width="0.8"/><circle cx="11" cy="4" r="0.4" fill="#000000" opacity="0.9"/><circle cx="13" cy="4" r="0.4" fill="#000000" opacity="0.9"/><line x1="12" y1="19" x2="12" y2="22" stroke="#000000" stroke-width="0.6" opacity="0.7"/><circle cx="12" cy="22.5" r="0.8" fill="#84cc16" stroke="#000000" stroke-width="0.5" opacity="0.7"/><circle cx="12" cy="22.5" r="0.3" fill="#000000" opacity="0.7"/></svg>`),
-};
-
-const SAT_RECON_ICON = satDataUri(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24"><rect x="9.5" y="5" width="5" height="13" rx="1.5" fill="#f59e0b" stroke="#000000" stroke-width="1.2"/><line x1="9.5" y1="8" x2="14.5" y2="8" stroke="#000000" stroke-width="0.5" opacity="0.6"/><line x1="9.5" y1="11" x2="14.5" y2="11" stroke="#000000" stroke-width="0.5" opacity="0.6"/><line x1="9.5" y1="15" x2="14.5" y2="15" stroke="#000000" stroke-width="0.5" opacity="0.6"/><circle cx="12" cy="3.5" r="2.5" fill="#f59e0b" stroke="#000000" stroke-width="1"/><circle cx="12" cy="3.5" r="1.2" fill="#000000" stroke="#000000" stroke-width="0.5" opacity="0.7"/><circle cx="12" cy="3.5" r="0.5" fill="#ffffff" opacity="0.9"/><ellipse cx="12" cy="2" rx="3.2" ry="0.8" fill="#f59e0b" stroke="#000000" stroke-width="0.6" opacity="0.7"/><rect x="1.5" y="9.5" width="7" height="5" rx="0.5" fill="#f59e0b" stroke="#000000" stroke-width="1"/><line x1="4" y1="9.5" x2="4" y2="14.5" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="6.5" y1="9.5" x2="6.5" y2="14.5" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="1.5" y1="12" x2="8.5" y2="12" stroke="#000000" stroke-width="0.3" opacity="0.5"/><rect x="15.5" y="9.5" width="7" height="5" rx="0.5" fill="#f59e0b" stroke="#000000" stroke-width="1"/><line x1="18" y1="9.5" x2="18" y2="14.5" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="20.5" y1="9.5" x2="20.5" y2="14.5" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="15.5" y1="12" x2="22.5" y2="12" stroke="#000000" stroke-width="0.3" opacity="0.5"/><line x1="12" y1="18" x2="12" y2="21" stroke="#000000" stroke-width="0.8" opacity="0.7"/><path d="M10 21 Q12 23 14 21" fill="none" stroke="#000000" stroke-width="0.6" opacity="0.6"/></svg>`
-);
-
-const getSatSvg = (type: string, isRecon?: boolean) => {
-    if (isRecon) return SAT_RECON_ICON;
-    return SAT_ICONS[type] || SAT_ICONS.civilian;
-};
+import { getSatIcon } from '../icons/map-icons';
 
 // ---------------------------------------------------------------------------
 // Footprint types & registry (unchanged — used by Globe.tsx picking)
@@ -167,7 +148,7 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                     // Create billboard (initially at 0,0,0 — Worker will set real position)
                     const bb = bc.add({
                         position: Cesium.Cartesian3.ZERO,
-                        image: getSatSvg(sat.type, isRecon),
+                        image: getSatIcon(sat.type, isRecon),
                         scale: isRecon ? 1.8 : 1.4,
                         show: false, // hidden until first Worker tick
                         id: entityId,
@@ -558,6 +539,7 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
 
     // ---- Effect 6: per-subtype visibility + counts ----
     const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
+    const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
     useEffect(() => {
         if (!viewer) return;
         const bc = billboardCollectionRef.current;
@@ -574,7 +556,8 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
             if (!meta) continue;
             const sub = meta.subtype;
             counts[sub] = (counts[sub] || 0) + 1;
-            const show = globalShow && subtypeVisibility[`satellites:${sub}`] !== false;
+            const subtypeOk = globalShow && subtypeVisibility[`satellites:${sub}`] !== false;
+            const show = subtypeOk && (!isolatedEntityId || isolatedEntityId === (bb.id as string));
             bb.show = show;
 
             if (trails && trails.ready) {
@@ -597,7 +580,8 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                     if (!bb) continue;
                     const meta = satelliteMetaMap.get(bb.id as string);
                     if (!meta) continue;
-                    const show = globalShow && subtypeVisibility[`satellites:${meta.subtype}`] !== false;
+                    const show = globalShow && subtypeVisibility[`satellites:${meta.subtype}`] !== false
+                        && (!isolatedEntityId || isolatedEntityId === (bb.id as string));
                     const attrs = trails.getGeometryInstanceAttributes(bb.id);
                     if (attrs) {
                         (attrs as any).show = Cesium.ShowGeometryInstanceAttribute.toValue(show);
@@ -607,5 +591,5 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
             setTimeout(poll, 50);
             return () => { cancelled = true; };
         }
-    }, [viewer, subtypeVisibility, satellitesLoadedTick, isSourceOn, isVisible]);
+    }, [viewer, subtypeVisibility, satellitesLoadedTick, isSourceOn, isVisible, isolatedEntityId]);
 }

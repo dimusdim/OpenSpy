@@ -3,6 +3,7 @@ import * as Cesium from 'cesium';
 import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
+import { FIRE_DOT_HIGH, FIRE_DOT_MEDIUM, FIRE_DOT_LOW } from '../icons/map-icons';
 
 // NASA FIRMS active fire hotspots rendered via BillboardCollection with
 // HeightReference.CLAMP_TO_GROUND. Billboards latch onto the Google 3D
@@ -38,27 +39,8 @@ import { API_URL } from '../lib/config';
 // viewport cull so only the visible subset pays the update cost.
 
 // Metadata for picking — stores fire info per billboard ID.
-export interface FireMeta { lat: number; lng: number; frp: number; brightness: number; confidence: string; subtype: 'high' | 'medium' | 'low'; }
+export interface FireMeta { lat: number; lng: number; frp: number; brightness: number; confidence: string; subtype: 'high' | 'medium' | 'low'; daynight: string; acqTime: string; fireType: number; }
 export const fireMetaMap = new Map<string, FireMeta>();
-
-// Per-subtype dot textures. Each is a radial-gradient PNG encoded as a
-// data URI so the whole atlas is ~1 KB and ships with the bundle.
-function dotDataUri(rgb: string): string {
-    return `data:image/svg+xml,` + encodeURIComponent(
-        `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">` +
-        `<defs><radialGradient id="g" cx="50%" cy="50%" r="50%">` +
-        `<stop offset="0%" stop-color="${rgb}" stop-opacity="1"/>` +
-        `<stop offset="70%" stop-color="${rgb}" stop-opacity="0.85"/>` +
-        `<stop offset="100%" stop-color="${rgb}" stop-opacity="0"/>` +
-        `</radialGradient></defs>` +
-        `<circle cx="8" cy="8" r="8" fill="url(#g)"/>` +
-        `</svg>`
-    );
-}
-
-const FIRE_DOT_HIGH = dotDataUri('#ef4444');   // red  (FRP > 100 MW)
-const FIRE_DOT_MEDIUM = dotDataUri('#f97316'); // orange (30–100 MW)
-const FIRE_DOT_LOW = dotDataUri('#eab308');    // yellow (< 30 MW)
 
 function frpSubtype(frp: number): 'high' | 'medium' | 'low' {
     if (frp > 100) return 'high';
@@ -250,6 +232,9 @@ export function useFiresLayer(viewer: Cesium.Viewer | null) {
                         frp, brightness: f.brightness || 0,
                         confidence: f.confidence || '',
                         subtype,
+                        daynight: f.daynight || '',
+                        acqTime: f.acqTime || '',
+                        fireType: f.fireType ?? 0,
                     });
                     counts[subtype]++;
 

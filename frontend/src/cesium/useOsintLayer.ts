@@ -3,33 +3,7 @@ import * as Cesium from 'cesium';
 import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
-
-// Distinct icons per GDACS event class. The colour also encodes the alert
-// level (red/orange/green) so a Red TC reads differently from a Green one.
-const svgUri = (body: string, fill: string) => `data:image/svg+xml,` + encodeURIComponent(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="${fill}" stroke="black" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`
-);
-
-const ALERT_FILL: Record<string, string> = {
-    Red: '#ef4444',
-    Orange: '#f97316',
-    Green: '#22c55e',
-};
-
-const EVENT_BODY: Record<string, string> = {
-    EQ: `<circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="6" fill="none" stroke-width="1.5"/><circle cx="12" cy="12" r="9" fill="none" stroke-width="1"/>`, // earthquake — concentric ripples
-    TC: `<path d="M12 4 a8 8 0 1 1 -8 8 a5 5 0 0 1 5 -5 a3 3 0 0 1 3 3 a1.5 1.5 0 0 1 -3 0" fill-opacity="0.85"/>`, // tropical cyclone — spiral
-    FL: `<path d="M2 12 q3 -4 6 0 t6 0 t6 0 v6 h-18 z"/><path d="M2 8 q3 -4 6 0 t6 0 t6 0" fill="none" stroke-width="1.5"/>`, // flood — waves
-    VO: `<polygon points="12,3 4,21 20,21"/><circle cx="12" cy="6" r="1.5" fill="black"/><path d="M11 4 q1 -2 2 0 q-1 2 0 4" fill="none" stroke="black"/>`, // volcano — triangle + smoke
-    WF: `<path d="M12 3 q3 4 3 8 a3 3 0 1 1 -6 0 q0 -4 3 -8 z"/><path d="M12 9 q1.5 2 1.5 4 a1.5 1.5 0 1 1 -3 0 q0 -2 1.5 -4 z" fill="black"/>`, // wildfire — flame
-    DR: `<rect x="3" y="14" width="18" height="6"/><path d="M6 14 v-3 m4 3 v-5 m4 5 v-4 m4 4 v-6"/>`, // drought — cracked land
-    XX: `<rect x="6" y="6" width="12" height="12" rx="2"/>`, // unknown
-};
-const getOsintSvg = (eventType: string, alert: string) => {
-    const body = EVENT_BODY[eventType] || EVENT_BODY.XX;
-    const fill = ALERT_FILL[alert] || ALERT_FILL.Green;
-    return svgUri(body, fill);
-};
+import { getOsintIcon } from '../icons/map-icons';
 
 export function useOsintLayer(viewer: Cesium.Viewer | null) {
     // sources.osint = fetch OSINT events; visibility.osint = render them
@@ -89,6 +63,7 @@ export function useOsintLayer(viewer: Cesium.Viewer | null) {
                     const ev = evList[evi];
                     // Skip if already loaded (avoid re-creating)
                     if (ds.entities.getById(ev.id)) continue;
+                    if (ev.lat == null || ev.lng == null || isNaN(ev.lat) || isNaN(ev.lng)) continue;
                     try {
                         if (ev.type === 'strike') {
                             const alertColor = ev.alertLevel === 'Red' ? Cesium.Color.RED
@@ -107,7 +82,7 @@ export function useOsintLayer(viewer: Cesium.Viewer | null) {
                                     description: ev.description || '',
                                 }),
                                 billboard: {
-                                    image: getOsintSvg(ev.eventType || 'XX', ev.alertLevel || 'Green'),
+                                    image: getOsintIcon(ev.eventType || 'XX', ev.alertLevel || 'Green'),
                                     scale: 1.2,
                                 },
                             };
@@ -183,6 +158,7 @@ export function useOsintLayer(viewer: Cesium.Viewer | null) {
     // minutes) or when the user toggles a filter, so we react to those
     // signals directly instead of scanning every 2s.
     const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
+    const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
     useEffect(() => {
         if (!viewer) return;
         const ds = osintDsRef.current;
@@ -191,11 +167,11 @@ export function useOsintLayer(viewer: Cesium.Viewer | null) {
         ds.entities.values.forEach(e => {
             const sub = (e.properties as any)?.subtype?.getValue?.() ?? 'XX';
             counts[sub] = (counts[sub] || 0) + 1;
-            const show = subtypeVisibility[`osint:${sub}`] !== false;
-            e.show = show;
+            const subtypeOk = subtypeVisibility[`osint:${sub}`] !== false;
+            e.show = subtypeOk && (!isolatedEntityId || isolatedEntityId === e.id);
         });
         useTimelineStore.getState().setSubtypeCounts('osint', counts);
-    }, [viewer, subtypeVisibility, eventsLoadedTick]);
+    }, [viewer, subtypeVisibility, eventsLoadedTick, isolatedEntityId]);
 
     // ---- Effect 5: source-off scene clear ----
     useEffect(() => {
