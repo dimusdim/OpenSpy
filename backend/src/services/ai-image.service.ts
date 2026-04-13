@@ -37,6 +37,55 @@ const GENERATED_DIR = path.join(DATA_DIR, 'generated');
 const MANIFEST_PATH = path.join(DATA_DIR, 'manifest.json');
 
 // ---------------------------------------------------------------------------
+// Aspect ratio helper — parse PNG header and find closest standard ratio
+// ---------------------------------------------------------------------------
+
+const STANDARD_RATIOS = [
+    { label: '1:1', value: 1 },
+    { label: '3:2', value: 3 / 2 },
+    { label: '2:3', value: 2 / 3 },
+    { label: '4:3', value: 4 / 3 },
+    { label: '3:4', value: 3 / 4 },
+    { label: '16:9', value: 16 / 9 },
+    { label: '9:16', value: 9 / 16 },
+];
+
+function closestAspectRatio(w: number, h: number): string {
+    const ratio = w / h;
+    let best = STANDARD_RATIOS[0];
+    let bestDiff = Math.abs(ratio - best.value);
+    for (const opt of STANDARD_RATIOS) {
+        const diff = Math.abs(ratio - opt.value);
+        if (diff < bestDiff) {
+            best = opt;
+            bestDiff = diff;
+        }
+    }
+    return best.label;
+}
+
+/**
+ * Parse width and height from PNG IHDR chunk (bytes 16-23 of the file).
+ * The screenshot parameter is a base64 data URL like "data:image/png;base64,...".
+ * Returns the closest standard aspect ratio string.
+ */
+function aspectRatioFromPng(dataUrl: string): string {
+    const base64Body = dataUrl.replace(/^data:image\/\w+;base64,/, '');
+    // PNG header: 8-byte signature, then IHDR chunk (4 len + 4 type + 4 width + 4 height ...)
+    // Width is at bytes 16-19, height at bytes 20-23 (big-endian uint32).
+    const buf = Buffer.from(base64Body, 'base64');
+    if (buf.length < 24) {
+        console.warn('[AIImage] PNG too short to read IHDR, defaulting to 16:9');
+        return '16:9';
+    }
+    const width = buf.readUInt32BE(16);
+    const height = buf.readUInt32BE(20);
+    const ratio = closestAspectRatio(width, height);
+    console.log(`[AIImage] PNG dimensions: ${width}x${height} → aspect_ratio=${ratio}`);
+    return ratio;
+}
+
+// ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
 
@@ -71,9 +120,6 @@ export class AIImageService {
         prompt: string,
         model: string = 'google/gemini-3.1-flash-image-preview',
         presetName: string = '',
-        aspectRatio: string = '16:9',
-        imageWidth: number = 1920,
-        imageHeight: number = 1080,
     ): Promise<ImageRecord> {
         const id = `img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         const timestamp = new Date().toISOString();
@@ -88,6 +134,9 @@ export class AIImageService {
         // Call OpenRouter Gemini Flash Image ---------------------------------
         const apiKey = process.env.OPENROUTER_API_KEY;
         if (!apiKey) throw new Error('OPENROUTER_API_KEY not configured');
+
+        // Compute aspect ratio from PNG header
+        const aspectRatio = aspectRatioFromPng(screenshot);
 
         // Build model-specific config
         const isGemini = model.startsWith('google/');

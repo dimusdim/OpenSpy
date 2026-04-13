@@ -20,7 +20,7 @@ export function setupAIImageRoutes(app: express.Express): AIImageService {
     // -----------------------------------------------------------------------
     app.post('/api/ai-image/generate', jsonParser, async (req: express.Request, res: express.Response) => {
         const bodySize = req.headers['content-length'] || 'unknown';
-        const { screenshot, viewport, prompt, model, presetName, aspectRatio, imageWidth, imageHeight } = req.body ?? {};
+        const { screenshot, viewport, prompt, model, presetName } = req.body ?? {};
         const screenshotKB = screenshot ? Math.round(screenshot.length / 1024) : 0;
         console.log(`[AIImage] POST /generate  body=${bodySize}  screenshot=${screenshotKB}KB  model=${model || 'default'}`);
 
@@ -33,8 +33,7 @@ export function setupAIImageRoutes(app: express.Express): AIImageService {
 
         try {
             const record = await service.generate(
-                screenshot, viewport, prompt, model, presetName, aspectRatio,
-                Number(imageWidth) || 1920, Number(imageHeight) || 1080,
+                screenshot, viewport, prompt, model, presetName,
             );
             res.json(record);
         } catch (err: any) {

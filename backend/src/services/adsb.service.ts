@@ -332,7 +332,7 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
         }
 
         if (this.darkVessels.size > 0) {
-            console.log(`[DarkVessel] ${this.darkVessels.size} vessels flagged dark`);
+            console.log(`[AISLost] ${this.darkVessels.size} vessels flagged dark`);
         }
     }
 
@@ -591,7 +591,7 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
                          this.vesselReportCount.set(id, (this.vesselReportCount.get(id) || 0) + 1);
 
                          if (this.darkVessels.has(id)) {
-                             console.log(`[DarkVessel] ${id} reappeared after ${Math.round((now - this.darkVessels.get(id)!.darkSince) / 60000)}m dark`);
+                             console.log(`[AISLost] ${id} reappeared after ${Math.round((now - this.darkVessels.get(id)!.darkSince) / 60000)}m dark`);
                              this.darkVessels.delete(id);
                          }
 

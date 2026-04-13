@@ -99,12 +99,13 @@ const ENV_FILE = path.resolve(__dirname, '../.env');
 const API_KEY_DEFS: Record<string, { label: string; envVars: string[] }> = {
     aviation: { label: 'OpenSky Network', envVars: ['OPENSKY_USERNAME', 'OPENSKY_PASSWORD'] },
     maritime: { label: 'AISStream', envVars: ['AISSTREAM_API_KEY'] },
-    satellites: { label: 'Space-Track.org', envVars: ['SPACETRACK_USERNAME', 'SPACETRACK_PASSWORD'] },
+    satellites: { label: 'Space-Track.org', envVars: ['SPACETRACK_EMAIL', 'SPACETRACK_PASSWORD'] },
     webcams: { label: 'Windy API', envVars: ['WINDY_API_KEY'] },
     traffic: { label: 'TomTom', envVars: ['TOMTOM_API_KEY'] },
     conflicts: { label: 'ACLED', envVars: ['ACLED_KEY', 'ACLED_EMAIL'] },
     airspace: { label: 'OpenAIP', envVars: ['OPENAIP_API_KEY'] },
     gfw: { label: 'Global Fishing Watch', envVars: ['GFW_TOKEN'] },
+    outages: { label: 'Cloudflare Radar', envVars: ['CLOUDFLARE_API_TOKEN'] },
 };
 
 app.get('/api/keys', (_req, res) => {
@@ -353,6 +354,7 @@ app.get('/api/infrastructure', async (req, res) => {
         // otherwise return Overture-only (better than waiting 60s).
         const OVERPASS_FAST_TIMEOUT = 5000;
         let overpassRecords: any[] = [];
+        let overpassTimedOut = false;
         try {
             overpassRecords = await Promise.race([
                 infrastructureService.getInfrastructure(south, west, north, east),
@@ -362,6 +364,7 @@ app.get('/api/infrastructure', async (req, res) => {
             ]);
         } catch {
             // Overpass slow or failed — proceed with Overture only
+            overpassTimedOut = true;
         }
 
         const deduped = dedupAgainstOverture(overpassRecords, overtureRecords);
@@ -375,7 +378,7 @@ app.get('/api/infrastructure', async (req, res) => {
             })),
             ...deduped,
         ];
-        res.json(merged);
+        res.json({ data: merged, overpassTimedOut });
     } catch (err: any) {
         console.error('[Infrastructure] endpoint error:', err.message);
         res.status(502).json({ error: 'Failed to fetch infrastructure data (upstream Overpass unavailable)' });
@@ -403,38 +406,29 @@ app.get('/api/power-infra', async (req, res) => {
         return;
     }
     try {
-        // Parallel hybrid: Overpass always runs, Overture runs when
-        // OVERTURE_ENABLED. Same dedup rules as /api/infrastructure
-        // except power lines (linestrings) pass through untouched —
-        // entity resolution for line geometry is out of scope for the
-        // first pass.
-        const [overpassSettled, overtureRecords] = await Promise.all([
-            infrastructureService.getPowerInfra(bbox)
-                .then((data) => ({ ok: true as const, data }))
-                .catch((err) => ({ ok: false as const, err })),
-            overtureService.getPowerInfraInBbox(south, west, north, east),
-        ]);
+        // Overture is local DuckDB — instant. Overpass is external HTTP — slow.
+        // Same race pattern as /api/infrastructure: return Overture immediately,
+        // merge Overpass only if it finishes within a tight timeout.
+        const overtureRecords = await overtureService.getPowerInfraInBbox(south, west, north, east);
 
-        if (!overpassSettled.ok) {
-            console.error('[PowerInfra] Overpass failed:', overpassSettled.err?.message || overpassSettled.err);
-            if (overtureRecords.length > 0) {
-                res.json(overtureRecords.map((r) => ({
-                    id: r.id,
-                    lat: r.lat,
-                    lng: r.lng,
-                    name: r.name,
-                    type: r.type,
-                    source: 'overture',
-                    voltage: '',
-                    coordinates: r.coordinates,
-                })));
-                return;
-            }
-            res.status(502).json({ error: 'Failed to fetch power infrastructure data (upstream Overpass unavailable)' });
-            return;
+        // Fire Overpass with a 5s timeout — if it responds fast, merge;
+        // otherwise return Overture-only (better than waiting 60s).
+        const OVERPASS_FAST_TIMEOUT = 5000;
+        let overpassRecords: any[] = [];
+        let overpassTimedOut = false;
+        try {
+            overpassRecords = await Promise.race([
+                infrastructureService.getPowerInfra(bbox),
+                new Promise<any[]>((_, reject) =>
+                    setTimeout(() => reject(new Error('Overpass too slow')), OVERPASS_FAST_TIMEOUT)
+                ),
+            ]);
+        } catch {
+            // Overpass slow or failed — proceed with Overture only
+            overpassTimedOut = true;
         }
 
-        const deduped = dedupAgainstOverture(overpassSettled.data, overtureRecords);
+        const deduped = dedupAgainstOverture(overpassRecords, overtureRecords);
         const merged = [
             ...overtureRecords.map((r) => ({
                 id: r.id,
@@ -448,7 +442,7 @@ app.get('/api/power-infra', async (req, res) => {
             })),
             ...deduped,
         ];
-        res.json(merged);
+        res.json({ data: merged, overpassTimedOut });
     } catch (err: any) {
         console.error('[PowerInfra] endpoint error:', err.message);
         res.status(502).json({ error: 'Failed to fetch power infrastructure data (upstream Overpass unavailable)' });
@@ -592,7 +586,7 @@ app.get('/api/airspace', (_req, res) => {
     res.json(airspaceService.getZones());
 });
 
-// Global Fishing Watch dark vessel events
+// Global Fishing Watch AIS signal-lost events
 app.get('/api/gfw-events', (_req, res) => {
     res.json(gfwService.getEvents());
 });

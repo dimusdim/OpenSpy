@@ -49,7 +49,14 @@ export class GFWService {
         if (!token) return;
 
         try {
-            const url = `https://gateway.api.globalfishingwatch.org/v3/events?datasets[0]=public-global-gaps-events:latest&limit=100`;
+            // Build date range: last 30 days
+            const end = new Date();
+            const start = new Date();
+            start.setDate(start.getDate() - 30);
+            const startDate = start.toISOString().slice(0, 10);
+            const endDate = end.toISOString().slice(0, 10);
+
+            const url = `https://gateway.api.globalfishingwatch.org/v3/events?datasets[0]=public-global-gaps-events:latest&limit=100&offset=0&start-date=${startDate}&end-date=${endDate}&sort=-start`;
 
             const res = await axios.get(url, {
                 timeout: 30000,
@@ -99,11 +106,13 @@ export class GFWService {
             this.events = records;
             this.health = 'streaming';
             this.lastError = null;
-            console.log(`[GFW] ${records.length} dark vessel / gap events loaded`);
+            console.log(`[GFW] ${records.length} AIS gap events loaded`);
         } catch (err: any) {
-            console.error('[GFW] Fetch failed:', err.message);
+            const body = err.response?.data;
+            const detail = body ? JSON.stringify(body) : err.message;
+            console.error('[GFW] Fetch failed:', detail);
             this.health = 'error';
-            this.lastError = err.message;
+            this.lastError = detail;
         }
     }
 }

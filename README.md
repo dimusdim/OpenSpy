@@ -45,7 +45,9 @@ See everything happening on Earth, in real time, on one screen. Open source. Fre
 
 **Dark vessel detection** — Automatic flagging when a vessel's AIS signal drops for more than one hour. Last known position and heading interpolated. Separate dark-vessel markers rendered on the globe.
 
-**Dark vessel events (Global Fishing Watch)** — AIS-disabling events, at-sea encounters, suspicious loitering, fishing activity gaps. Independent detection from a global monitoring authority.
+> **Note:** "AIS Signal Lost" is a local heuristic, not external data. A vessel that was actively tracked (≥3 AIS reports) and then goes silent for >1 hour is flagged at its last known position with a red circle. Flags auto-expire after 24 hours or when the vessel reappears. This is not real shadow-fleet or sanctions intelligence — for that, integration with OpenSanctions or a similar dataset would be needed.
+
+**Dark vessel events (Global Fishing Watch)** — AIS-disabling events, at-sea encounters, suspicious loitering, fishing activity gaps. Independent detection from a global monitoring authority. GFW gap events are a real, externally-verified data source for AIS disabling — unlike the local heuristic above.
 
 ### 🛰️ Space
 
