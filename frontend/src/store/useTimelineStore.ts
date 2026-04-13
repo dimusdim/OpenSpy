@@ -44,13 +44,148 @@ interface LayerFlags {
 // Re-export flag name for external consumers (e.g. Legend section typing).
 export type LayerName = keyof LayerFlags;
 
+// ---------------------------------------------------------------------------
+// Filter & Preset types
+// ---------------------------------------------------------------------------
+
+export interface ActiveFilter {
+  type: 'solo' | 'thisType' | 'thisDomain';
+  label: string;
+}
+
+export interface MissionPreset {
+  name: string;
+  description: string;
+  visibility: Partial<LayerFlags>;
+  subtypeVisibility?: Record<string, boolean>;
+}
+
+// All known subtypes per layer — used to build exhaustive preset overrides
+const ALL_LAYER_SUBTYPES: Record<string, string[]> = {
+  aviation: ['airliner', 'military', 'light', 'general'],
+  maritime: ['cargo', 'tanker', 'passenger', 'fishing', 'military', 'unknown'],
+  satellites: ['military', 'recon', 'commercial', 'civilian'],
+  conflicts: ['explosions', 'battles', 'violence'],
+  osint: ['EQ', 'TC', 'FL', 'VO', 'WF', 'DR'],
+  fires: ['high', 'medium', 'low'],
+  infrastructure: ['power_plant', 'power_substation', 'power_line', 'refinery', 'dam', 'desalination', 'military', 'aerodrome', 'communication_tower'],
+  pipelines: ['oil', 'gas'],
+  outages: ['critical', 'warning'],
+  jamming: ['high', 'medium', 'low'],
+  airspace: ['restricted', 'danger', 'prohibited', 'alert', 'warning'],
+};
+
+/** Build a subtype map: all=false except the listed ones=true */
+function onlySubtypes(allow: Record<string, string[]>): Record<string, boolean> {
+  const result: Record<string, boolean> = {};
+  for (const [layer, subs] of Object.entries(ALL_LAYER_SUBTYPES)) {
+    const allowed = allow[layer] || [];
+    for (const s of subs) {
+      result[`${layer}:${s}`] = allowed.includes(s);
+    }
+  }
+  return result;
+}
+
+/** Reset all subtypes to visible */
+function allSubtypesOn(): Record<string, boolean> {
+  const result: Record<string, boolean> = {};
+  for (const [layer, subs] of Object.entries(ALL_LAYER_SUBTYPES)) {
+    for (const s of subs) result[`${layer}:${s}`] = true;
+  }
+  return result;
+}
+
+export const MISSION_PRESETS: MissionPreset[] = [
+  {
+    name: 'Military / Defense',
+    description: 'Military aircraft, vessels, satellites, conflicts, jamming, bases, airspace',
+    visibility: {
+      aviation: true, maritime: true, satellites: true, satelliteFootprints: true,
+      conflicts: true, jamming: true, airspace: true, gfw: true,
+      osint: false, fires: false, cables: false, webcams: false,
+      infrastructure: true, pipelines: false, outages: false, clouds: false,
+      satellite_imagery: false, traffic: false, labels: true,
+    },
+    subtypeVisibility: onlySubtypes({
+      aviation: ['military'],
+      maritime: ['military'],
+      satellites: ['military', 'recon'],
+      conflicts: ['explosions', 'battles', 'violence'],
+      jamming: ['high', 'medium', 'low'],
+      airspace: ['restricted', 'danger', 'prohibited', 'alert', 'warning'],
+      infrastructure: ['military', 'aerodrome'],
+    }),
+  },
+  {
+    name: 'Maritime Security',
+    description: 'All vessels, dark vessels, GFW events, cables, outages',
+    visibility: {
+      maritime: true, gfw: true, cables: true, outages: true,
+      aviation: false, satellites: false, satelliteFootprints: false,
+      osint: false, jamming: false, fires: false, webcams: false,
+      infrastructure: false, pipelines: false, clouds: false,
+      satellite_imagery: false, traffic: false, conflicts: false,
+      airspace: false, labels: true,
+    },
+    subtypeVisibility: onlySubtypes({
+      maritime: ['cargo', 'tanker', 'passenger', 'fishing', 'military', 'unknown'],
+      outages: ['critical', 'warning'],
+    }),
+  },
+  {
+    name: 'Natural Hazards',
+    description: 'Disasters, fires, outages, webcams',
+    visibility: {
+      osint: true, fires: true, outages: true, webcams: true,
+      aviation: false, maritime: false, satellites: false, satelliteFootprints: false,
+      jamming: false, cables: false, infrastructure: false, pipelines: false,
+      clouds: true, satellite_imagery: true, traffic: false, conflicts: false,
+      airspace: false, gfw: false, labels: true,
+    },
+    subtypeVisibility: onlySubtypes({
+      osint: ['EQ', 'TC', 'FL', 'VO', 'WF', 'DR'],
+      fires: ['high', 'medium', 'low'],
+      outages: ['critical', 'warning'],
+    }),
+  },
+  {
+    name: 'Energy & Infrastructure',
+    description: 'Power plants, pipelines, refineries, dams, cables',
+    visibility: {
+      infrastructure: true, pipelines: true, cables: true,
+      aviation: false, maritime: false, satellites: false, satelliteFootprints: false,
+      osint: false, jamming: false, fires: false, webcams: false,
+      outages: true, clouds: false, satellite_imagery: false,
+      traffic: false, conflicts: false, airspace: false, gfw: false, labels: true,
+    },
+    subtypeVisibility: onlySubtypes({
+      infrastructure: ['power_plant', 'power_substation', 'power_line', 'refinery', 'dam', 'desalination', 'communication_tower'],
+      pipelines: ['oil', 'gas'],
+      outages: ['critical', 'warning'],
+    }),
+  },
+  {
+    name: 'Full Awareness',
+    description: 'Everything enabled',
+    visibility: {
+      satellites: true, satelliteFootprints: true, aviation: true, maritime: true,
+      osint: true, jamming: true, labels: true, fires: true, cables: true,
+      webcams: true, infrastructure: true, pipelines: true, outages: true,
+      clouds: true, satellite_imagery: true, traffic: true, conflicts: true,
+      airspace: true, gfw: true,
+    },
+    subtypeVisibility: allSubtypesOn(),
+  },
+];
+
 export interface StreamMetric {
     label: string;
     source: string;
     type: string;
     count: number;
     speed?: string;
-    status: 'connecting' | 'streaming' | 'warning' | 'error' | 'disabled' | 'auth-missing' | 'degraded' | 'limited';
+    status: 'connecting' | 'streaming' | 'warning' | 'error' | 'disabled' | 'auth-missing' | 'degraded' | 'limited' | 'rate-limited';
     poll: string;       // our polling cadence (e.g. "90s", "live", "5m", "24h")
     upstream: string;   // how often the upstream actually publishes
     // Free-form status note from /api/status — surfaced in LayerManager
@@ -83,6 +218,12 @@ interface TimelineStore {
   setInfraViewportPct: (pct: number) => void;
   tileMode: 'google' | 'osm';
   clusteringEnabled: boolean;
+  // Filter / isolation state
+  prevFilterState: { visibility: LayerFlags; subtypeVisibility: Record<string, boolean> } | null;
+  activeFilter: ActiveFilter | null;
+  activePreset: string | null;
+  activeIconSet: 'default' | 'enhanced';
+  isolatedEntityId: string | null;
   setTileMode: (mode: 'google' | 'osm') => void;
   toggleClustering: () => void;
   setMode: (mode: 'live' | 'playback') => void;
@@ -99,6 +240,12 @@ interface TimelineStore {
   setStreamMetric: (layer: string, data: Partial<StreamMetric>) => void;
   toggleSubtype: (key: string) => void;
   setSubtypeCounts: (layer: keyof LayerFlags, counts: Record<string, number>) => void;
+  // Filter / isolation actions
+  applyFilter: (type: ActiveFilter['type'], label: string, visOverride: LayerFlags, subOverride?: Record<string, boolean>) => void;
+  clearFilter: () => void;
+  applyMissionPreset: (presetName: string) => void;
+  setActiveIconSet: (set: 'default' | 'enhanced') => void;
+  setIsolatedEntityId: (id: string | null) => void;
 }
 
 // Persist sources/visibility to server on change (debounced)
@@ -202,6 +349,12 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
   setInfraViewportPct: (pct) => set({ infraViewportPct: pct }),
   tileMode: 'google' as 'google' | 'osm',
   clusteringEnabled: true,
+  prevFilterState: null,
+  activeFilter: null,
+  activePreset: null,
+  activeIconSet: 'default' as 'default' | 'enhanced',
+  isolatedEntityId: null,
+  setIsolatedEntityId: (id) => set({ isolatedEntityId: id }),
   setTileMode: (tileMode) => set({ tileMode }),
   toggleClustering: () => set(s => ({ clusteringEnabled: !s.clusteringEnabled })),
   streamMetrics: {
@@ -221,7 +374,7 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
       clouds:   { label: 'Satellite Clouds', source: 'NASA GIBS', type: 'WMTS imagery overlay', count: 0, speed: 'daily snapshot', status: 'streaming', poll: 'daily', upstream: 'daily MODIS' },
       satellite_imagery: { label: 'Satellite Imagery', source: 'NASA GIBS MODIS', type: 'WMTS imagery overlay', count: 0, speed: 'daily snapshot', status: 'streaming', poll: 'daily', upstream: 'daily MODIS' },
       traffic: { label: 'Traffic Flow', source: 'TomTom', type: 'Raster tile overlay', count: 0, speed: '-', status: 'connecting', poll: 'on demand', upstream: 'real-time (~1 min)' },
-      conflicts: { label: 'Armed Conflicts', source: 'ACLED', type: 'REST Polling', count: 0, speed: '-', status: 'auth-missing', poll: '30m', upstream: 'daily updates' },
+      conflicts: { label: 'Armed Conflicts', source: 'ACLED + GDELT', type: 'REST + CSV', count: 0, speed: '-', status: 'connecting', poll: '15m (GDELT) / 30m (ACLED)', upstream: '15-min GDELT + daily ACLED' },
       airspace: { label: 'Restricted Airspace', source: 'OpenAIP', type: 'REST paginated', count: 0, speed: '-', status: 'connecting', poll: '1h', upstream: 'weekly updates' },
       gfw: { label: 'Dark Vessel Events', source: 'Global Fishing Watch', type: 'REST Polling', count: 0, speed: '-', status: 'auth-missing', poll: '1h', upstream: 'event-driven' },
   },
@@ -267,4 +420,41 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
       for (const [sub, n] of Object.entries(counts)) next[`${prefix}${sub}`] = n;
       return { subtypeCounts: next };
   }),
+  // --- Filter / isolation actions ---
+  applyFilter: (type, label, visOverride, subOverride) => set(state => {
+      // Save current state so clearFilter can restore it
+      const prevFilterState = state.prevFilterState || {
+          visibility: { ...state.visibility },
+          subtypeVisibility: { ...state.subtypeVisibility },
+      };
+      const patch: Partial<TimelineStore> = {
+          prevFilterState,
+          activeFilter: { type, label },
+          activePreset: null,
+          visibility: visOverride,
+      };
+      if (subOverride) patch.subtypeVisibility = subOverride;
+      return patch;
+  }),
+  clearFilter: () => set(state => {
+      if (!state.prevFilterState) return { activeFilter: null, isolatedEntityId: null };
+      return {
+          visibility: state.prevFilterState.visibility,
+          subtypeVisibility: state.prevFilterState.subtypeVisibility,
+          prevFilterState: null,
+          activeFilter: null,
+          isolatedEntityId: null,
+      };
+  }),
+  applyMissionPreset: (presetName) => set(state => {
+      const preset = MISSION_PRESETS.find(p => p.name === presetName);
+      if (!preset) return {};
+      const vis = { ...state.visibility, ...preset.visibility } as LayerFlags;
+      // Replace (not merge) subtypeVisibility — presets explicitly set all subtypes
+      const sub = preset.subtypeVisibility || state.subtypeVisibility;
+      const next = { ...state, visibility: vis, subtypeVisibility: sub };
+      saveSettingsToServer(next);
+      return { visibility: vis, subtypeVisibility: sub, activePreset: presetName, activeFilter: null, prevFilterState: null };
+  }),
+  setActiveIconSet: (iconSet) => set({ activeIconSet: iconSet }),
 }));

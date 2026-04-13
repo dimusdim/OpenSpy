@@ -82,6 +82,24 @@ export default function Globe() {
         // overlay.
         v.scene.maximumRenderTimeChange = 1.0;
 
+        // Invalidate render when visibility state changes. In
+        // requestRenderMode Cesium only redraws on camera/clock/data
+        // changes — store-driven toggles (Legend, filters, Solo) don't
+        // trigger a scene change, so the globe stays visually stale.
+        let prevVis = {} as any, prevSub = {} as any, prevFilter = null as any, prevTrails = false;
+        const unsub = useTimelineStore.subscribe((state) => {
+            if (state.visibility !== prevVis ||
+                state.subtypeVisibility !== prevSub ||
+                state.activeFilter !== prevFilter ||
+                state.showTrajectories !== prevTrails) {
+                prevVis = state.visibility;
+                prevSub = state.subtypeVisibility;
+                prevFilter = state.activeFilter;
+                prevTrails = state.showTrajectories;
+                v.scene.requestRender();
+            }
+        });
+
         // 3D geometry (Google / OSM) is loaded reactively by a separate
         // useEffect that watches `tileMode`. We no longer load here.
 
@@ -385,6 +403,7 @@ export default function Globe() {
         setViewer(v);
 
         return () => {
+            unsub();
             document.removeEventListener('timeline-ctrl', handleTimelineCtrl);
             document.removeEventListener('fly-to', handleFlyTo);
             if (!v.isDestroyed()) {

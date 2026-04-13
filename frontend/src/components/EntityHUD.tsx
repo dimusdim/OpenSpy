@@ -3,7 +3,7 @@
 import { useTimelineStore } from '../store/useTimelineStore';
 import { useEffect, useState, useRef, useCallback } from 'react';
 import * as Cesium from 'cesium';
-import { Crosshair } from 'lucide-react';
+import { Crosshair, Filter, X } from 'lucide-react';
 import axios from 'axios';
 import Hls from 'hls.js';
 import { aircraftMetaMap } from '../cesium/useDynamicLayers';
@@ -14,6 +14,41 @@ import { cableMetaMap } from '../cesium/useCablesLayer';
 import { pipelineMetaMap } from '../cesium/usePipelinesLayer';
 import { airspaceMetaMap } from '../cesium/useAirspaceLayer';
 import { infraMetaMap } from '../cesium/useInfrastructureLayer';
+
+// Squawk code interpretation
+function squawkBadge(code: string | null): { label: string; color: string } | null {
+    if (!code) return null;
+    if (code === '7700') return { label: 'EMERGENCY', color: 'bg-red-600 text-white' };
+    if (code === '7600') return { label: 'RADIO FAIL', color: 'bg-orange-600 text-white' };
+    if (code === '7500') return { label: 'HIJACK', color: 'bg-red-800 text-white' };
+    return null;
+}
+
+// Fire type to human label
+function fireTypeLabel(ft: number): string | null {
+    switch (ft) {
+        case 1: return 'VOLCANIC';
+        case 2: return 'INDUSTRIAL';
+        case 3: return 'OFFSHORE';
+        default: return null;
+    }
+}
+
+// Format duration in seconds to human readable
+function fmtDuration(sec: number | null): string {
+    if (!sec || sec <= 0) return '—';
+    if (sec < 3600) return `${Math.round(sec / 60)} min`;
+    if (sec < 86400) return `${(sec / 3600).toFixed(1)} hr`;
+    return `${(sec / 86400).toFixed(1)} days`;
+}
+
+// Domain lookup for isolation buttons
+const LAYER_TO_DOMAIN: Record<string, string> = {
+    Aircraft: 'Air', Vessel: 'Sea', 'Dark Vessel': 'Sea', GFW: 'Sea',
+    Satellite: 'Space', Conflict: 'Ground', OSINT: 'Ground', Fire: 'Ground',
+    Infrastructure: 'Infrastructure', Cable: 'Infrastructure', Pipeline: 'Infrastructure',
+    Outage: 'Connectivity', Webcam: 'Context', Airspace: 'Air', Jamming: 'Air',
+};
 
 // HUD that locks onto whatever entity the user clicked. Continuously projects
 // the entity's 3D world position to screen coords (for the dotted leader line)
@@ -38,6 +73,8 @@ export default function EntityHUD() {
         speed?: number;
         heading?: number;
         description?: string;
+        // Enrichment fields (populated per layer type)
+        extra?: Record<string, any>;
     } | null>(null);
 
     useEffect(() => {
@@ -67,7 +104,11 @@ export default function EntityHUD() {
         };
 
         const readProp = (props: any, key: string) => {
-            try { return props?.[key]?.getValue?.() ?? props?.[key]; } catch { return undefined; }
+            try {
+                const p = props?.[key];
+                if (!p) return undefined;
+                return typeof p.getValue === 'function' ? p.getValue() : p;
+            } catch { return undefined; }
         };
 
         const update = () => {
@@ -105,6 +146,11 @@ export default function EntityHUD() {
                     subtype: level,
                     source: 'NASA FIRMS',
                     description: `FRP: ${fireMeta.frp.toFixed(1)} MW | Brightness: ${fireMeta.brightness.toFixed(0)} K | Confidence: ${fireMeta.confidence}`,
+                    extra: {
+                        daynight: fireMeta.daynight,
+                        acqTime: fireMeta.acqTime,
+                        fireType: fireMeta.fireType,
+                    },
                 });
                 requestAnimationFrame(update);
                 return;
@@ -126,6 +172,11 @@ export default function EntityHUD() {
                     subtype: cableMeta.subtype,
                     source: cableMeta.source,
                     description: cableMeta.description,
+                    extra: {
+                        owners: cableMeta.owners,
+                        length: cableMeta.length,
+                        year: cableMeta.year,
+                    },
                 });
                 requestAnimationFrame(update);
                 return;
@@ -210,6 +261,15 @@ export default function EntityHUD() {
                     layer: 'Aircraft',
                     subtype: acMeta.type,
                     speed: acMeta.speed,
+                    heading: acMeta.heading,
+                    extra: {
+                        squawk: acMeta.squawk,
+                        verticalRate: acMeta.verticalRate,
+                        onGround: acMeta.onGround,
+                        lastContact: acMeta.lastContact,
+                        callsign: acMeta.callsign,
+                        icao24: acMeta.icao24,
+                    },
                 });
                 requestAnimationFrame(update);
                 return;
@@ -225,17 +285,57 @@ export default function EntityHUD() {
                     setScreenPos(canvasPos ? { x: canvasPos.x, y: canvasPos.y } : null);
                     const carto = Cesium.Cartographic.fromCartesian(pos);
                     const props = entity.properties as any;
+                    const layer = readProp(props, 'layer');
+                    // Build enrichment extra object based on layer type
+                    const extra: Record<string, any> = {};
+                    if (layer === 'Vessel') {
+                        extra.vesselName = readProp(props, 'vesselName');
+                        extra.callSign = readProp(props, 'callSign');
+                        extra.imo = readProp(props, 'imo');
+                        extra.navigationStatus = readProp(props, 'navigationStatus');
+                        extra.destination = readProp(props, 'destination');
+                        extra.eta = readProp(props, 'eta');
+                        extra.rateOfTurn = readProp(props, 'rateOfTurn');
+                        extra.draught = readProp(props, 'draught');
+                        extra.vesselLength = readProp(props, 'vesselLength');
+                        extra.beam = readProp(props, 'beam');
+                        extra.cog = readProp(props, 'cog');
+                    } else if (layer === 'GFW') {
+                        extra.confidence = readProp(props, 'confidence');
+                        extra.duration = readProp(props, 'duration');
+                        extra.vesselOwner = readProp(props, 'vesselOwner');
+                        extra.vesselMmsi = readProp(props, 'vesselMmsi');
+                        extra.vesselType = readProp(props, 'vesselType');
+                        extra.vesselName = readProp(props, 'vesselName');
+                        extra.flagState = readProp(props, 'flagState');
+                        extra.start = readProp(props, 'start');
+                        extra.end = readProp(props, 'end');
+                    } else if (layer === 'Satellite') {
+                        extra.noradId = readProp(props, 'noradId');
+                        extra.resolution = readProp(props, 'resolution');
+                        extra.country = readProp(props, 'country');
+                    } else if (layer === 'Conflict') {
+                        extra.event_type = readProp(props, 'event_type');
+                        extra.sub_event_type = readProp(props, 'sub_event_type');
+                        extra.fatalities = readProp(props, 'fatalities');
+                        extra.country = readProp(props, 'country');
+                        extra.actor1 = readProp(props, 'actor1');
+                        extra.actor2 = readProp(props, 'actor2');
+                        extra.event_date = readProp(props, 'event_date');
+                        extra.notes = readProp(props, 'notes');
+                    }
                     setLive({
                         lat: Cesium.Math.toDegrees(carto.latitude),
                         lng: Cesium.Math.toDegrees(carto.longitude),
                         alt: carto.height,
-                        layer: readProp(props, 'layer'),
+                        layer,
                         subtype: readProp(props, 'subtype'),
                         alertLevel: readProp(props, 'alertLevel'),
                         source: readProp(props, 'source'),
                         speed: readProp(props, 'speed'),
                         heading: readProp(props, 'heading'),
                         description: readProp(props, 'description'),
+                        extra,
                     });
                 }
             }
@@ -343,7 +443,7 @@ export default function EntityHUD() {
             )}
 
             <div
-                className="absolute w-80 pointer-events-auto bg-black/85 backdrop-blur-xl border border-zinc-800 rounded-xl shadow-[0_0_30px_rgba(0,0,0,0.8)]"
+                className="absolute w-80 max-h-[80vh] overflow-y-auto pointer-events-auto bg-black/85 backdrop-blur-xl border border-zinc-800 rounded-xl shadow-[0_0_30px_rgba(0,0,0,0.8)]"
                 style={{ top: panelY, left: panelX }}
             >
                 <div className="p-4 border-b border-zinc-800 flex justify-between items-center">
@@ -410,11 +510,193 @@ export default function EntityHUD() {
                         </div>
                     )}
 
-                    {/* MMSI for vessels */}
-                    {live?.layer === 'Vessel' && selectedEntityId && (
-                        <div>
-                            <div className="text-[10px] text-zinc-500 font-mono">MMSI</div>
-                            <div className="text-zinc-300 text-sm font-mono">{selectedEntityId}</div>
+                    {/* ---- Aircraft enrichment ---- */}
+                    {live?.layer === 'Aircraft' && live.extra && (
+                        <div className="space-y-2">
+                            {live.extra.squawk && (
+                                <div className="flex items-center gap-2">
+                                    <div>
+                                        <div className="text-[10px] text-zinc-500 font-mono">SQUAWK</div>
+                                        <div className="text-zinc-300 text-sm font-mono">{live.extra.squawk}</div>
+                                    </div>
+                                    {squawkBadge(live.extra.squawk) && (
+                                        <span className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded ${squawkBadge(live.extra.squawk)!.color}`}>
+                                            {squawkBadge(live.extra.squawk)!.label}
+                                        </span>
+                                    )}
+                                </div>
+                            )}
+                            {live.extra.verticalRate != null && live.extra.verticalRate !== 0 && (
+                                <div>
+                                    <div className="text-[10px] text-zinc-500 font-mono">VERTICAL RATE</div>
+                                    <div className="text-zinc-300 text-sm font-mono">
+                                        {live.extra.verticalRate > 0 ? '↑' : '↓'} {Math.abs(live.extra.verticalRate).toFixed(1)} m/s
+                                    </div>
+                                </div>
+                            )}
+                            {live.extra.onGround && (
+                                <span className="inline-block text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-yellow-700/50 text-yellow-300 border border-yellow-600/40">ON GROUND</span>
+                            )}
+                            {live.extra.lastContact && (
+                                <div>
+                                    <div className="text-[10px] text-zinc-500 font-mono">LAST CONTACT</div>
+                                    <div className={`text-sm font-mono ${
+                                        Date.now() / 1000 - live.extra.lastContact < 30 ? 'text-green-400'
+                                        : Date.now() / 1000 - live.extra.lastContact < 120 ? 'text-yellow-400'
+                                        : 'text-red-400'
+                                    }`}>
+                                        {Math.round(Date.now() / 1000 - live.extra.lastContact)}s ago
+                                        {Date.now() / 1000 - live.extra.lastContact > 120 && (
+                                            <span className="ml-1 text-[9px] bg-red-800/50 text-red-300 px-1 py-0.5 rounded">STALE</span>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* ---- Vessel enrichment ---- */}
+                    {live?.layer === 'Vessel' && (
+                        <div className="space-y-2">
+                            <div>
+                                <div className="text-[10px] text-zinc-500 font-mono">MMSI</div>
+                                <div className="text-zinc-300 text-sm font-mono">{selectedEntityId}</div>
+                            </div>
+                            {live.extra?.callSign && (
+                                <div>
+                                    <div className="text-[10px] text-zinc-500 font-mono">CALL SIGN</div>
+                                    <div className="text-zinc-300 text-sm font-mono">{live.extra.callSign}</div>
+                                </div>
+                            )}
+                            {live.extra?.imo && (
+                                <div>
+                                    <div className="text-[10px] text-zinc-500 font-mono">IMO</div>
+                                    <div className="text-zinc-300 text-sm font-mono">{live.extra.imo}</div>
+                                </div>
+                            )}
+                            {live.extra?.navigationStatus && (
+                                <div>
+                                    <div className="text-[10px] text-zinc-500 font-mono">NAV STATUS</div>
+                                    <div className="text-zinc-300 text-xs">{live.extra.navigationStatus}</div>
+                                </div>
+                            )}
+                            {live.extra?.destination && (
+                                <div>
+                                    <div className="text-[10px] text-zinc-500 font-mono">DESTINATION</div>
+                                    <div className="text-cyan-300 text-sm font-mono">
+                                        {live.extra.destination}
+                                        {live.extra.eta && <span className="text-zinc-500 text-xs ml-1">ETA {live.extra.eta}</span>}
+                                    </div>
+                                </div>
+                            )}
+                            {live.extra?.rateOfTurn != null && Math.abs(live.extra.rateOfTurn) > 0 && (
+                                <div className="flex items-center gap-2">
+                                    <div>
+                                        <div className="text-[10px] text-zinc-500 font-mono">RATE OF TURN</div>
+                                        <div className="text-zinc-300 text-sm font-mono">{live.extra.rateOfTurn.toFixed(1)}°/min</div>
+                                    </div>
+                                    {Math.abs(live.extra.rateOfTurn) > 20 && (
+                                        <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-orange-800/50 text-orange-300 border border-orange-600/40">HARD TURN</span>
+                                    )}
+                                </div>
+                            )}
+                            {(live.extra?.draught || live.extra?.vesselLength || live.extra?.beam) && (
+                                <div className="grid grid-cols-3 gap-2">
+                                    {live.extra.draught && (
+                                        <div>
+                                            <div className="text-[10px] text-zinc-500 font-mono">DRAUGHT</div>
+                                            <div className="text-zinc-300 text-xs font-mono">{live.extra.draught}m</div>
+                                        </div>
+                                    )}
+                                    {live.extra.vesselLength && (
+                                        <div>
+                                            <div className="text-[10px] text-zinc-500 font-mono">LENGTH</div>
+                                            <div className="text-zinc-300 text-xs font-mono">{live.extra.vesselLength}m</div>
+                                        </div>
+                                    )}
+                                    {live.extra.beam && (
+                                        <div>
+                                            <div className="text-[10px] text-zinc-500 font-mono">BEAM</div>
+                                            <div className="text-zinc-300 text-xs font-mono">{live.extra.beam}m</div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* ---- Fire enrichment ---- */}
+                    {live?.layer === 'Fire' && live.extra && (
+                        <div className="flex items-center gap-2 flex-wrap">
+                            {live.extra.daynight && (
+                                <span className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border ${
+                                    live.extra.daynight === 'D' ? 'bg-yellow-900/30 text-yellow-300 border-yellow-700/40' : 'bg-indigo-900/30 text-indigo-300 border-indigo-700/40'
+                                }`}>{live.extra.daynight === 'D' ? 'DAY' : 'NIGHT'}</span>
+                            )}
+                            {live.extra.acqTime && (
+                                <span className="text-[9px] font-mono text-zinc-400">{live.extra.acqTime.slice(0,2)}:{live.extra.acqTime.slice(2)} UTC</span>
+                            )}
+                            {fireTypeLabel(live.extra.fireType) && (
+                                <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-red-900/30 text-red-300 border border-red-700/40">
+                                    {fireTypeLabel(live.extra.fireType)}
+                                </span>
+                            )}
+                        </div>
+                    )}
+
+                    {/* ---- GFW enrichment ---- */}
+                    {live?.layer === 'GFW' && live.extra && (
+                        <div className="space-y-2">
+                            {live.extra.confidence != null && (
+                                <div>
+                                    <div className="text-[10px] text-zinc-500 font-mono">CONFIDENCE</div>
+                                    <div className="text-zinc-300 text-sm font-mono">{(live.extra.confidence * 100).toFixed(0)}%</div>
+                                </div>
+                            )}
+                            {live.extra.duration != null && (
+                                <div>
+                                    <div className="text-[10px] text-zinc-500 font-mono">DURATION</div>
+                                    <div className="text-zinc-300 text-sm font-mono">{fmtDuration(live.extra.duration)}</div>
+                                </div>
+                            )}
+                            {live.extra.vesselOwner && (
+                                <div>
+                                    <div className="text-[10px] text-zinc-500 font-mono">OWNER</div>
+                                    <div className="text-zinc-300 text-xs">{live.extra.vesselOwner}</div>
+                                </div>
+                            )}
+                            {live.extra.vesselMmsi && (
+                                <div>
+                                    <div className="text-[10px] text-zinc-500 font-mono">MMSI</div>
+                                    <div className="text-zinc-300 text-sm font-mono">{live.extra.vesselMmsi}</div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* ---- Cable enrichment ---- */}
+                    {live?.layer === 'Cable' && live.extra && (
+                        <div className="space-y-2">
+                            {live.extra.owners && (
+                                <div>
+                                    <div className="text-[10px] text-zinc-500 font-mono">OWNERS</div>
+                                    <div className="text-zinc-300 text-xs">{live.extra.owners}</div>
+                                </div>
+                            )}
+                            <div className="grid grid-cols-2 gap-2">
+                                {live.extra.length && (
+                                    <div>
+                                        <div className="text-[10px] text-zinc-500 font-mono">LENGTH</div>
+                                        <div className="text-zinc-300 text-xs font-mono">{live.extra.length} km</div>
+                                    </div>
+                                )}
+                                {live.extra.year && (
+                                    <div>
+                                        <div className="text-[10px] text-zinc-500 font-mono">RFS YEAR</div>
+                                        <div className="text-zinc-300 text-xs font-mono">{live.extra.year}</div>
+                                    </div>
+                                )}
+                            </div>
                         </div>
                     )}
 
@@ -425,6 +707,29 @@ export default function EntityHUD() {
                             <div className="text-zinc-300 text-sm font-mono">
                                 {live.alt > 30000000 ? 'GEO' : live.alt > 1000000 ? 'MEO' : 'LEO'} — {fmtAlt(live.alt)}
                             </div>
+                        </div>
+                    )}
+                    {/* Satellite enrichment */}
+                    {live?.layer === 'Satellite' && live.extra && (
+                        <div className="space-y-2">
+                            {live.extra.noradId && (
+                                <div>
+                                    <div className="text-[10px] text-zinc-500 font-mono">NORAD ID</div>
+                                    <div className="text-zinc-300 text-sm font-mono">{live.extra.noradId}</div>
+                                </div>
+                            )}
+                            {live.extra.resolution && (
+                                <div>
+                                    <div className="text-[10px] text-zinc-500 font-mono">RESOLUTION</div>
+                                    <div className="text-zinc-300 text-sm font-mono">{live.extra.resolution}</div>
+                                </div>
+                            )}
+                            {live.extra.country && (
+                                <div>
+                                    <div className="text-[10px] text-zinc-500 font-mono">COUNTRY</div>
+                                    <div className="text-zinc-300 text-sm">{live.extra.country}</div>
+                                </div>
+                            )}
                         </div>
                     )}
 
@@ -495,6 +800,50 @@ export default function EntityHUD() {
                         </div>
                     )}
 
+                    {/* ---- Conflict enrichment ---- */}
+                    {live?.layer === 'Conflict' && live.extra && (
+                        <div className="space-y-1 border-t border-zinc-800/60 pt-2">
+                            {live.extra.event_type && (
+                                <div>
+                                    <div className="text-[10px] text-zinc-500 font-mono">EVENT</div>
+                                    <div className="text-zinc-200 text-sm">{live.extra.event_type}{live.extra.sub_event_type ? ` — ${live.extra.sub_event_type}` : ''}</div>
+                                </div>
+                            )}
+                            {(live.extra.actor1 || live.extra.actor2) && (
+                                <div>
+                                    <div className="text-[10px] text-zinc-500 font-mono">ACTORS</div>
+                                    <div className="text-zinc-300 text-xs font-mono">
+                                        {live.extra.actor1 || '?'} <span className="text-zinc-600">vs</span> {live.extra.actor2 || '?'}
+                                    </div>
+                                </div>
+                            )}
+                            {live.extra.fatalities > 0 && (
+                                <div>
+                                    <div className="text-[10px] text-zinc-500 font-mono">FATALITIES</div>
+                                    <div className="text-red-400 text-sm font-bold">{live.extra.fatalities}</div>
+                                </div>
+                            )}
+                            {live.extra.event_date && (
+                                <div>
+                                    <div className="text-[10px] text-zinc-500 font-mono">DATE</div>
+                                    <div className="text-zinc-300 text-xs font-mono">{live.extra.event_date}</div>
+                                </div>
+                            )}
+                            {live.extra.country && (
+                                <div>
+                                    <div className="text-[10px] text-zinc-500 font-mono">COUNTRY</div>
+                                    <div className="text-zinc-300 text-xs">{live.extra.country}</div>
+                                </div>
+                            )}
+                            {live.extra.notes && (
+                                <div>
+                                    <div className="text-[10px] text-zinc-500 font-mono">NOTES</div>
+                                    <div className="text-zinc-400 text-[10px] leading-relaxed max-h-20 overflow-y-auto">{live.extra.notes}</div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
                     <button
                         onClick={flyTo}
                         disabled={!live}
@@ -503,12 +852,145 @@ export default function EntityHUD() {
                         <Crosshair size={12} />
                         Fly to target
                     </button>
+
+                    {/* Isolation buttons */}
+                    {live && (
+                        <IsolationButtons
+                            layer={live.layer || ''}
+                            subtype={live.subtype || ''}
+                            entityName={selectedEntityData.name || selectedEntityId}
+                            entityId={selectedEntityId}
+                        />
+                    )}
                 </div>
 
                 <div className="p-2 border-t border-zinc-800/50 bg-cyan-900/10 text-center">
                     <span className="text-xs font-mono text-cyan-500 animate-pulse">TRACKING SECURE</span>
                 </div>
             </div>
+        </div>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// IsolationButtons — Solo / This Type / This Domain / Reset
+// ---------------------------------------------------------------------------
+
+// Map layer names to LayerFlags keys for building visibility overrides
+const LAYER_TO_VISIBILITY_KEY: Record<string, string> = {
+    Aircraft: 'aviation', Vessel: 'maritime', 'Dark Vessel': 'maritime',
+    GFW: 'gfw', Satellite: 'satellites', Conflict: 'conflicts',
+    OSINT: 'osint', Fire: 'fires', Infrastructure: 'infrastructure',
+    Cable: 'cables', Pipeline: 'pipelines', Outage: 'outages',
+    Webcam: 'webcams', Airspace: 'airspace', Jamming: 'jamming',
+};
+
+// All known subtypes per visibility key — hardcoded so isolation works
+// even before data arrives (subtypeCounts may be empty).
+const ALL_SUBTYPES_FOR_LAYER: Record<string, string[]> = {
+    aviation: ['airliner', 'military', 'light', 'general'],
+    maritime: ['cargo', 'tanker', 'passenger', 'fishing', 'military', 'unknown'],
+    satellites: ['military', 'recon', 'commercial', 'civilian'],
+    conflicts: ['explosions', 'battles', 'violence'],
+    osint: ['EQ', 'TC', 'FL', 'VO', 'WF', 'DR'],
+    fires: ['high', 'medium', 'low'],
+    infrastructure: ['power_plant', 'power_substation', 'power_line', 'refinery', 'dam', 'desalination', 'military', 'aerodrome', 'communication_tower'],
+    pipelines: ['oil', 'gas'],
+    outages: ['critical', 'warning'],
+    jamming: ['high', 'medium', 'low'],
+    airspace: ['restricted', 'danger', 'prohibited', 'alert', 'warning'],
+};
+
+const DOMAIN_TO_LAYERS: Record<string, string[]> = {
+    Air: ['aviation', 'airspace', 'jamming'],
+    Sea: ['maritime', 'gfw'],
+    Space: ['satellites', 'satelliteFootprints'],
+    Ground: ['conflicts', 'osint', 'fires'],
+    Infrastructure: ['infrastructure', 'pipelines', 'cables'],
+    Connectivity: ['outages'],
+    Context: ['traffic', 'webcams', 'labels', 'satellite_imagery', 'clouds'],
+};
+
+function IsolationButtons({ layer, subtype, entityName, entityId }: { layer: string; subtype: string; entityName: string; entityId: string }) {
+    const activeFilter = useTimelineStore(s => s.activeFilter);
+    const applyFilter = useTimelineStore(s => s.applyFilter);
+    const clearFilter = useTimelineStore(s => s.clearFilter);
+    const setIsolatedEntityId = useTimelineStore(s => s.setIsolatedEntityId);
+    const visibility = useTimelineStore(s => s.visibility);
+
+    const visKey = LAYER_TO_VISIBILITY_KEY[layer];
+    const domain = LAYER_TO_DOMAIN[layer];
+    if (!visKey) return null;
+
+    const allOff = () => {
+        const vis: any = {};
+        for (const k of Object.keys(visibility)) vis[k] = false;
+        vis.labels = true; // always keep borders
+        return vis;
+    };
+
+    const handleSolo = () => {
+        const vis = allOff();
+        vis[visKey] = true;
+        // Build subtype override: hide ALL known subtypes, then show only this one
+        const sub: Record<string, boolean> = {};
+        const knownSubs = ALL_SUBTYPES_FOR_LAYER[visKey] || [];
+        for (const s of knownSubs) sub[`${visKey}:${s}`] = false;
+        if (subtype) sub[`${visKey}:${subtype}`] = true;
+        setIsolatedEntityId(entityId);
+        applyFilter('solo', entityName, vis, sub);
+    };
+
+    const handleThisType = () => {
+        const vis = allOff();
+        vis[visKey] = true;
+        const sub: Record<string, boolean> = {};
+        const knownSubs = ALL_SUBTYPES_FOR_LAYER[visKey] || [];
+        for (const s of knownSubs) sub[`${visKey}:${s}`] = false;
+        if (subtype) sub[`${visKey}:${subtype}`] = true;
+        setIsolatedEntityId(null); // Clear solo — This Type shows all of this subtype
+        applyFilter('thisType', `${layer}: ${subtype}`, vis, sub);
+    };
+
+    const handleThisDomain = () => {
+        if (!domain) return;
+        const vis = allOff();
+        const domainLayers = DOMAIN_TO_LAYERS[domain] || [];
+        for (const l of domainLayers) vis[l] = true;
+        setIsolatedEntityId(null); // Clear solo
+        applyFilter('thisDomain', domain, vis);
+    };
+
+    return (
+        <div className="flex flex-wrap gap-1 mt-2">
+            <button
+                onClick={handleSolo}
+                className="flex items-center gap-1 px-2 py-1 rounded text-[9px] font-mono uppercase tracking-wider border border-zinc-700 bg-zinc-900/50 text-zinc-400 hover:text-cyan-300 hover:border-cyan-700/50 transition-colors"
+            >
+                <Filter size={9} /> Solo
+            </button>
+            <button
+                onClick={handleThisType}
+                className="flex items-center gap-1 px-2 py-1 rounded text-[9px] font-mono uppercase tracking-wider border border-zinc-700 bg-zinc-900/50 text-zinc-400 hover:text-cyan-300 hover:border-cyan-700/50 transition-colors"
+            >
+                This Type
+            </button>
+            {domain && (
+                <button
+                    onClick={handleThisDomain}
+                    className="flex items-center gap-1 px-2 py-1 rounded text-[9px] font-mono uppercase tracking-wider border border-zinc-700 bg-zinc-900/50 text-zinc-400 hover:text-cyan-300 hover:border-cyan-700/50 transition-colors"
+                >
+                    {domain}
+                </button>
+            )}
+            {activeFilter && (
+                <button
+                    onClick={() => { setIsolatedEntityId(null); clearFilter(); }}
+                    className="flex items-center gap-1 px-2 py-1 rounded text-[9px] font-mono uppercase tracking-wider border border-red-700/50 bg-red-900/20 text-red-400 hover:text-red-300 hover:border-red-600 transition-colors"
+                >
+                    <X size={9} /> Reset
+                </button>
+            )}
         </div>
     );
 }
