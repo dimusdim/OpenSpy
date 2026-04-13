@@ -103,7 +103,7 @@ const DOMAIN_TREE: DomainNode[] = [
                 ],
             },
             {
-                layer: 'gfw', label: 'Dark Vessel Events', icon: Anchor,
+                layer: 'gfw', label: 'AIS Signal Lost Events', icon: Anchor,
                 subtypes: [],
             },
         ],

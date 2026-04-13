@@ -52,6 +52,9 @@ export default function Home() {
         if (saved.tileMode) {
           useTimelineStore.setState({ tileMode: saved.tileMode });
         }
+        if (typeof saved.showTrajectories === 'boolean') {
+          useTimelineStore.setState({ showTrajectories: saved.showTrajectories });
+        }
       })
       .catch(() => { /* no saved settings, use defaults */ });
   }, []);

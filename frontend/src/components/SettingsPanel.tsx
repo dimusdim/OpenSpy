@@ -63,7 +63,7 @@ const PROVIDERS: ProviderDef[] = [
     // Maritime
     { id: 'aisstream', name: 'AISStream', description: 'Live AIS vessel tracking via persistent WebSocket. Global coverage.', url: 'stream.aisstream.io', type: 'WebSocket', poll: 'live', layers: ['maritime'], envVars: ['AISSTREAM_API_KEY'], registrationUrl: 'https://aisstream.io/', registrationLabel: 'AISStream.io' },
     // Satellites
-    { id: 'spacetrack', name: 'Space-Track.org', description: 'Primary TLE source for orbital elements. Falls back to CelesTrak if unconfigured.', url: 'space-track.org', type: 'REST', poll: '24h', layers: ['satellites'], envVars: ['SPACETRACK_USERNAME', 'SPACETRACK_PASSWORD'], registrationUrl: 'https://www.space-track.org/auth/createAccount', registrationLabel: 'Space-Track.org' },
+    { id: 'spacetrack', name: 'Space-Track.org', description: 'Primary TLE source for orbital elements. Falls back to CelesTrak if unconfigured.', url: 'space-track.org', type: 'REST', poll: '24h', layers: ['satellites'], envVars: ['SPACETRACK_EMAIL', 'SPACETRACK_PASSWORD'], registrationUrl: 'https://www.space-track.org/auth/createAccount', registrationLabel: 'Space-Track.org' },
     { id: 'celestrak', name: 'CelesTrak', description: 'Free TLE fallback source. No auth needed.', url: 'celestrak.org', type: 'REST', poll: '24h', layers: ['satellites'], free: true },
     { id: 'spectator', name: 'Spectator Earth', description: 'Satellite sensor metadata for footprint projections.', url: 'api.spectator.earth', type: 'REST', poll: 'on load', layers: ['satelliteFootprints'], free: true },
     // Disasters
@@ -87,7 +87,7 @@ const PROVIDERS: ProviderDef[] = [
     { id: 'gpsjam', name: 'GPSJam.org', description: 'GNSS jamming hotspots from ADS-B navigation integrity analysis.', url: 'gpsjam.org', type: 'CSV (H3)', poll: '6h', layers: ['jamming'], free: true },
     // Outages
     { id: 'ioda', name: 'IODA', description: 'Internet Outage Detection & Analysis. BGP + active probing.', url: 'ioda.inetintel.cc.gatech.edu', type: 'REST', poll: '5m', layers: ['outages'], free: true },
-    { id: 'cloudflare', name: 'Cloudflare Radar', description: 'Internet outage detection from Cloudflare edge network.', url: 'radar.cloudflare.com', type: 'REST', poll: '5m', layers: ['outages'], envVars: ['CLOUDFLARE_RADAR_TOKEN'], registrationUrl: 'https://dash.cloudflare.com/profile/api-tokens', registrationLabel: 'Cloudflare' },
+    { id: 'cloudflare', name: 'Cloudflare Radar', description: 'Internet outage detection from Cloudflare edge network.', url: 'radar.cloudflare.com', type: 'REST', poll: '5m', layers: ['outages'], envVars: ['CLOUDFLARE_API_TOKEN'], registrationUrl: 'https://dash.cloudflare.com/profile/api-tokens', registrationLabel: 'Cloudflare' },
     // Traffic
     { id: 'tomtom', name: 'TomTom Traffic', description: 'Real-time traffic flow raster tiles.', url: 'developer.tomtom.com', type: 'Raster tiles', poll: 'on demand', layers: ['traffic'], envVars: ['TOMTOM_API_KEY'], registrationUrl: 'https://developer.tomtom.com/', registrationLabel: 'TomTom Developer' },
     // Airspace
@@ -156,18 +156,20 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                 if (!m) continue;
                 totalCount += m.count || 0;
                 if (m.note) note = m.note;
-                // Pick the "best" status (streaming > connecting > error > auth-missing)
+                // Pick the "best" status (streaming > limited > warning/degraded/rate-limited > connecting > error > auth-missing)
                 if (m.status === 'streaming' || m.status === 'limited') bestStatus = m.status;
-                else if (m.status === 'error' && bestStatus !== 'streaming') bestStatus = 'error';
+                else if ((m.status === 'warning' || m.status === 'degraded') && bestStatus !== 'streaming' && bestStatus !== 'limited') bestStatus = 'warning';
+                else if (m.status === 'rate-limited' && bestStatus !== 'streaming' && bestStatus !== 'limited') bestStatus = 'rate-limited';
+                else if (m.status === 'error' && bestStatus !== 'streaming' && bestStatus !== 'limited') bestStatus = 'error';
                 else if (m.status === 'auth-missing' && bestStatus === 'connecting') bestStatus = 'auth-missing';
             }
             // If provider has envVars and none are set, show auth-missing
             if (p.envVars && !p.free) {
-                const anyKeySet = p.envVars.some(ev => {
+                const allKeysSet = p.envVars.every(ev => {
                     const layerKeys = Object.values(apiKeys);
                     return layerKeys.some(lk => lk.keys[ev]?.set);
                 });
-                if (!anyKeySet && bestStatus === 'connecting') bestStatus = 'auth-missing';
+                if (!allKeysSet && bestStatus === 'connecting') bestStatus = 'auth-missing';
             }
             if (p.free && bestStatus === 'auth-missing') bestStatus = 'streaming';
             result[p.id] = { status: bestStatus, count: totalCount, note };

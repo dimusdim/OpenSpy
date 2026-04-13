@@ -308,7 +308,7 @@ export default function Globe() {
                         : eid.startsWith('cable-') ? 'Cable'
                         : eid.startsWith('border-') ? 'Border'
                         : eid.startsWith('outage-') || eid.startsWith('cf-') ? 'Outage'
-                        : eid.startsWith('dark-') ? 'Dark Vessel'
+                        : eid.startsWith('dark-') ? 'AIS Signal Lost'
                         : eid.startsWith('conflict-') || eid.startsWith('acled-') ? 'Conflict'
                         : eid.startsWith('airspace-') ? 'Airspace'
                         : eid.startsWith('gfw-') ? 'GFW Event'
@@ -427,11 +427,19 @@ export default function Globe() {
         if (!viewer) return;
         // GIBS cloud products lag ~1 day, so use yesterday's date
         const cloudDate = new Date(Date.now() - 86400_000).toISOString().split('T')[0];
-        const provider = new Cesium.UrlTemplateImageryProvider({
-            url: `https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/MODIS_Terra_Cloud_Fraction_Day/default/${cloudDate}/2km/{z}/{y}/{x}.png`,
+        const provider = new Cesium.WebMapTileServiceImageryProvider({
+            url: 'https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/wmts.cgi',
+            layer: 'MODIS_Terra_Cloud_Fraction_Day',
+            style: 'default',
+            tileMatrixSetID: '2km',
+            format: 'image/png',
             tilingScheme: new Cesium.GeographicTilingScheme(),
             maximumLevel: 5,
             credit: 'NASA GIBS MODIS Terra Cloud Fraction',
+            times: new Cesium.TimeIntervalCollection([new Cesium.TimeInterval({
+                start: Cesium.JulianDate.fromIso8601(cloudDate),
+                stop: Cesium.JulianDate.fromIso8601(cloudDate),
+            })]),
         });
         const layer = viewer.imageryLayers.addImageryProvider(provider);
         layer.alpha = 0.55;
@@ -475,11 +483,19 @@ export default function Globe() {
     useEffect(() => {
         if (!viewer) return;
         const today = new Date().toISOString().split('T')[0];
-        const provider = new Cesium.UrlTemplateImageryProvider({
-            url: `https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/MODIS_Terra_CorrectedReflectance_TrueColor/default/${today}/250m/{z}/{y}/{x}.jpg`,
+        const provider = new Cesium.WebMapTileServiceImageryProvider({
+            url: 'https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/wmts.cgi',
+            layer: 'MODIS_Terra_CorrectedReflectance_TrueColor',
+            style: 'default',
+            tileMatrixSetID: '250m',
+            format: 'image/jpeg',
             tilingScheme: new Cesium.GeographicTilingScheme(),
             maximumLevel: 8,
             credit: 'NASA GIBS MODIS',
+            times: new Cesium.TimeIntervalCollection([new Cesium.TimeInterval({
+                start: Cesium.JulianDate.fromIso8601(today),
+                stop: Cesium.JulianDate.fromIso8601(today),
+            })]),
         });
         const layer = viewer.imageryLayers.addImageryProvider(provider);
         layer.alpha = 0.85;
@@ -526,7 +542,9 @@ export default function Globe() {
             const googleKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_KEY;
             if (!googleKey) {
                 console.warn('[Globe] NEXT_PUBLIC_GOOGLE_MAPS_KEY not set — falling back to OSM');
-                useTimelineStore.getState().setTileMode('osm');
+                // Use setState directly to avoid triggering saveSettingsToServer —
+                // this is a runtime fallback, not a user preference change.
+                useTimelineStore.setState({ tileMode: 'osm' });
                 return;
             }
             try {
@@ -542,7 +560,7 @@ export default function Globe() {
                     // mid-range hardware without visibly degrading the
                     // photorealistic look at typical command-centre zoom
                     // levels (we rarely sit at a single building for long).
-                    maximumScreenSpaceError: 48,
+                    maximumScreenSpaceError: 16,
                     // Skip intermediate LOD levels — jump straight to the target,
                     // avoids rendering multiple LOD layers during zoom transitions.
                     skipLevelOfDetail: true,
@@ -570,7 +588,9 @@ export default function Globe() {
                 console.log('[Globe] Google Photorealistic 3D Tiles loaded (cached)');
             } catch (err) {
                 console.warn('[Globe] Google 3D Tiles failed, falling back to OSM:', err);
-                useTimelineStore.getState().setTileMode('osm');
+                // Use setState directly to avoid triggering saveSettingsToServer —
+                // this is a runtime fallback, not a user preference change.
+                useTimelineStore.setState({ tileMode: 'osm' });
             }
         }
 

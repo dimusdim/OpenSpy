@@ -110,6 +110,8 @@ export function useTrafficLayer(viewer: Cesium.Viewer | null) {
         if (!layerRef.current || !viewer || viewer.isDestroyed()) return;
         const carto = viewer.camera.positionCartographic;
         const heightKm = carto.height / 1000;
-        layerRef.current.show = isSourceOn && isVisible && heightKm < 100;
+        const shouldShow = isSourceOn && isVisible && heightKm < 100;
+        layerRef.current.show = shouldShow;
+        console.log(`[Traffic] toggle: source=${isSourceOn} vis=${isVisible} alt=${Math.round(heightKm)}km globe.show=${viewer.scene.globe.show} → layer.show=${shouldShow}`);
     }, [isSourceOn, isVisible, viewer]);
 }

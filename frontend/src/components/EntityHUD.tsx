@@ -44,7 +44,7 @@ function fmtDuration(sec: number | null): string {
 
 // Domain lookup for isolation buttons
 const LAYER_TO_DOMAIN: Record<string, string> = {
-    Aircraft: 'Air', Vessel: 'Sea', 'Dark Vessel': 'Sea', GFW: 'Sea',
+    Aircraft: 'Air', Vessel: 'Sea', 'AIS Signal Lost': 'Sea', GFW: 'Sea',
     Satellite: 'Space', Conflict: 'Ground', OSINT: 'Ground', Fire: 'Ground',
     Infrastructure: 'Infrastructure', Cable: 'Infrastructure', Pipeline: 'Infrastructure',
     Outage: 'Connectivity', Webcam: 'Context', Airspace: 'Air', Jamming: 'Air',
@@ -878,7 +878,7 @@ export default function EntityHUD() {
 
 // Map layer names to LayerFlags keys for building visibility overrides
 const LAYER_TO_VISIBILITY_KEY: Record<string, string> = {
-    Aircraft: 'aviation', Vessel: 'maritime', 'Dark Vessel': 'maritime',
+    Aircraft: 'aviation', Vessel: 'maritime', 'AIS Signal Lost': 'maritime',
     GFW: 'gfw', Satellite: 'satellites', Conflict: 'conflicts',
     OSINT: 'osint', Fire: 'fires', Infrastructure: 'infrastructure',
     Cable: 'cables', Pipeline: 'pipelines', Outage: 'outages',

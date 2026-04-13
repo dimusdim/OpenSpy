@@ -101,6 +101,7 @@ export function useAirspaceLayer(viewer: Cesium.Viewer | null) {
     const isSourceOn = useTimelineStore(s => s.sources.airspace);
     const isVisible = useTimelineStore(s => s.visibility.airspace);
     const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
+    const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
     const fillPrimitiveRef = useRef<Cesium.Primitive | null>(null);
     const outlinePrimitiveRef = useRef<Cesium.Primitive | null>(null);
     // Load state. `hasLoadedRef` is reset on source-off so the next
@@ -347,10 +348,12 @@ export function useAirspaceLayer(viewer: Cesium.Viewer | null) {
                         pendingTimersRef.current.add(t);
                         return;
                     }
+                    const currentState = useTimelineStore.getState();
                     applyAirspaceFilter(
                         fillPrimitive,
                         outlinePrimitive,
-                        useTimelineStore.getState().subtypeVisibility
+                        currentState.subtypeVisibility,
+                        currentState.isolatedEntityId
                     );
                 };
                 applyInitialFilters();
@@ -456,31 +459,37 @@ export function useAirspaceLayer(viewer: Cesium.Viewer | null) {
         });
     }, [isSourceOn, viewer]);
 
-    // ---- Effect 4: per-subtype visibility ----
+    // ---- Effect 4: per-subtype visibility + solo filter ----
     useEffect(() => {
         const fill = fillPrimitiveRef.current;
         const outline = outlinePrimitiveRef.current;
         if (!fill || !outline || !fill.ready || !outline.ready) return;
-        applyAirspaceFilter(fill, outline, subtypeVisibility);
-    }, [subtypeVisibility]);
+        applyAirspaceFilter(fill, outline, subtypeVisibility, isolatedEntityId);
+    }, [subtypeVisibility, isolatedEntityId]);
 }
 
 function applyAirspaceFilter(
     fill: Cesium.Primitive,
     outline: Cesium.Primitive,
-    subtypeVisibility: Record<string, boolean>
+    subtypeVisibility: Record<string, boolean>,
+    isolatedEntityId?: string | null
 ) {
     if (!fill.ready || !outline.ready) return;
+    const showTrue = Cesium.ShowGeometryInstanceAttribute.toValue(true);
+    const showFalse = Cesium.ShowGeometryInstanceAttribute.toValue(false);
     airspacePartsBySubtype.forEach((parts, subtype) => {
-        const show = subtypeVisibility[`airspace:${subtype}`] !== false;
-        const showValue = Cesium.ShowGeometryInstanceAttribute.toValue(show);
+        const subtypeOk = subtypeVisibility[`airspace:${subtype}`] !== false;
         for (const id of parts.fill) {
+            const logicalId = airspaceInstanceToLogical.get(id);
+            const show = subtypeOk && (!isolatedEntityId || isolatedEntityId === logicalId);
             const attrs = fill.getGeometryInstanceAttributes(id);
-            if (attrs) (attrs as any).show = showValue;
+            if (attrs) (attrs as any).show = show ? showTrue : showFalse;
         }
         for (const id of parts.outline) {
+            const logicalId = airspaceInstanceToLogical.get(id);
+            const show = subtypeOk && (!isolatedEntityId || isolatedEntityId === logicalId);
             const attrs = outline.getGeometryInstanceAttributes(id);
-            if (attrs) (attrs as any).show = showValue;
+            if (attrs) (attrs as any).show = show ? showTrue : showFalse;
         }
     });
 }

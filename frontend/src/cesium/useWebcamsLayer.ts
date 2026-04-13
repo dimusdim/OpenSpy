@@ -25,6 +25,7 @@ export const webcamMetaMap = new Map<string, WebcamMeta>();
 export function useWebcamsLayer(viewer: Cesium.Viewer | null) {
     const isSourceOn = useTimelineStore(s => s.sources.webcams);
     const isVisible = useTimelineStore(s => s.visibility.webcams);
+    const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
     const collectionRef = useRef<Cesium.BillboardCollection | null>(null);
 
     // ---- Effect 1: scene lifetime ----
@@ -129,7 +130,17 @@ export function useWebcamsLayer(viewer: Cesium.Viewer | null) {
         if (collectionRef.current) collectionRef.current.show = isSourceOn && isVisible;
     }, [isSourceOn, isVisible]);
 
-    // ---- Effect 4: source-off scene clear ----
+    // ---- Effect 4: solo filter (isolatedEntityId) ----
+    useEffect(() => {
+        const col = collectionRef.current;
+        if (!col) return;
+        for (let i = 0; i < col.length; i++) {
+            const bb = col.get(i);
+            bb.show = !isolatedEntityId || isolatedEntityId === bb.id;
+        }
+    }, [isolatedEntityId]);
+
+    // ---- Effect 5: source-off scene clear ----
     useEffect(() => {
         if (isSourceOn) return;
         const col = collectionRef.current;

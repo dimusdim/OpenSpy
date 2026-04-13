@@ -66,6 +66,7 @@ export function useCablesLayer(viewer: Cesium.Viewer | null) {
     // sources.cables = fetch; visibility.cables = primitive.show
     const isSourceOn = useTimelineStore(s => s.sources.cables);
     const isVisible = useTimelineStore(s => s.visibility.cables);
+    const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
     const primitiveRef = useRef<Cesium.GroundPolylinePrimitive | null>(null);
     // True once the one-shot TeleGeography fetch has finished and the
     // primitive is in the scene. Reset to false on source-off so
@@ -296,6 +297,23 @@ export function useCablesLayer(viewer: Cesium.Viewer | null) {
     useEffect(() => {
         if (primitiveRef.current) primitiveRef.current.show = isSourceOn && isVisible;
     }, [isSourceOn, isVisible]);
+
+    // ---- Effect 3a: solo filter (isolatedEntityId) ----
+    // Per-instance show toggle via ShowGeometryInstanceAttribute. The
+    // primitive must be ready before getGeometryInstanceAttributes works,
+    // so bail early if it isn't.
+    useEffect(() => {
+        const prim = primitiveRef.current;
+        if (!prim || !prim.ready) return;
+        const showAll = Cesium.ShowGeometryInstanceAttribute.toValue(true);
+        const showNone = Cesium.ShowGeometryInstanceAttribute.toValue(false);
+        cableInstanceToLogical.forEach((_logicalId, instanceId) => {
+            const logicalId = cableInstanceToLogical.get(instanceId);
+            const visible = !isolatedEntityId || isolatedEntityId === logicalId;
+            const attrs = prim.getGeometryInstanceAttributes(instanceId);
+            if (attrs) (attrs as any).show = visible ? showAll : showNone;
+        });
+    }, [isolatedEntityId]);
 
     // ---- Effect 4: source-off scene clear ----
     // When the user turns the cables source OFF we drop the primitive

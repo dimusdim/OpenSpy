@@ -719,16 +719,10 @@ export default function AIImagePanel() {
 
             let screenshot: string;
             let viewport: any;
-            let aspectRatio: string;
-            let imageWidth: number;
-            let imageHeight: number;
             try {
                 const result = await captureScreenshot();
                 screenshot = result.dataUrl;
                 viewport = result.viewport;
-                aspectRatio = result.aspectRatio;
-                imageWidth = result.imageWidth;
-                imageHeight = result.imageHeight;
             } catch (err: any) {
                 console.error('[AIImage] Screenshot failed:', err);
                 return;
@@ -758,9 +752,6 @@ export default function AIImagePanel() {
                             prompt: preset.prompt,
                             model: preset.model,
                             presetName: preset.name,
-                            aspectRatio,
-                            imageWidth,
-                            imageHeight,
                         }),
                     },
                 );

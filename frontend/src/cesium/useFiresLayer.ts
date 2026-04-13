@@ -79,6 +79,7 @@ export function useFiresLayer(viewer: Cesium.Viewer | null) {
     const isSourceOn = useTimelineStore(s => s.sources.fires);
     const isVisible = useTimelineStore(s => s.visibility.fires);
     const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
+    const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
     const collectionRef = useRef<Cesium.BillboardCollection | null>(null);
     // Shared cull function so both the fetch success path and the
     // subtype visibility effect can re-run it without re-deriving the
@@ -109,18 +110,21 @@ export function useFiresLayer(viewer: Cesium.Viewer | null) {
             const col = collectionRef.current;
             if (!col || viewer.isDestroyed()) return;
 
-            const subVis = useTimelineStore.getState().subtypeVisibility;
+            const storeState = useTimelineStore.getState();
+            const subVis = storeState.subtypeVisibility;
+            const isolated = storeState.isolatedEntityId;
             const isSubShown = (sub: string) =>
                 subVis[`fires:${sub}`] !== false;
 
             const rect = viewer.camera.computeViewRectangle();
             if (!rect) {
-                // Off-globe / oblique view: fall back to subtype gating.
+                // Off-globe / oblique view: fall back to subtype + solo gating.
                 // Happens when the camera points out into space.
                 for (let i = 0; i < col.length; i++) {
                     const bb = col.get(i);
                     const meta = fireMetaMap.get(bb.id as string);
-                    bb.show = !!meta && isSubShown(meta.subtype);
+                    bb.show = !!meta && isSubShown(meta.subtype)
+                        && (!isolated || isolated === bb.id);
                 }
                 return;
             }
@@ -135,6 +139,10 @@ export function useFiresLayer(viewer: Cesium.Viewer | null) {
                 const bb = col.get(i);
                 const meta = fireMetaMap.get(bb.id as string);
                 if (!meta) {
+                    bb.show = false;
+                    continue;
+                }
+                if (isolated && isolated !== bb.id) {
                     bb.show = false;
                     continue;
                 }
@@ -291,11 +299,11 @@ export function useFiresLayer(viewer: Cesium.Viewer | null) {
         if (collectionRef.current) collectionRef.current.show = isSourceOn && isVisible;
     }, [isSourceOn, isVisible]);
 
-    // ---- Effect 4: per-subtype visibility ----
-    // Delegates to the cull so subtype + viewport gates stay consistent.
+    // ---- Effect 4: per-subtype visibility + solo filter ----
+    // Delegates to the cull so subtype + viewport + solo gates stay consistent.
     useEffect(() => {
         cullRef.current?.();
-    }, [subtypeVisibility]);
+    }, [subtypeVisibility, isolatedEntityId]);
 
     // ---- Effect 5: source-off scene clear ----
     // When the user turns the fires source off we drop every billboard

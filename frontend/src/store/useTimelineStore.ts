@@ -119,7 +119,7 @@ export const MISSION_PRESETS: MissionPreset[] = [
   },
   {
     name: 'Maritime Security',
-    description: 'All vessels, dark vessels, GFW events, cables, outages',
+    description: 'All vessels, AIS signal lost vessels, GFW events, cables, outages',
     visibility: {
       maritime: true, gfw: true, cables: true, outages: true,
       aviation: false, satellites: false, satelliteFootprints: false,
@@ -250,7 +250,7 @@ interface TimelineStore {
 
 // Persist sources/visibility to server on change (debounced)
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
-function saveSettingsToServer(state: Pick<TimelineStore, 'sources' | 'visibility' | 'subtypeVisibility' | 'tileMode'>) {
+function saveSettingsToServer(state: Pick<TimelineStore, 'sources' | 'visibility' | 'subtypeVisibility' | 'tileMode' | 'showTrajectories'>) {
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
         const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3055';
@@ -262,6 +262,7 @@ function saveSettingsToServer(state: Pick<TimelineStore, 'sources' | 'visibility
                 visibility: state.visibility,
                 subtypeVisibility: state.subtypeVisibility,
                 tileMode: state.tileMode,
+                showTrajectories: state.showTrajectories,
             }),
         }).catch(() => { /* ignore save errors */ });
     }, 500);
@@ -355,7 +356,11 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
   activeIconSet: 'default' as 'default' | 'enhanced',
   isolatedEntityId: null,
   setIsolatedEntityId: (id) => set({ isolatedEntityId: id }),
-  setTileMode: (tileMode) => set({ tileMode }),
+  setTileMode: (tileMode) => set((state) => {
+      const next = { ...state, tileMode };
+      saveSettingsToServer(next);
+      return { tileMode };
+  }),
   toggleClustering: () => set(s => ({ clusteringEnabled: !s.clusteringEnabled })),
   streamMetrics: {
       aviation: { label: 'OpenSky Network', source: 'api.opensky-network.org', type: 'REST Polling (global)', count: 0, speed: '0 bps', status: 'connecting', poll: '90s', upstream: '5–10s ADS-B' },
@@ -376,14 +381,18 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
       traffic: { label: 'Traffic Flow', source: 'TomTom', type: 'Raster tile overlay', count: 0, speed: '-', status: 'connecting', poll: 'on demand', upstream: 'real-time (~1 min)' },
       conflicts: { label: 'Armed Conflicts', source: 'ACLED + GDELT', type: 'REST + CSV', count: 0, speed: '-', status: 'connecting', poll: '15m (GDELT) / 30m (ACLED)', upstream: '15-min GDELT + daily ACLED' },
       airspace: { label: 'Restricted Airspace', source: 'OpenAIP', type: 'REST paginated', count: 0, speed: '-', status: 'connecting', poll: '1h', upstream: 'weekly updates' },
-      gfw: { label: 'Dark Vessel Events', source: 'Global Fishing Watch', type: 'REST Polling', count: 0, speed: '-', status: 'auth-missing', poll: '1h', upstream: 'event-driven' },
+      gfw: { label: 'AIS Signal Lost Events', source: 'Global Fishing Watch', type: 'REST Polling', count: 0, speed: '-', status: 'auth-missing', poll: '1h', upstream: 'event-driven' },
   },
   setMode: (mode) => set({ mode }),
   setCurrentTime: (time) => set({ currentTime: time }),
   setSpeedMultiplier: (speedMultiplier) => set({ speedMultiplier }),
   setIsPlaying: (isPlaying) => set({ isPlaying }),
   setShowTrajectories: (show) => set({ showTrajectories: show }),
-  toggleTrajectories: () => set((state) => ({ showTrajectories: !state.showTrajectories })),
+  toggleTrajectories: () => set((state) => {
+      const next = { ...state, showTrajectories: !state.showTrajectories };
+      saveSettingsToServer(next);
+      return { showTrajectories: next.showTrajectories };
+  }),
   // LayerManager → sources (fetch control)
   toggleSource: (layer) => set((state) => {
       const next = { ...state, sources: { ...state.sources, [layer]: !state.sources[layer] } };

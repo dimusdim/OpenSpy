@@ -14,52 +14,19 @@ export interface ViewportSnapshot {
 }
 
 // ---------------------------------------------------------------------------
-// Aspect ratio helper
-// ---------------------------------------------------------------------------
-
-const ASPECT_RATIOS = [
-    { label: '1:1', value: 1 },
-    { label: '4:3', value: 4 / 3 },
-    { label: '3:2', value: 3 / 2 },
-    { label: '16:9', value: 16 / 9 },
-    { label: '21:9', value: 21 / 9 },
-    { label: '5:4', value: 5 / 4 },
-    { label: '4:5', value: 4 / 5 },
-    { label: '3:4', value: 3 / 4 },
-    { label: '2:3', value: 2 / 3 },
-    { label: '9:16', value: 9 / 16 },
-];
-
-function closestAspectRatio(w: number, h: number): string {
-    const ratio = w / h;
-    let best = ASPECT_RATIOS[0];
-    let bestDiff = Math.abs(ratio - best.value);
-    for (const opt of ASPECT_RATIOS) {
-        const diff = Math.abs(ratio - opt.value);
-        if (diff < bestDiff) {
-            best = opt;
-            bestDiff = diff;
-        }
-    }
-    return best.label;
-}
-
-// ---------------------------------------------------------------------------
 // Capture
 // ---------------------------------------------------------------------------
 
 /**
  * Capture a PNG screenshot of the Cesium canvas together with the current
- * camera viewport and the detected aspect ratio string.
+ * camera viewport.
  *
  * Image is capped at `maxWidth` px (default 2048 for 2K input).
+ * Aspect ratio is computed server-side from the PNG header.
  */
 export function captureScreenshot(maxWidth = 2048): Promise<{
     dataUrl: string;
     viewport: ViewportSnapshot;
-    aspectRatio: string;
-    imageWidth: number;
-    imageHeight: number;
 }> {
     return new Promise((resolve, reject) => {
         const viewer = (window as any).viewerContext as Cesium.Viewer | undefined;
@@ -106,9 +73,6 @@ export function captureScreenshot(maxWidth = 2048): Promise<{
                 resolve({
                     dataUrl,
                     viewport,
-                    aspectRatio: closestAspectRatio(outW, outH),
-                    imageWidth: outW,
-                    imageHeight: outH,
                 });
             } catch (err) {
                 reject(err);

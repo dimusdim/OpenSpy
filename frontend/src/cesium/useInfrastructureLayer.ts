@@ -266,12 +266,13 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
 
       // Power lines: all share subtype 'power_line'.
       if (tile.powerLinePrimitive && tile.powerLinePrimitive.ready) {
-        const show = isSubShown('power_line');
-        const showValue = Cesium.ShowGeometryInstanceAttribute.toValue(show);
+        const subtypeVisible = isSubShown('power_line');
         for (const instanceId of tile.instanceIds) {
           const logicalId = infraInstanceToLogical.get(instanceId) ?? instanceId;
           const meta = infraMetaMap.get(logicalId);
           if (meta?.subtype !== 'power_line') continue;
+          const soloOk = !soloId || soloId === logicalId;
+          const showValue = Cesium.ShowGeometryInstanceAttribute.toValue(subtypeVisible && soloOk);
           const attrs = tile.powerLinePrimitive.getGeometryInstanceAttributes(instanceId);
           if (attrs) (attrs as any).show = showValue;
         }
@@ -452,7 +453,9 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
       if (!mainAlreadyLoaded) {
         if (mainResult.status === 'fulfilled' && mainResult.value) {
           try {
-            const records: any[] = mainResult.value.data ?? [];
+            const mainBody = mainResult.value.data ?? {};
+            const records: any[] = Array.isArray(mainBody) ? mainBody : (mainBody.data ?? []);
+            const mainOverpassTimedOut: boolean = mainBody.overpassTimedOut === true;
             if (records.length > 0) {
               const collection = new Cesium.BillboardCollection({ scene: v.scene });
               for (let ri = 0; ri < records.length; ri++) {
@@ -499,7 +502,12 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
               v.scene.primitives.add(collection);
               tile.mainBillboards = collection;
             }
-            tile.main = true;
+            // Only mark as "done" if Overpass actually responded. When
+            // overpass timed out AND we got zero records, skip marking
+            // so the tile will be refetched on next viewport change.
+            if (!mainOverpassTimedOut || records.length > 0) {
+              tile.main = true;
+            }
           } catch (mainErr) {
             console.warn('[Infrastructure] main parse failed:', mainErr);
           }
@@ -512,7 +520,9 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
       if (!powerAlreadyLoaded) {
         if (pwrResult.status === 'fulfilled' && pwrResult.value) {
           try {
-            const pwrRecords: any[] = pwrResult.value.data ?? [];
+            const pwrBody = pwrResult.value.data ?? {};
+            const pwrRecords: any[] = Array.isArray(pwrBody) ? pwrBody : (pwrBody.data ?? []);
+            const pwrOverpassTimedOut: boolean = pwrBody.overpassTimedOut === true;
             const powerBillboardCollection = new Cesium.BillboardCollection({ scene: v.scene });
             const powerLineInstances: Cesium.GeometryInstance[] = [];
 
@@ -611,7 +621,12 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
               v.scene.groundPrimitives.add(linePrim);
               tile.powerLinePrimitive = linePrim;
             }
-            tile.power = true;
+            // Only mark as "done" if Overpass actually responded. When
+            // overpass timed out AND we got zero records, skip marking
+            // so the tile will be refetched on next viewport change.
+            if (!pwrOverpassTimedOut || pwrRecords.length > 0) {
+              tile.power = true;
+            }
           } catch (pwrErr) {
             console.warn('[Infrastructure] power parse failed:', pwrErr);
           }

@@ -561,10 +561,10 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                         const darkMinutes = Math.round((Date.now() - dv.darkSince) / 60000);
                         darkVesselDs.entities.add({
                             id: darkId,
-                            name: `Dark Vessel ${dv.id} (${darkMinutes}m silent)`,
+                            name: `AIS Lost: ${dv.id} (${darkMinutes}m silent)`,
                             position: Cesium.Cartesian3.fromDegrees(dv.lng, dv.lat, 0),
                             properties: new Cesium.PropertyBag({
-                                layer: 'Dark Vessel',
+                                layer: 'AIS Signal Lost',
                                 subtype: dv.type || 'unknown',
                                 speed: dv.speed,
                                 heading: dv.heading || 0,
@@ -589,7 +589,7 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                     } else {
                         // Update name with current dark duration
                         const darkMinutes = Math.round((Date.now() - dv.darkSince) / 60000);
-                        entity.name = `Dark Vessel ${dv.id} (${darkMinutes}m silent)`;
+                        entity.name = `AIS Lost: ${dv.id} (${darkMinutes}m silent)`;
                     }
                 }
 
