@@ -1,15 +1,13 @@
 'use client';
 
 import { useTimelineStore } from '../store/useTimelineStore';
-import { Globe2, Building2, Group, Ungroup } from 'lucide-react';
+import { Globe2, Building2, Group, Ungroup, Satellite } from 'lucide-react';
 
 export default function TileModeToggle() {
     const tileMode = useTimelineStore(s => s.tileMode);
     const setTileMode = useTimelineStore(s => s.setTileMode);
     const clusteringEnabled = useTimelineStore(s => s.clusteringEnabled);
     const toggleClustering = useTimelineStore(s => s.toggleClustering);
-
-    const isGoogle = tileMode === 'google';
 
     return (
         <div className="flex flex-col gap-1.5">
@@ -19,7 +17,7 @@ export default function TileModeToggle() {
                     onClick={() => setTileMode('google')}
                     title="Google Photorealistic 3D Tiles"
                     className={`flex items-center gap-1.5 px-3 py-2 text-xs font-mono transition-colors ${
-                        isGoogle
+                        tileMode === 'google'
                             ? 'bg-cyan-600/30 text-cyan-300 border-r border-cyan-700/50'
                             : 'text-zinc-500 hover:text-zinc-300 border-r border-zinc-800'
                     }`}
@@ -31,13 +29,25 @@ export default function TileModeToggle() {
                     onClick={() => setTileMode('osm')}
                     title="OpenStreetMap 3D Buildings + Cesium World Terrain"
                     className={`flex items-center gap-1.5 px-3 py-2 text-xs font-mono transition-colors ${
-                        !isGoogle
-                            ? 'bg-cyan-600/30 text-cyan-300'
-                            : 'text-zinc-500 hover:text-zinc-300'
+                        tileMode === 'osm'
+                            ? 'bg-cyan-600/30 text-cyan-300 border-r border-cyan-700/50'
+                            : 'text-zinc-500 hover:text-zinc-300 border-r border-zinc-800'
                     }`}
                 >
                     <Building2 size={14} />
                     <span>OSM 3D</span>
+                </button>
+                <button
+                    onClick={() => setTileMode('modis')}
+                    title="NASA GIBS MODIS Terra True Color (daily satellite imagery)"
+                    className={`flex items-center gap-1.5 px-3 py-2 text-xs font-mono transition-colors ${
+                        tileMode === 'modis'
+                            ? 'bg-cyan-600/30 text-cyan-300'
+                            : 'text-zinc-500 hover:text-zinc-300'
+                    }`}
+                >
+                    <Satellite size={14} />
+                    <span>MODIS</span>
                 </button>
             </div>
 

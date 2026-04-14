@@ -11,7 +11,7 @@ export interface ViewportData {
     heading: number;
     pitch: number;
     roll: number;
-    tileMode: 'google' | 'osm';
+    tileMode: 'google' | 'osm' | 'modis';
 }
 
 /** A generation preset — each becomes a capture button in the panel. */

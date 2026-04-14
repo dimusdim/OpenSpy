@@ -216,7 +216,7 @@ interface TimelineStore {
   // Infrastructure viewport loading progress (0-100). Set by useInfrastructureLayer.
   infraViewportPct: number;
   setInfraViewportPct: (pct: number) => void;
-  tileMode: 'google' | 'osm';
+  tileMode: 'google' | 'osm' | 'modis';
   clusteringEnabled: boolean;
   // Filter / isolation state
   prevFilterState: { visibility: LayerFlags; subtypeVisibility: Record<string, boolean> } | null;
@@ -224,7 +224,7 @@ interface TimelineStore {
   activePreset: string | null;
   activeIconSet: 'default' | 'enhanced';
   isolatedEntityId: string | null;
-  setTileMode: (mode: 'google' | 'osm') => void;
+  setTileMode: (mode: 'google' | 'osm' | 'modis') => void;
   toggleClustering: () => void;
   setMode: (mode: 'live' | 'playback') => void;
   setCurrentTime: (time: Date) => void;
@@ -348,7 +348,7 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
   subtypeCounts: {},
   infraViewportPct: -1,
   setInfraViewportPct: (pct) => set({ infraViewportPct: pct }),
-  tileMode: 'google' as 'google' | 'osm',
+  tileMode: 'google' as 'google' | 'osm' | 'modis',
   clusteringEnabled: true,
   prevFilterState: null,
   activeFilter: null,

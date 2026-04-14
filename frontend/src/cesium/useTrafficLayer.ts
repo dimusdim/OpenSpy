@@ -36,7 +36,10 @@ export function useTrafficLayer(viewer: Cesium.Viewer | null) {
         const provider = new Cesium.UrlTemplateImageryProvider({
             url: `${API_URL}/api/traffic/raster/{z}/{x}/{y}`,
             minimumLevel: 0,
-            maximumLevel: 18,
+            // Cap at 14 — TomTom free tier rate-limits aggressively, and at
+            // higher zoom Cesium requests too many tiles per frame. Level 14
+            // is roughly city-block detail, enough for traffic visualization.
+            maximumLevel: 14,
             credit: 'TomTom Traffic Flow',
         });
 

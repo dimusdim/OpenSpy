@@ -413,125 +413,115 @@ export default function Globe() {
         };
     }, []);
 
-    // --- NASA GIBS Cloud Fraction overlay (daily) ---
-    // Uses MODIS_Terra_Cloud_Fraction_Day — actual cloud coverage product,
-    // NOT the true-color imagery (that's a separate "satellite_imagery" layer).
-    // Clouds imagery: we use visibility for show/hide (cheap), and only care
-    // about sources for the metric status dot. The ImageryLayer itself stops
-    // issuing tile requests to GIBS iff show=false, so toggling visibility
-    // already acts as a fetch gate for imagery layers.
+    // --- NASA GIBS Cloud Fraction as a transparent shell at ~8km ---
+    // Rather than paint the MODIS Cloud Fraction product flat on the globe
+    // surface (the old WMTS+ImageryLayer approach), we wrap a single
+    // equirectangular PNG around a transparent ellipsoid entity whose
+    // radii are WGS84 + 8km. Visually this floats the clouds above the
+    // terrain with proper parallax, so mountains/buildings read as being
+    // under the cloud deck instead of being painted over by it.
+    //
+    // The GIBS WMS GetMap endpoint returns the whole world as a single
+    // PNG with PNG alpha — transparent where there are no clouds — so
+    // ImageMaterialProperty + equirectangular projection on an ellipsoid
+    // gets us a proper cloud shell with one HTTP fetch.
     const showClouds = useTimelineStore(s => s.sources.clouds && s.visibility.clouds);
-    const gibsLayerRef = useRef<Cesium.ImageryLayer | null>(null);
+    const cloudPrimRef = useRef<Cesium.Primitive | null>(null);
 
     useEffect(() => {
         if (!viewer) return;
         // GIBS cloud products lag ~1 day, so use yesterday's date
         const cloudDate = new Date(Date.now() - 86400_000).toISOString().split('T')[0];
-        const provider = new Cesium.WebMapTileServiceImageryProvider({
-            url: 'https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/wmts.cgi',
-            layer: 'MODIS_Terra_Cloud_Fraction_Day',
-            style: 'default',
-            tileMatrixSetID: '2km',
-            format: 'image/png',
-            tilingScheme: new Cesium.GeographicTilingScheme(),
-            maximumLevel: 5,
-            credit: 'NASA GIBS MODIS Terra Cloud Fraction',
-            times: new Cesium.TimeIntervalCollection([new Cesium.TimeInterval({
-                start: Cesium.JulianDate.fromIso8601(cloudDate),
-                stop: Cesium.JulianDate.fromIso8601(cloudDate),
-            })]),
-        });
-        const layer = viewer.imageryLayers.addImageryProvider(provider);
-        layer.alpha = 0.55;
-        layer.show = showClouds;
-        gibsLayerRef.current = layer;
-        const today = cloudDate;
+        const cloudImageUrl =
+            'https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi' +
+            '?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap' +
+            '&LAYERS=MODIS_Terra_Cloud_Fraction_Day' +
+            '&STYLES=&FORMAT=image/png&TRANSPARENT=true' +
+            '&BBOX=-90,-180,90,180&SRS=EPSG:4326' +
+            '&WIDTH=2048&HEIGHT=1024' +
+            `&TIME=${cloudDate}`;
 
-        // Track tile loading metrics for LayerManager
+        // WGS84 semi-major / semi-minor radii + 8 km shell.
+        const CLOUD_ALT = 8000;
+        const semiMajor = 6378137 + CLOUD_ALT;
+        const semiMinor = 6356752.3142 + CLOUD_ALT;
+
+        // Use a Primitive + EllipsoidGeometry directly: gives us proper ECEF
+        // alignment without ENU-at-origin issues that Entity.position=ZERO
+        // can introduce. EllipsoidSurfaceAppearance handles equirectangular
+        // texture mapping over the sphere surface.
+        const ellipsoidGeom = new Cesium.EllipsoidGeometry({
+            radii: new Cesium.Cartesian3(semiMajor, semiMajor, semiMinor),
+            vertexFormat: Cesium.EllipsoidSurfaceAppearance.VERTEX_FORMAT,
+        });
+        const geomInstance = new Cesium.GeometryInstance({
+            geometry: ellipsoidGeom,
+            id: 'cloud-shell',
+        });
+        const appearance = new Cesium.EllipsoidSurfaceAppearance({
+            material: new Cesium.Material({
+                fabric: {
+                    type: 'Image',
+                    uniforms: {
+                        image: cloudImageUrl,
+                        color: new Cesium.Color(1.0, 1.0, 1.0, 0.55),
+                    },
+                },
+                translucent: true,
+            }),
+            translucent: true,
+        });
+        const cloudPrim = new Cesium.Primitive({
+            geometryInstances: geomInstance,
+            appearance,
+            asynchronous: false,
+        });
+        cloudPrim.show = showClouds;
+        viewer.scene.primitives.add(cloudPrim);
+        cloudPrimRef.current = cloudPrim;
+        viewer.scene.requestRender();
+        console.log(`[Clouds] Shell primitive added (radii ${semiMajor}m, alt ${CLOUD_ALT}m, date ${cloudDate})`);
+
+        // Track metric status for the Legend.
         const metricsInterval = setInterval(() => {
             if (viewer.isDestroyed()) return;
-            // Cesium doesn't expose per-layer tile counts directly, but
-            // the globe's tileLoadProgressEvent gives total pending tiles.
-            // For a simple "loaded" indicator we check if the provider is ready.
-            const tilesLoaded = (provider as any)._tilingScheme ? 'ready' : 'loading';
             useTimelineStore.getState().setStreamMetric('clouds', {
-                count: layer.show ? 1 : 0,
-                status: layer.show ? 'streaming' : 'connecting',
-                speed: tilesLoaded === 'ready' ? `${today}` : 'loading...',
+                count: cloudPrim.show ? 1 : 0,
+                status: cloudPrim.show ? 'streaming' : 'connecting',
+                speed: cloudDate,
             });
         }, 5000);
 
         return () => {
             clearInterval(metricsInterval);
-            if (viewer && !viewer.isDestroyed() && gibsLayerRef.current) {
-                viewer.imageryLayers.remove(gibsLayerRef.current);
-                gibsLayerRef.current = null;
+            if (viewer && !viewer.isDestroyed() && cloudPrimRef.current) {
+                viewer.scene.primitives.remove(cloudPrimRef.current);
+                cloudPrimRef.current = null;
             }
         };
     }, [viewer]);
 
     useEffect(() => {
-        if (gibsLayerRef.current) gibsLayerRef.current.show = showClouds;
-    }, [showClouds]);
+        if (cloudPrimRef.current && viewer) {
+            cloudPrimRef.current.show = showClouds;
+            viewer.scene.requestRender();
+        }
+    }, [showClouds, viewer]);
 
-    // --- NASA GIBS MODIS True Color satellite imagery overlay ---
-    // Full true-color Earth imagery from MODIS Terra, daily update.
-    // Same logic as clouds — show if source AND visibility both on.
-    const showSatImagery = useTimelineStore(s => s.sources.satellite_imagery && s.visibility.satellite_imagery);
-    const satImageryLayerRef = useRef<Cesium.ImageryLayer | null>(null);
-
-    useEffect(() => {
-        if (!viewer) return;
-        const today = new Date().toISOString().split('T')[0];
-        const provider = new Cesium.WebMapTileServiceImageryProvider({
-            url: 'https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/wmts.cgi',
-            layer: 'MODIS_Terra_CorrectedReflectance_TrueColor',
-            style: 'default',
-            tileMatrixSetID: '250m',
-            format: 'image/jpeg',
-            tilingScheme: new Cesium.GeographicTilingScheme(),
-            maximumLevel: 8,
-            credit: 'NASA GIBS MODIS',
-            times: new Cesium.TimeIntervalCollection([new Cesium.TimeInterval({
-                start: Cesium.JulianDate.fromIso8601(today),
-                stop: Cesium.JulianDate.fromIso8601(today),
-            })]),
-        });
-        const layer = viewer.imageryLayers.addImageryProvider(provider);
-        layer.alpha = 0.85;
-        layer.show = showSatImagery;
-        satImageryLayerRef.current = layer;
-
-        const metricsInterval = setInterval(() => {
-            if (viewer.isDestroyed()) return;
-            const tilesLoaded = (provider as any)._tilingScheme ? 'ready' : 'loading';
-            useTimelineStore.getState().setStreamMetric('satellite_imagery', {
-                count: layer.show ? 1 : 0,
-                status: layer.show ? 'streaming' : 'connecting',
-                speed: tilesLoaded === 'ready' ? `${today}` : 'loading...',
-            });
-        }, 5000);
-
-        return () => {
-            clearInterval(metricsInterval);
-            if (viewer && !viewer.isDestroyed() && satImageryLayerRef.current) {
-                viewer.imageryLayers.remove(satImageryLayerRef.current);
-                satImageryLayerRef.current = null;
-            }
-        };
-    }, [viewer]);
-
-    useEffect(() => {
-        if (satImageryLayerRef.current) satImageryLayerRef.current.show = showSatImagery;
-    }, [showSatImagery]);
-
-    // --- 3D geometry layer: toggle between Google Photorealistic and OSM ---
-    // Both tilesets are loaded lazily on first selection and kept in memory.
-    // Switching just flips `.show` — no re-download needed.
+    // --- Base globe imagery / 3D geometry: Google | OSM | MODIS ---
+    // Google and OSM tilesets are loaded lazily on first selection and
+    // kept in memory — switching just flips `.show`, no re-download.
+    // MODIS mode swaps the globe's base imagery layer for NASA GIBS MODIS
+    // True Color (WMTS), no 3D tileset involved. When switching away from
+    // MODIS we restore the default Cesium Ion aerial base layer.
     const tileMode = useTimelineStore(s => s.tileMode);
     const googleTileRef = useRef<Cesium.Cesium3DTileset | null>(null);
     const osmTileRef = useRef<Cesium.Cesium3DTileset | null>(null);
     const terrainLoadedRef = useRef(false);
+    // MODIS True Color base layer + stashed default Ion aerial, used to
+    // swap/restore the globe's bottom imagery layer as tileMode changes.
+    const modisBaseLayerRef = useRef<Cesium.ImageryLayer | null>(null);
+    const defaultBaseLayerRef = useRef<Cesium.ImageryLayer | null>(null);
 
     useEffect(() => {
         if (!viewer) return;
@@ -612,21 +602,91 @@ export default function Globe() {
             }
         }
 
+        // Swap the globe's base imagery to NASA GIBS MODIS True Color.
+        // Stashes the original Cesium Ion aerial in defaultBaseLayerRef so
+        // restoreDefaultBase() can put it back when switching away. The
+        // MODIS layer is inserted at index 0 so cloud/other overlays sit
+        // above it just as they did above the Ion aerial.
+        function applyModis() {
+            if (viewer!.isDestroyed()) return;
+            if (modisBaseLayerRef.current) return; // already applied
+
+            const layers = viewer!.imageryLayers;
+            if (layers.length > 0 && !defaultBaseLayerRef.current) {
+                defaultBaseLayerRef.current = layers.get(0);
+                // Remove without destroying so we can re-insert on switch-away.
+                layers.remove(defaultBaseLayerRef.current, false);
+            }
+
+            // UTC yesterday — GIBS warns that today's date often returns empty
+            // areas (MODIS Terra orbits once per day, mosaic isn't complete).
+            const now = new Date();
+            const utcYesterday = new Date(
+                Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1)
+            ).toISOString().slice(0, 10);
+            // Use the EPSG:3857 (Web Mercator) endpoint with GoogleMapsCompatible
+            // tile matrix — it aligns with Cesium's WebMercatorTilingScheme out
+            // of the box. The EPSG:4326 endpoint uses a NASA-padded matrix
+            // layout (-180,90 → 396,-198) that doesn't match Cesium's default
+            // GeographicTilingScheme, causing visible offsets.
+            const provider = new Cesium.WebMapTileServiceImageryProvider({
+                url: `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MODIS_Terra_CorrectedReflectance_TrueColor/default/${utcYesterday}/GoogleMapsCompatible_Level9/{TileMatrix}/{TileRow}/{TileCol}.jpg`,
+                layer: 'MODIS_Terra_CorrectedReflectance_TrueColor',
+                style: 'default',
+                tileMatrixSetID: 'GoogleMapsCompatible_Level9',
+                tilingScheme: new Cesium.WebMercatorTilingScheme(),
+                tileWidth: 256,
+                tileHeight: 256,
+                maximumLevel: 9,
+                format: 'image/jpeg',
+                credit: 'NASA GIBS MODIS',
+            });
+            // Insert at index 0 — this is the base imagery, not an overlay.
+            const layer = layers.addImageryProvider(provider, 0);
+            modisBaseLayerRef.current = layer;
+            console.log('[Globe] MODIS True Color base imagery applied');
+        }
+
+        // Remove the MODIS base layer (destroying its provider) and
+        // re-insert the stashed default Ion aerial at index 0.
+        function restoreDefaultBase() {
+            if (viewer!.isDestroyed()) return;
+            const layers = viewer!.imageryLayers;
+            if (modisBaseLayerRef.current) {
+                layers.remove(modisBaseLayerRef.current, true); // destroy
+                modisBaseLayerRef.current = null;
+            }
+            if (defaultBaseLayerRef.current) {
+                layers.add(defaultBaseLayerRef.current, 0);
+                defaultBaseLayerRef.current = null;
+            }
+        }
+
         // Load whichever is needed, then apply visibility + imagery
         (async () => {
             if (tileMode === 'google') {
                 await ensureGoogle();
-            } else {
+            } else if (tileMode === 'osm') {
                 await ensureOsm();
             }
+            // modis mode needs no async tileset load — base imagery swap is sync.
             if (viewer!.isDestroyed()) return;
 
-            // Apply show flags (both refs may be non-null after first switch)
+            // Apply show flags (refs may be non-null after first switch)
             if (googleTileRef.current) googleTileRef.current.show = tileMode === 'google';
             if (osmTileRef.current)    osmTileRef.current.show    = tileMode === 'osm';
 
-            // Google mode hides the globe (tiles replace it entirely).
-            // OSM mode keeps it for terrain + satellite imagery.
+            // MODIS base-imagery swap: apply when entering modis, restore otherwise.
+            if (tileMode === 'modis') {
+                applyModis();
+            } else {
+                restoreDefaultBase();
+            }
+
+            // Globe surface visibility:
+            //   google → hidden (3D photo mesh covers everything)
+            //   osm    → visible (terrain + aerial imagery beneath buildings)
+            //   modis  → visible (MODIS true-color imagery IS the globe surface)
             if (!viewer!.isDestroyed()) {
                 viewer!.scene.globe.show = tileMode !== 'google';
             }

@@ -401,8 +401,13 @@ function ApiKeyFields({ envVars, registrationUrl, registrationLabel, onKeysChang
 // ---------------------------------------------------------------------------
 function DisplayTab({ showTrajectories, toggleTrajectories, tileMode, setTileMode }: {
     showTrajectories: boolean; toggleTrajectories: () => void;
-    tileMode: 'google' | 'osm'; setTileMode: (m: 'google' | 'osm') => void;
+    tileMode: 'google' | 'osm' | 'modis'; setTileMode: (m: 'google' | 'osm' | 'modis') => void;
 }) {
+    const MODE_LABELS: Record<'google' | 'osm' | 'modis', string> = {
+        google: 'Google 3D',
+        osm: 'OpenStreetMap',
+        modis: 'MODIS',
+    };
     return (
         <div className="space-y-4">
             <div className="rounded-lg border border-zinc-800/60 p-3">
@@ -417,13 +422,13 @@ function DisplayTab({ showTrajectories, toggleTrajectories, tileMode, setTileMod
                 </label>
             </div>
             <div className="rounded-lg border border-zinc-800/60 p-3">
-                <div className="text-sm text-zinc-200 mb-2">3D Tile Provider</div>
+                <div className="text-sm text-zinc-200 mb-2">Base Map</div>
                 <div className="flex gap-2">
-                    {(['google', 'osm'] as const).map(mode => (
+                    {(['google', 'osm', 'modis'] as const).map(mode => (
                         <button key={mode} onClick={() => setTileMode(mode)}
                             className={`flex-1 px-3 py-2 rounded-md text-xs font-mono uppercase tracking-wider transition-colors ${
                                 tileMode === mode ? 'bg-cyan-900/30 text-cyan-400 border border-cyan-700/50' : 'bg-zinc-900/30 text-zinc-500 border border-zinc-800 hover:text-zinc-300'
-                            }`}>{mode === 'google' ? 'Google 3D' : 'OpenStreetMap'}</button>
+                            }`}>{MODE_LABELS[mode]}</button>
                     ))}
                 </div>
             </div>

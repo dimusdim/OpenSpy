@@ -206,7 +206,6 @@ const DOMAIN_TREE: DomainNode[] = [
             { layer: 'traffic', label: 'Traffic', icon: Car, subtypes: [] },
             { layer: 'webcams', label: 'Cameras', icon: Camera, subtypes: [] },
             { layer: 'labels', label: 'Borders', icon: Globe2, subtypes: [] },
-            { layer: 'satellite_imagery', label: 'Sat. Imagery', icon: Satellite, subtypes: [] },
             { layer: 'clouds', label: 'Cloud Cover', icon: Waves, subtypes: [] },
         ],
     },
