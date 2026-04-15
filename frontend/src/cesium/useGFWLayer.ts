@@ -4,6 +4,7 @@ import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
 import { GFW_ICON } from '../icons/map-icons';
+import { safeCartesianFromDegrees } from './position-utils';
 
 export function useGFWLayer(viewer: Cesium.Viewer | null) {
     const isSourceOn = useTimelineStore(s => s.sources.gfw);
@@ -49,10 +50,12 @@ export function useGFWLayer(viewer: Cesium.Viewer | null) {
 
                 for (const ev of events) {
                     if (ev.lat == null || ev.lng == null || isNaN(ev.lat) || isNaN(ev.lng)) continue;
+                    const position = safeCartesianFromDegrees(ev.lng, ev.lat, 0);
+                    if (!position) continue;
                     ds.entities.add({
                         id: ev.id,
                         name: `GFW: ${ev.vesselName || 'Unknown Vessel'} (${ev.flagState || '??'})`,
-                        position: Cesium.Cartesian3.fromDegrees(ev.lng, ev.lat, 0),
+                        position,
                         properties: new Cesium.PropertyBag({
                             layer: 'GFW',
                             subtype: ev.type || 'gap',

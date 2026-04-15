@@ -67,9 +67,9 @@ const PROVIDERS: ProviderDef[] = [
     { id: 'celestrak', name: 'CelesTrak', description: 'Free TLE fallback source. No auth needed.', url: 'celestrak.org', type: 'REST', poll: '24h', layers: ['satellites'], free: true },
     { id: 'spectator', name: 'Spectator Earth', description: 'Satellite sensor metadata for footprint projections.', url: 'api.spectator.earth', type: 'REST', poll: 'on load', layers: ['satelliteFootprints'], free: true },
     // Disasters
-    { id: 'gdacs', name: 'GDACS', description: 'Global Disaster Alert and Coordination System. Earthquakes, cyclones, floods, volcanoes.', url: 'gdacs.org', type: 'REST', poll: '5m', layers: ['osint'], free: true },
-    { id: 'usgs', name: 'USGS Earthquakes', description: 'M2.5+ earthquakes worldwide, updated every few minutes.', url: 'earthquake.usgs.gov', type: 'GeoJSON', poll: '5m', layers: ['osint'], free: true },
-    { id: 'eonet', name: 'NASA EONET', description: 'NASA natural events — wildfires, volcanoes, storms, icebergs.', url: 'eonet.gsfc.nasa.gov', type: 'REST', poll: '5m', layers: ['osint'], free: true },
+    { id: 'gdacs', name: 'GDACS', description: 'Global Disaster Alert and Coordination System. Earthquakes, cyclones, floods, volcanoes.', url: 'gdacs.org', type: 'REST', poll: '5m', layers: ['disasters'], free: true },
+    { id: 'usgs', name: 'USGS Earthquakes', description: 'M2.5+ earthquakes worldwide, updated every few minutes.', url: 'earthquake.usgs.gov', type: 'GeoJSON', poll: '5m', layers: ['disasters'], free: true },
+    { id: 'eonet', name: 'NASA EONET', description: 'NASA natural events — wildfires, volcanoes, storms, icebergs.', url: 'eonet.gsfc.nasa.gov', type: 'REST', poll: '5m', layers: ['disasters'], free: true },
     // Conflicts
     { id: 'acled', name: 'ACLED', description: 'Armed Conflict Location & Event Data. Battles, explosions, violence against civilians.', url: 'acleddata.com', type: 'REST', poll: '30m', layers: ['conflicts'], envVars: ['ACLED_KEY', 'ACLED_EMAIL'], registrationUrl: 'https://developer.acleddata.com/', registrationLabel: 'ACLED' },
     { id: 'gdelt', name: 'GDELT', description: 'Global events database. Auto-updated from news, no auth needed.', url: 'gdeltproject.org', type: 'CSV', poll: '15m', layers: ['conflicts'], free: true },
@@ -124,6 +124,8 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
     const toggleTrajectories = useTimelineStore(s => s.toggleTrajectories);
     const tileMode = useTimelineStore(s => s.tileMode);
     const setTileMode = useTimelineStore(s => s.setTileMode);
+    const satelliteRenderLimit = useTimelineStore(s => s.satelliteRenderLimit);
+    const setSatelliteRenderLimit = useTimelineStore(s => s.setSatelliteRenderLimit);
 
     const [tab, setTab] = useState<Tab>('sources');
     const [apiKeys, setApiKeys] = useState<Record<string, KeyInfo>>({});
@@ -220,7 +222,14 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                                 onKeysChanged={() => { fetch(`${API_URL}/api/keys`).then(r => r.json()).then(d => setApiKeys(d)).catch(() => {}); }} />
                         )}
                         {tab === 'display' && (
-                            <DisplayTab showTrajectories={showTrajectories} toggleTrajectories={toggleTrajectories} tileMode={tileMode} setTileMode={setTileMode} />
+                            <DisplayTab
+                                showTrajectories={showTrajectories}
+                                toggleTrajectories={toggleTrajectories}
+                                tileMode={tileMode}
+                                setTileMode={setTileMode}
+                                satelliteRenderLimit={satelliteRenderLimit}
+                                setSatelliteRenderLimit={setSatelliteRenderLimit}
+                            />
                         )}
                     </div>
                 </div>
@@ -399,10 +408,19 @@ function ApiKeyFields({ envVars, registrationUrl, registrationLabel, onKeysChang
 // ---------------------------------------------------------------------------
 // Display Tab
 // ---------------------------------------------------------------------------
-function DisplayTab({ showTrajectories, toggleTrajectories, tileMode, setTileMode }: {
+function DisplayTab({ showTrajectories, toggleTrajectories, tileMode, setTileMode, satelliteRenderLimit, setSatelliteRenderLimit }: {
     showTrajectories: boolean; toggleTrajectories: () => void;
     tileMode: 'google' | 'osm' | 'modis'; setTileMode: (m: 'google' | 'osm' | 'modis') => void;
+    satelliteRenderLimit: number | null; setSatelliteRenderLimit: (limit: number | null) => void;
 }) {
+    const [satelliteLimitInput, setSatelliteLimitInput] = useState(
+        satelliteRenderLimit == null ? '5000' : String(satelliteRenderLimit),
+    );
+
+    useEffect(() => {
+        setSatelliteLimitInput(satelliteRenderLimit == null ? '5000' : String(satelliteRenderLimit));
+    }, [satelliteRenderLimit]);
+
     const MODE_LABELS: Record<'google' | 'osm' | 'modis', string> = {
         google: 'Google 3D',
         osm: 'OpenStreetMap',
@@ -431,6 +449,59 @@ function DisplayTab({ showTrajectories, toggleTrajectories, tileMode, setTileMod
                             }`}>{MODE_LABELS[mode]}</button>
                     ))}
                 </div>
+            </div>
+            <div className="rounded-lg border border-zinc-800/60 p-3">
+                <div className="flex items-start justify-between gap-3">
+                    <div>
+                        <div className="text-sm text-zinc-200">Satellite render limit</div>
+                        <div className="text-[10px] text-zinc-500 mt-0.5">Explicit visible cap. Type labels are still derived heuristics from TLE names.</div>
+                    </div>
+                    <button
+                        onClick={() => setSatelliteRenderLimit(satelliteRenderLimit == null ? 5000 : null)}
+                        className={`relative w-8 h-4 rounded-full transition-colors ${satelliteRenderLimit != null ? 'bg-green-600' : 'bg-zinc-700'}`}
+                    >
+                        <span className={`absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-white transition-transform ${satelliteRenderLimit != null ? 'translate-x-4' : ''}`} />
+                    </button>
+                </div>
+                <div className="mt-3 flex items-center gap-2">
+                    <input
+                        type="number"
+                        min={1}
+                        step={500}
+                        value={satelliteLimitInput}
+                        disabled={satelliteRenderLimit == null}
+                        onChange={(e) => setSatelliteLimitInput(e.target.value)}
+                        onBlur={() => {
+                            const parsed = Number(satelliteLimitInput);
+                            if (Number.isInteger(parsed) && parsed > 0) {
+                                setSatelliteRenderLimit(parsed);
+                            } else {
+                                setSatelliteLimitInput(satelliteRenderLimit == null ? '5000' : String(satelliteRenderLimit));
+                            }
+                        }}
+                        className="w-28 px-3 py-2 rounded-md text-xs font-mono bg-zinc-900/30 text-zinc-200 border border-zinc-800 disabled:opacity-40"
+                    />
+                    <span className="text-[10px] text-zinc-500">Disable the toggle to render the full visible catalog.</span>
+                </div>
+                <div className="mt-2 flex gap-2">
+                    {[2000, 5000, 10000].map((value) => (
+                        <button
+                            key={value}
+                            onClick={() => {
+                                setSatelliteLimitInput(String(value));
+                                setSatelliteRenderLimit(value);
+                            }}
+                            disabled={satelliteRenderLimit == null}
+                            className={`px-3 py-1.5 rounded-md text-[10px] font-mono uppercase tracking-wider transition-colors ${
+                                satelliteRenderLimit === value
+                                    ? 'bg-cyan-900/30 text-cyan-400 border border-cyan-700/50'
+                                    : 'bg-zinc-900/30 text-zinc-500 border border-zinc-800 hover:text-zinc-300 disabled:opacity-40'
+                            }`}
+                        >
+                            {value}
+                        </button>
+                    ))}
+                    </div>
             </div>
         </div>
     );

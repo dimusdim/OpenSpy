@@ -14,6 +14,7 @@ import { cableMetaMap } from '../cesium/useCablesLayer';
 import { pipelineMetaMap } from '../cesium/usePipelinesLayer';
 import { airspaceMetaMap } from '../cesium/useAirspaceLayer';
 import { infraMetaMap } from '../cesium/useInfrastructureLayer';
+import { satelliteMetaMap } from '../cesium/useSatellitesLayer';
 
 // Squawk code interpretation
 function squawkBadge(code: string | null): { label: string; color: string } | null {
@@ -42,10 +43,26 @@ function fmtDuration(sec: number | null): string {
     return `${(sec / 86400).toFixed(1)} days`;
 }
 
+function formatSubtypeLabel(layer: string | undefined, subtype: string | undefined): string {
+    if (!subtype) return '—';
+    if (layer === 'Disaster') {
+        const labels: Record<string, string> = {
+            EQ: 'Earthquake',
+            FL: 'Flood',
+            TC: 'Tropical Cyclone',
+            VO: 'Volcano',
+            WF: 'Wildfire',
+            DR: 'Drought',
+        };
+        return labels[subtype] || subtype;
+    }
+    return subtype;
+}
+
 // Domain lookup for isolation buttons
 const LAYER_TO_DOMAIN: Record<string, string> = {
     Aircraft: 'Air', Vessel: 'Sea', 'AIS Signal Lost': 'Sea', GFW: 'Sea',
-    Satellite: 'Space', Conflict: 'Ground', OSINT: 'Ground', Fire: 'Ground',
+    Satellite: 'Space', Conflict: 'Ground', Disaster: 'Ground', Fire: 'Ground',
     Infrastructure: 'Infrastructure', Cable: 'Infrastructure', Pipeline: 'Infrastructure',
     Outage: 'Connectivity', Webcam: 'Context', Airspace: 'Air', Jamming: 'Air',
 };
@@ -275,7 +292,35 @@ export default function EntityHUD() {
                 return;
             }
 
-            // Entity-based objects (satellites, maritime, osint, jamming, borders)
+            // Satellite billboard — current live position is updated in
+            // satelliteMetaMap from the worker positions stream.
+            const satMeta = satelliteMetaMap.get(selectedEntityId);
+            if (
+                satMeta &&
+                Number.isFinite(satMeta.lat) &&
+                Number.isFinite(satMeta.lng) &&
+                Number.isFinite(satMeta.alt)
+            ) {
+                const pos = Cesium.Cartesian3.fromDegrees(satMeta.lng!, satMeta.lat!, satMeta.alt!);
+                const canvasPos = Cesium.SceneTransforms.worldToWindowCoordinates(cesViewer.scene, pos);
+                setScreenPos(canvasPos ? { x: canvasPos.x, y: canvasPos.y } : null);
+                setLive({
+                    lat: satMeta.lat!,
+                    lng: satMeta.lng!,
+                    alt: satMeta.alt!,
+                    layer: 'Satellite',
+                    subtype: satMeta.subtype,
+                    extra: {
+                        noradId: satMeta.noradId,
+                        resolution: satMeta.reconMeta?.resolution,
+                        country: satMeta.reconMeta?.country,
+                    },
+                });
+                requestAnimationFrame(update);
+                return;
+            }
+
+            // Entity-based objects (satellites, maritime, disasters, jamming, borders)
             const entity = findEntity();
             if (entity && entity.position) {
                 const time = cesViewer.clock.currentTime;
@@ -464,7 +509,7 @@ export default function EntityHUD() {
                         </div>
                         <div>
                             <div className="text-[10px] text-zinc-500 font-mono">CLASS</div>
-                            <div className="text-yellow-300 text-sm uppercase">{live?.subtype || '—'}</div>
+                            <div className="text-yellow-300 text-sm uppercase">{formatSubtypeLabel(live?.layer, live?.subtype)}</div>
                         </div>
                     </div>
 
@@ -880,7 +925,7 @@ export default function EntityHUD() {
 const LAYER_TO_VISIBILITY_KEY: Record<string, string> = {
     Aircraft: 'aviation', Vessel: 'maritime', 'AIS Signal Lost': 'maritime',
     GFW: 'gfw', Satellite: 'satellites', Conflict: 'conflicts',
-    OSINT: 'osint', Fire: 'fires', Infrastructure: 'infrastructure',
+    Disaster: 'disasters', Fire: 'fires', Infrastructure: 'infrastructure',
     Cable: 'cables', Pipeline: 'pipelines', Outage: 'outages',
     Webcam: 'webcams', Airspace: 'airspace', Jamming: 'jamming',
 };
@@ -891,8 +936,8 @@ const ALL_SUBTYPES_FOR_LAYER: Record<string, string[]> = {
     aviation: ['airliner', 'military', 'light', 'general'],
     maritime: ['cargo', 'tanker', 'passenger', 'fishing', 'military', 'unknown'],
     satellites: ['military', 'recon', 'commercial', 'civilian'],
-    conflicts: ['explosions', 'battles', 'violence'],
-    osint: ['EQ', 'TC', 'FL', 'VO', 'WF', 'DR'],
+    conflicts: ['explosions', 'battles', 'assaults', 'mass_violence', 'protests', 'threats', 'force_posture', 'coercion'],
+    disasters: ['EQ', 'TC', 'FL', 'VO', 'WF', 'DR'],
     fires: ['high', 'medium', 'low'],
     infrastructure: ['power_plant', 'power_substation', 'power_line', 'refinery', 'dam', 'desalination', 'military', 'aerodrome', 'communication_tower'],
     pipelines: ['oil', 'gas'],
@@ -905,7 +950,7 @@ const DOMAIN_TO_LAYERS: Record<string, string[]> = {
     Air: ['aviation', 'airspace', 'jamming'],
     Sea: ['maritime', 'gfw'],
     Space: ['satellites', 'satelliteFootprints'],
-    Ground: ['conflicts', 'osint', 'fires'],
+    Ground: ['conflicts', 'disasters', 'fires'],
     Infrastructure: ['infrastructure', 'pipelines', 'cables'],
     Connectivity: ['outages'],
     Context: ['traffic', 'webcams', 'labels', 'satellite_imagery', 'clouds'],
@@ -932,23 +977,31 @@ function IsolationButtons({ layer, subtype, entityName, entityId }: { layer: str
     const handleSolo = () => {
         const vis = allOff();
         vis[visKey] = true;
+        setIsolatedEntityId(entityId);
+        if (!subtype) {
+            applyFilter('solo', entityName, vis);
+            return;
+        }
         // Build subtype override: hide ALL known subtypes, then show only this one
         const sub: Record<string, boolean> = {};
         const knownSubs = ALL_SUBTYPES_FOR_LAYER[visKey] || [];
         for (const s of knownSubs) sub[`${visKey}:${s}`] = false;
-        if (subtype) sub[`${visKey}:${subtype}`] = true;
-        setIsolatedEntityId(entityId);
+        sub[`${visKey}:${subtype}`] = true;
         applyFilter('solo', entityName, vis, sub);
     };
 
     const handleThisType = () => {
         const vis = allOff();
         vis[visKey] = true;
+        setIsolatedEntityId(null); // Clear solo — This Type shows all of this subtype
+        if (!subtype) {
+            applyFilter('thisType', layer, vis);
+            return;
+        }
         const sub: Record<string, boolean> = {};
         const knownSubs = ALL_SUBTYPES_FOR_LAYER[visKey] || [];
         for (const s of knownSubs) sub[`${visKey}:${s}`] = false;
-        if (subtype) sub[`${visKey}:${subtype}`] = true;
-        setIsolatedEntityId(null); // Clear solo — This Type shows all of this subtype
+        sub[`${visKey}:${subtype}`] = true;
         applyFilter('thisType', `${layer}: ${subtype}`, vis, sub);
     };
 

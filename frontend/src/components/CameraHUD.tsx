@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useTimelineStore } from '../store/useTimelineStore';
+import { getViewerAltitudeMeters } from '../cesium/position-utils';
 
 const INFRA_CUTOFF_KM = 200;
 
@@ -21,7 +22,7 @@ export default function CameraHUD() {
             const v = (window as any).viewerContext;
             if (!v || v.isDestroyed?.()) return;
 
-            const h = v.camera.positionCartographic?.height;
+            const h = getViewerAltitudeMeters(v);
             if (h == null || !Number.isFinite(h)) return;
 
             const km = h / 1000;
@@ -38,7 +39,7 @@ export default function CameraHUD() {
     const loaded = infraPct === 100;
 
     return (
-        <div className="absolute bottom-20 left-4 z-20 pointer-events-none select-none flex flex-col gap-1 items-start">
+        <div className="absolute bottom-4 left-4 z-20 pointer-events-none select-none flex flex-col gap-1 items-start">
             {/* Altitude */}
             <div className="text-white/80 text-xs font-mono tabular-nums bg-black/40 backdrop-blur-sm rounded px-2 py-1">
                 ALT {altText}

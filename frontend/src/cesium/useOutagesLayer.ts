@@ -4,6 +4,7 @@ import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
 import { OUTAGE_ICON_CRITICAL, OUTAGE_ICON_WARNING } from '../icons/map-icons';
+import { safeCartesianFromDegrees } from './position-utils';
 
 // Subset of country centroids for mapping Cloudflare location codes to coordinates.
 const COUNTRY_CENTROIDS_MINI: Record<string, [number, number]> = {
@@ -79,13 +80,15 @@ export function useOutagesLayer(viewer: Cesium.Viewer | null) {
 
                 // --- IODA outages (country-level, have lat/lng) ---
                 for (const o of outages) {
+                    const position = safeCartesianFromDegrees(o.lng, o.lat, 50);
+                    if (!position) continue;
                     const isCritical = o.level === 'critical';
                     const color = isCritical ? Cesium.Color.RED : Cesium.Color.ORANGE;
 
                     ds.entities.add({
                         id: `outage-${o.countryCode}`,
                         name: `${o.country} Internet Outage (${o.level}) [IODA]`,
-                        position: Cesium.Cartesian3.fromDegrees(o.lng, o.lat, 50),
+                        position,
                         properties: new Cesium.PropertyBag({
                             layer: 'Outage',
                             subtype: o.level,
@@ -138,11 +141,13 @@ export function useOutagesLayer(viewer: Cesium.Viewer | null) {
                     const lat = centroid ? centroid[0] : 0;
                     const lng = centroid ? centroid[1] : 0;
                     if (lat === 0 && lng === 0 && !centroid) continue;
+                    const position = safeCartesianFromDegrees(lng + 0.5, lat + 0.5, 50);
+                    if (!position) continue;
 
                     ds.entities.add({
                         id: cf.id,
                         name: `${cf.asnName || `ASN ${cf.asn}`} Outage [Cloudflare]`,
-                        position: Cesium.Cartesian3.fromDegrees(lng + 0.5, lat + 0.5, 50), // slight offset
+                        position, // slight offset
                         properties: new Cesium.PropertyBag({
                             layer: 'Outage',
                             subtype: 'warning',

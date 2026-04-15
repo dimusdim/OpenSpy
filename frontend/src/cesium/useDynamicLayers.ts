@@ -4,6 +4,7 @@ import { io, Socket } from 'socket.io-client';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
 import { getAviIcon, getShipIcon, DARK_VESSEL_ICON } from '../icons/map-icons';
+import { safeCartesianFromDegrees } from './position-utils';
 
 const getAviSVG = getAviIcon;
 
@@ -243,14 +244,14 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
         }, 30_000);
 
         // How many aircraft / vessels to process synchronously before
-        // yielding to the browser. Each simulator-update message carries
+        // yielding to the browser. Each live-update message carries
         // the full ~11k aircraft world snapshot; processing that in a
         // single sync loop is a 100-300ms main-thread spike that makes
         // the globe feel laggy on every tick. Chunked with yields keeps
         // pointer events responsive even during a fresh world update.
         const AVI_CHUNK_SIZE = 1500;
 
-        // Message sequence counter. Bumped on every simulator-update
+        // Message sequence counter. Bumped on every live-update
         // arrival; each async handler captures `mySeq` at start and
         // bails after any yield if a newer message has come in. This
         // prevents stale resumed handlers from writing positions older
@@ -258,7 +259,7 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
         // before the first one's chunked loop drains.
         let messageSeq = 0;
 
-        socket.on('simulator-update', async (data: any) => {
+        socket.on('live-update', async (data: any) => {
             if (!active) return;
             const mySeq = ++messageSeq;
             const now = Date.now();
@@ -345,7 +346,7 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
             // Server-computed counts → store (no client forEach).
             // Gate each write on the CURRENT source flag so a flipped-off
             // aviation/maritime row doesn't get repopulated by the next
-            // simulator-update that happens to be in flight.
+            // live-update that happens to be in flight.
             if (data.meta) {
                 if (currentSources.aviation) {
                     useTimelineStore.getState().setStreamMetric('aviation', {
@@ -362,7 +363,7 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
             // ---- Maritime via Entity API ----
             // Chunked the same way as aviation. The retained vessel set
             // can grow to ~2000, so a full sync pass here also hitches
-            // the main thread on each simulator-update.
+            // the main thread on each live-update.
             if (!currentSources.maritime) return; // Maritime source disabled — drop vessels + dark vessels
             marMsgs += data.vessels.length;
 
@@ -557,12 +558,14 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                     let entity = darkVesselDs.entities.getById(darkId);
                     if (!entity) {
                         if (dv.lat == null || dv.lng == null || isNaN(dv.lat) || isNaN(dv.lng)) continue;
+                        const position = safeCartesianFromDegrees(dv.lng, dv.lat, 0);
+                        if (!position) continue;
                         const darkSinceDate = new Date(dv.darkSince);
                         const darkMinutes = Math.round((Date.now() - dv.darkSince) / 60000);
                         darkVesselDs.entities.add({
                             id: darkId,
                             name: `AIS Lost: ${dv.id} (${darkMinutes}m silent)`,
-                            position: Cesium.Cartesian3.fromDegrees(dv.lng, dv.lat, 0),
+                            position,
                             properties: new Cesium.PropertyBag({
                                 layer: 'AIS Signal Lost',
                                 subtype: dv.type || 'unknown',
@@ -637,7 +640,7 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
     // ---- Effect 0a: source-off scene clear ----
     // When the user turns aviation / maritime OFF, drop the existing
     // billboards / entities so that re-enabling starts from an empty
-    // scene and the next simulator-update repopulates with fresh data.
+    // scene and the next live-update repopulates with fresh data.
     // This matches the user's mental model: source off = no data on
     // screen; source on = current data rendered.
     useEffect(() => {

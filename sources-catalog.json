@@ -282,7 +282,7 @@
       "name": "GDACS — Global Disaster Alert",
       "provider": "European Commission / United Nations",
       "category": "disasters",
-      "layer": "OSINT",
+      "layer": "Disasters",
       "status": "LIVE",
       "type": "near-real-time",
       "refresh": "5 min",
@@ -343,7 +343,7 @@
       "name": "USGS Earthquake Hazards",
       "provider": "U.S. Geological Survey",
       "category": "disasters",
-      "layer": "OSINT",
+      "layer": "Disasters",
       "status": "LIVE",
       "type": "near-real-time",
       "refresh": "5 min",
@@ -357,7 +357,7 @@
         "limits": "none"
       },
       "legend": {
-        "merged_into": "OSINT layer (EQ subtype)"
+        "merged_into": "Disasters layer (EQ subtype)"
       },
       "fields_displayed": {
         "map_visual": {
@@ -399,7 +399,7 @@
       "name": "NASA EONET — Earth Observatory Natural Events",
       "provider": "NASA",
       "category": "disasters",
-      "layer": "OSINT",
+      "layer": "Disasters",
       "status": "LIVE",
       "type": "near-real-time",
       "refresh": "5 min",
@@ -413,7 +413,7 @@
         "limits": "none"
       },
       "legend": {
-        "merged_into": "OSINT layer (WF/FL/VO/DR subtypes)"
+        "merged_into": "Disasters layer (WF/FL/VO/DR subtypes)"
       },
       "fields_displayed": {
         "map_visual": {
@@ -1920,10 +1920,10 @@
       }
     },
 
-    "OSINT": {
+    "Disasters": {
       "sources": ["gdacs", "usgs", "eonet"],
       "render_method": "CustomDataSource + Entity API (Billboard + Ellipse + optional Polygon for nofly zones)",
-      "code_ref": "frontend/src/cesium/useOsintLayer.ts",
+      "code_ref": "frontend/src/cesium/useDisastersLayer.ts",
       "altitude": "50m",
       "refresh_interval": "5 min",
       "alert_colors": {
@@ -2314,8 +2314,8 @@
     "data_duplicates": [
       {
         "issue": "Fire data shows from 3 independent sources simultaneously",
-        "layers_affected": ["Fire", "OSINT"],
-        "detail": "NASA FIRMS показывает ~60K точек пожаров. Одновременно EONET (через OSINT) показывает wildfire events как отдельные маркеры WF. GDACS тоже может показать крупный wildfire с зоной поражения. Один и тот же лесной пожар отображается: (1) как облако красных/оранжевых/желтых точек FIRMS, (2) как маркер WF с иконкой пламени от EONET, (3) как alert от GDACS с ellipse зоной",
+        "layers_affected": ["Fire", "Disasters"],
+        "detail": "NASA FIRMS показывает ~60K точек пожаров. Одновременно EONET (через Disasters) показывает wildfire events как отдельные маркеры WF. GDACS тоже может показать крупный wildfire с зоной поражения. Один и тот же лесной пожар отображается: (1) как облако красных/оранжевых/желтых точек FIRMS, (2) как маркер WF с иконкой пламени от EONET, (3) как alert от GDACS с ellipse зоной",
         "recommendation": "Объединить под единый узел 'Fires & Wildfires'. FIRMS = heatmap-слой детекции, EONET/GDACS = event-маркеры с зонами поражения. Разные уровни детализации, но пользователь должен видеть их как одну категорию"
       },
       {
@@ -2332,7 +2332,7 @@
       },
       {
         "issue": "Earthquake data from 2-3 sources",
-        "layers_affected": ["OSINT"],
+        "layers_affected": ["Disasters"],
         "detail": "USGS показывает все M2.5+ землетрясения. GDACS показывает крупные землетрясения как alerts с impact radius. EONET может тоже показать geophysical events. Одно сильное землетрясение = до 3 маркеров от разных источников",
         "recommendation": "Backend dedup по proximity + time window. Или приоритезация: GDACS alert (если есть) > USGS point"
       }
@@ -2391,7 +2391,7 @@
       },
       {
         "visual_type": "Event marker with impact halo",
-        "currently_separate": ["Conflict", "OSINT", "Dark Vessel", "GFW", "Outage"],
+        "currently_separate": ["Conflict", "Disasters", "Dark Vessel", "GFW", "Outage"],
         "shared_pattern": "billboard иконка + ellipse halo с radius, coded by severity",
         "note": "Все 5 слоёв используют Billboard + Ellipse. Различаются иконкой и цветом. Можно унифицировать HUD-панель для всех event-type объектов"
       },

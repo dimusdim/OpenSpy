@@ -4,8 +4,9 @@ import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
 import { INFRA_ICONS } from '../icons/map-icons';
+import { getViewerAltitudeMeters } from './position-utils';
 
-const POWER_LINE_COLOR = Cesium.Color.ORANGE.withAlpha(0.6);
+const POWER_LINE_COLOR = Cesium.Color.ORANGE.withAlpha(0.85);
 
 // ---------------------------------------------------------------------------
 // Metadata + exports for picking/HUD
@@ -377,6 +378,54 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
         newLogicalsBySubtype: emptyCounts(),
       };
 
+      const shouldAbort = () => {
+        if (v.isDestroyed() || !activeRef.current) return true;
+        if (myGen !== genRef.current) return true;
+        if (!useTimelineStore.getState().sources.infrastructure) return true;
+        return false;
+      };
+
+      const publishTileState = (schedulePowerReadyGate = false) => {
+        tilesRef.current.delete(key);
+        tilesRef.current.set(key, tile);
+
+        applyTileVisibility(
+          tile,
+          useTimelineStore.getState().subtypeVisibility,
+          useTimelineStore.getState().isolatedEntityId,
+        );
+
+        if (schedulePowerReadyGate && tile.powerLinePrimitive && !tile.powerLinePrimitive.ready) {
+          const prim = tile.powerLinePrimitive;
+          const waitReady = (firedTimerId?: ReturnType<typeof setTimeout>) => {
+            if (firedTimerId !== undefined) {
+              pendingTimersRef.current.delete(firedTimerId);
+            }
+            if (!tilesRef.current.has(key)) return;
+            if (!prim.ready) {
+              const t = setTimeout(() => waitReady(t), 50);
+              pendingTimersRef.current.add(t);
+              return;
+            }
+            applyTileVisibility(
+              tile,
+              useTimelineStore.getState().subtypeVisibility,
+              useTimelineStore.getState().isolatedEntityId,
+            );
+          };
+          waitReady();
+        }
+
+        useTimelineStore.getState().setStreamMetric('infrastructure', {
+          count: infraMetaMap.size,
+          speed: tile.main || tile.power ? '-' : 'failed',
+        });
+        useTimelineStore.getState().setSubtypeCounts('infrastructure', {
+          ...aggregateCountsRef.current,
+        });
+        v.scene.requestRender();
+      };
+
       /**
        * Register a logical infrastructure record as belonging to this
        * tile. Creates (or reuses) the meta entry, increments the
@@ -418,29 +467,12 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
             `${API_URL}/api/infrastructure?bbox=${south},${west},${north},${east}`,
             { timeout: INFRA_FETCH_TIMEOUT_MS }
           );
-      const pwrReq = powerAlreadyLoaded
+      const powerReq = powerAlreadyLoaded
         ? Promise.resolve<any>(null)
         : axios.get(
             `${API_URL}/api/power-infra?bbox=${west},${south},${east},${north}`,
             { timeout: INFRA_FETCH_TIMEOUT_MS }
           );
-
-      const [mainResult, pwrResult] = await Promise.allSettled([mainReq, pwrReq]);
-      if (v.isDestroyed() || !activeRef.current) {
-        inFlightCellsRef.current.delete(key);
-        return;
-      }
-      // Stale check: source flipped off (and its clear-effect bumped
-      // genRef) while these two endpoints were in flight. Bail without
-      // writing anything — the tile cache was already cleared.
-      if (myGen !== genRef.current) {
-        inFlightCellsRef.current.delete(key);
-        return;
-      }
-      if (!useTimelineStore.getState().sources.infrastructure) {
-        inFlightCellsRef.current.delete(key);
-        return;
-      }
 
       // Chunk size for the per-tile record loops. Each fetchTile call
       // handles ~100-500 records; with 4 parallel workers the combined
@@ -450,6 +482,11 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
       const INFRA_TILE_CHUNK_SIZE = 100;
 
       // --- Source 1: /api/infrastructure (plants/refineries/military) ----
+      const mainResult = await Promise.allSettled([mainReq]).then((results) => results[0]);
+      if (shouldAbort()) {
+        inFlightCellsRef.current.delete(key);
+        return;
+      }
       if (!mainAlreadyLoaded) {
         if (mainResult.status === 'fulfilled' && mainResult.value) {
           try {
@@ -484,15 +521,7 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
 
                 if ((ri + 1) % INFRA_TILE_CHUNK_SIZE === 0 && ri + 1 < records.length) {
                   await new Promise<void>((resolve) => setTimeout(resolve, 0));
-                  if (v.isDestroyed() || !activeRef.current) {
-                    inFlightCellsRef.current.delete(key);
-                    return;
-                  }
-                  if (myGen !== genRef.current) {
-                    inFlightCellsRef.current.delete(key);
-                    return;
-                  }
-                  if (!useTimelineStore.getState().sources.infrastructure) {
+                  if (shouldAbort()) {
                     inFlightCellsRef.current.delete(key);
                     return;
                   }
@@ -515,19 +544,25 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
           console.warn('[Infrastructure] /api/infrastructure failed (non-fatal):', mainResult.reason?.message || mainResult.reason);
         }
       }
+      publishTileState(false);
 
       // --- Source 2: /api/power-infra (substations/plants/power lines) ---
+      const powerResult = await Promise.allSettled([powerReq]).then((results) => results[0]);
+      if (shouldAbort()) {
+        inFlightCellsRef.current.delete(key);
+        return;
+      }
       if (!powerAlreadyLoaded) {
-        if (pwrResult.status === 'fulfilled' && pwrResult.value) {
+        if (powerResult.status === 'fulfilled' && powerResult.value) {
           try {
-            const pwrBody = pwrResult.value.data ?? {};
-            const pwrRecords: any[] = Array.isArray(pwrBody) ? pwrBody : (pwrBody.data ?? []);
-            const pwrOverpassTimedOut: boolean = pwrBody.overpassTimedOut === true;
+            const powerBody = powerResult.value.data ?? {};
+            const powerRecords: any[] = Array.isArray(powerBody) ? powerBody : (powerBody.data ?? []);
+            const powerOverpassTimedOut: boolean = powerBody.overpassTimedOut === true;
             const powerBillboardCollection = new Cesium.BillboardCollection({ scene: v.scene });
             const powerLineInstances: Cesium.GeometryInstance[] = [];
 
-            for (let pri = 0; pri < pwrRecords.length; pri++) {
-              const rec = pwrRecords[pri];
+            for (let pri = 0; pri < powerRecords.length; pri++) {
+              const rec = powerRecords[pri];
               if (
                 rec.type === 'power_line' &&
                 rec.coordinates &&
@@ -557,7 +592,7 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
                 powerLineInstances.push(new Cesium.GeometryInstance({
                   geometry: new Cesium.GroundPolylineGeometry({
                     positions: Cesium.Cartesian3.fromDegreesArray(degreesFlat),
-                    width: 2.0,
+                    width: 4.0,
                   }),
                   attributes: {
                     color: Cesium.ColorGeometryInstanceAttribute.fromColor(POWER_LINE_COLOR),
@@ -588,17 +623,9 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
                 });
               }
 
-              if ((pri + 1) % INFRA_TILE_CHUNK_SIZE === 0 && pri + 1 < pwrRecords.length) {
+              if ((pri + 1) % INFRA_TILE_CHUNK_SIZE === 0 && pri + 1 < powerRecords.length) {
                 await new Promise<void>((resolve) => setTimeout(resolve, 0));
-                if (v.isDestroyed() || !activeRef.current) {
-                  inFlightCellsRef.current.delete(key);
-                  return;
-                }
-                if (myGen !== genRef.current) {
-                  inFlightCellsRef.current.delete(key);
-                  return;
-                }
-                if (!useTimelineStore.getState().sources.infrastructure) {
+                if (shouldAbort()) {
                   inFlightCellsRef.current.delete(key);
                   return;
                 }
@@ -624,41 +651,19 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
             // Only mark as "done" if Overpass actually responded. When
             // overpass timed out AND we got zero records, skip marking
             // so the tile will be refetched on next viewport change.
-            if (!pwrOverpassTimedOut || pwrRecords.length > 0) {
+            if (!powerOverpassTimedOut || powerRecords.length > 0) {
               tile.power = true;
             }
-          } catch (pwrErr) {
-            console.warn('[Infrastructure] power parse failed:', pwrErr);
+          } catch (powerErr) {
+            console.warn('[Infrastructure] power parse failed:', powerErr);
           }
-        } else if (pwrResult.status === 'rejected') {
-          console.warn('[Infrastructure] /api/power-infra failed (non-fatal):', pwrResult.reason?.message || pwrResult.reason);
+        } else if (powerResult.status === 'rejected') {
+          console.warn('[Infrastructure] /api/power-infra failed (non-fatal):', powerResult.reason?.message || powerResult.reason);
         }
       }
 
-      // Register (or LRU-refresh) the tile even if partial.
-      tilesRef.current.delete(key);
-      tilesRef.current.set(key, tile);
       inFlightCellsRef.current.delete(key);
-
-      // Apply current subtype visibility before the new primitives hit
-      // the next render — no flash for disabled subtypes.
-      applyTileVisibility(tile, useTimelineStore.getState().subtypeVisibility, useTimelineStore.getState().isolatedEntityId);
-      if (tile.powerLinePrimitive && !tile.powerLinePrimitive.ready) {
-        const prim = tile.powerLinePrimitive;
-        const waitReady = (firedTimerId?: ReturnType<typeof setTimeout>) => {
-          if (firedTimerId !== undefined) {
-            pendingTimersRef.current.delete(firedTimerId);
-          }
-          if (!tilesRef.current.has(key)) return; // tile evicted before ready
-          if (!prim.ready) {
-            const t = setTimeout(() => waitReady(t), 50);
-            pendingTimersRef.current.add(t);
-            return;
-          }
-          applyTileVisibility(tile, useTimelineStore.getState().subtypeVisibility, useTimelineStore.getState().isolatedEntityId);
-        };
-        waitReady();
-      }
+      publishTileState(true);
 
       // LRU eviction. Skips in-flight cells so a tile that's mid-fetch
       // can't get dropped out from under itself.
@@ -676,22 +681,6 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
         if (oldestKey === undefined) break;
         evictTile(v, oldestKey);
       }
-
-      // Push fresh count + speed only. We intentionally DO NOT write
-      // `status` here — status is owned by /api/status propagation,
-      // which reflects the composite Overpass + Overture backend
-      // health (and can surface an Overture DuckDB init failure
-      // via `warning` + note). If the tile hook wrote `status:
-      // 'streaming'` here it would clobber the backend's warning the
-      // moment any tile succeeded, hiding the real problem from the
-      // user.
-      useTimelineStore.getState().setStreamMetric('infrastructure', {
-        count: infraMetaMap.size,
-        speed: tile.main || tile.power ? '-' : 'failed',
-      });
-      useTimelineStore.getState().setSubtypeCounts('infrastructure', {
-        ...aggregateCountsRef.current,
-      });
     },
     [applyTileVisibility, evictTile]
   );
@@ -713,7 +702,9 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
       // anyway — so above the gate we skip NEW fetches and keep
       // whatever's already in the tile cache visible. The user can
       // zoom in to see details; rotation at globe zoom stays responsive.
-      const camHeightKm = v.camera.positionCartographic.height / 1000;
+      const camHeightMeters = getViewerAltitudeMeters(v);
+      if (camHeightMeters == null) return;
+      const camHeightKm = camHeightMeters / 1000;
       if (camHeightKm > INFRA_ALTITUDE_CUTOFF_KM) {
         useTimelineStore.getState().setInfraViewportPct(-1);
         return;
@@ -823,7 +814,9 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
     // when a user bumps the wheel twice in quick succession.
     const onCameraMoveEnd = () => {
       // Hide/show all infrastructure based on altitude
-      const altKm = v.camera.positionCartographic.height / 1000;
+      const altMeters = getViewerAltitudeMeters(v);
+      if (altMeters == null) return;
+      const altKm = altMeters / 1000;
       const shouldShow = altKm <= INFRA_ALTITUDE_CUTOFF_KM
           && useTimelineStore.getState().sources.infrastructure
           && useTimelineStore.getState().visibility.infrastructure;
@@ -838,14 +831,10 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
     };
 
     v.camera.moveEnd.addEventListener(onCameraMoveEnd);
-    // Defer the initial viewport fetch so we don't pile another heavy
-    // Overpass round-trip onto the same frame as the cold-load
-    // construction spikes of fires / airspace / pipelines. 800 ms is
-    // long enough for those to finish their chunked builds and for the
-    // globe + 3D tile imagery to settle into an interactive state.
-    // The user still sees infrastructure appear "shortly after open"
-    // instead of "immediately, at the cost of a frozen UI".
-    const INFRA_INITIAL_FETCH_DELAY_MS = 800;
+    // Keep a small defer so the globe reaches a stable first frame before
+    // infrastructure kicks in, but don't artificially hide cached Overture
+    // icons for almost a second after open.
+    const INFRA_INITIAL_FETCH_DELAY_MS = 100;
     const initialFetchTimer = setTimeout(() => {
       if (v.isDestroyed() || !activeRef.current) return;
       if (!useTimelineStore.getState().sources.infrastructure) return;

@@ -134,11 +134,16 @@ const DOMAIN_TREE: DomainNode[] = [
                 subtypes: [
                     { key: 'explosions', label: 'Explosions', icon: Bomb, color: 'text-red-500' },
                     { key: 'battles', label: 'Battles', icon: Swords, color: 'text-orange-400' },
-                    { key: 'violence', label: 'Violence', icon: Skull, color: 'text-yellow-400' },
+                    { key: 'assaults', label: 'Assaults', icon: Swords, color: 'text-red-400' },
+                    { key: 'mass_violence', label: 'Mass Violence', icon: Skull, color: 'text-rose-400' },
+                    { key: 'protests', label: 'Protests', icon: CircleDot, color: 'text-yellow-300' },
+                    { key: 'threats', label: 'Threats', icon: ShieldAlert, color: 'text-amber-400' },
+                    { key: 'force_posture', label: 'Force Posture', icon: Shield, color: 'text-violet-400' },
+                    { key: 'coercion', label: 'Coercion', icon: Ban, color: 'text-orange-500' },
                 ],
             },
             {
-                layer: 'osint', label: 'Disasters', icon: Mountain,
+                layer: 'disasters', label: 'Disasters', icon: Mountain,
                 subtypes: [
                     { key: 'EQ', label: 'Earthquake', icon: CircleDot, color: 'text-zinc-300' },
                     { key: 'TC', label: 'Cyclone', icon: Waves, color: 'text-zinc-300' },

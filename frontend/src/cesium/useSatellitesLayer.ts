@@ -4,6 +4,7 @@ import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
 import { getSatIcon } from '../icons/map-icons';
+import { isFiniteCartesian } from './position-utils';
 
 // ---------------------------------------------------------------------------
 // Footprint types & registry (unchanged — used by Globe.tsx picking)
@@ -29,6 +30,9 @@ export interface SatelliteMeta {
     noradId: number;
     type: string;        // military/commercial/civilian
     subtype: string;     // military/commercial/civilian/recon
+    lat?: number;
+    lng?: number;
+    alt?: number;
     recon?: boolean;
     reconMeta?: any;
     sensor?: any;
@@ -46,13 +50,33 @@ interface FootprintState {
     radiusMeters: number;
 }
 
+interface FootprintConfig {
+    satId: string;
+    noradId: number;
+    radiusMeters: number;
+    baseColor: Cesium.Color;
+    meta: SatelliteFootprintMeta;
+}
+
 // How often to post 'tick' to the Worker (ms). 2 seconds is smooth enough —
 // LEO satellites move ~15 km/s, so 2s = 30 km drift, sub-pixel at global zoom.
 const WORKER_TICK_INTERVAL = 2000;
 
+function getSatelliteBillboardShow(
+    state: ReturnType<typeof useTimelineStore.getState>,
+    entityId: string,
+    subtype: string | undefined
+): boolean {
+    if (!state.sources.satellites || !state.visibility.satellites) return false;
+    if (state.isolatedEntityId && state.isolatedEntityId !== entityId) return false;
+    if (!subtype) return true;
+    return state.subtypeVisibility[`satellites:${subtype}`] !== false;
+}
+
 export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
     const isSourceOn = useTimelineStore(s => s.sources.satellites);
     const isVisible = useTimelineStore(s => s.visibility.satellites);
+    const satelliteRenderLimit = useTimelineStore(s => s.satelliteRenderLimit);
 
     // BillboardCollection for satellite icons (Phase 2)
     const billboardCollectionRef = useRef<Cesium.BillboardCollection | null>(null);
@@ -71,7 +95,7 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
 
     // Footprint state
     const footprintDsRef = useRef<Cesium.CustomDataSource | null>(null);
-    const footprintStatesRef = useRef<FootprintState[]>([]);
+    const footprintStatesRef = useRef<Map<number, FootprintState>>(new Map());
     const footprintTickRemoveRef = useRef<Cesium.Event.RemoveCallback | null>(null);
 
     const isFootprintSourceOn = useTimelineStore(s => s.sources.satelliteFootprints);
@@ -109,7 +133,8 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
             if (!bc) return;
 
             try {
-                const res = await axios.get(`${API_URL}/api/satellites`);
+                const limitParam = satelliteRenderLimit == null ? 'all' : String(satelliteRenderLimit);
+                const res = await axios.get(`${API_URL}/api/satellites?limit=${encodeURIComponent(limitParam)}`);
                 if (!active) return;
 
                 const sats = res.data as any[];
@@ -117,6 +142,9 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                 useTimelineStore.getState().setStreamMetric('satellites', {
                     count: sats.length,
                     status: 'streaming',
+                    note: satelliteRenderLimit == null
+                        ? 'Showing full visible catalog'
+                        : `Showing ${sats.length} satellites (limit ${satelliteRenderLimit})`,
                 });
 
                 // Clear old billboards
@@ -188,7 +216,6 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                         const order: number[] = msg.order;
                         const bbMap = billboardMapRef.current;
                         const freshState = useTimelineStore.getState();
-                        const show = freshState.sources.satellites && freshState.visibility.satellites;
 
                         for (let i = 0; i < order.length; i++) {
                             const noradId = order[i];
@@ -199,7 +226,13 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                             const lat = positions[i * 3 + 1];
                             const alt = positions[i * 3 + 2];
                             bb.position = Cesium.Cartesian3.fromDegrees(lon, lat, alt);
-                            bb.show = show;
+                            const meta = satelliteMetaMap.get(bb.id as string);
+                            if (meta) {
+                                meta.lat = lat;
+                                meta.lng = lon;
+                                meta.alt = alt;
+                                bb.show = getSatelliteBillboardShow(freshState, bb.id as string, meta.subtype);
+                            }
                         }
                     }
 
@@ -303,7 +336,7 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                 workerRef.current = null;
             }
         };
-    }, [viewer, isSourceOn]);
+    }, [viewer, isSourceOn, satelliteRenderLimit]);
 
     // ---- Effect 3: footprint overlay build + discrete update tick ----
     // Footprints still use Entity API (only ~53 satellites with sensor data).
@@ -328,8 +361,8 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
         viewer.dataSources.add(fpDs);
         footprintDsRef.current = fpDs;
         satelliteFootprintMetaMap.clear();
-        const states: FootprintState[] = [];
-        let rendered = 0;
+        const states = new Map<number, FootprintState>();
+        const configs: FootprintConfig[] = [];
 
         for (const sat of sats) {
             if (!sat.sensor || !sat.sensor.swathMeters || sat.sensor.swathMeters <= 0) continue;
@@ -337,37 +370,12 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
             const isRecon = sat.recon === true;
             const subtype = isRecon ? 'recon' : sat.type;
             const entityId = `sat-${sat.noradId || sat.name}`;
-            const bb = billboardMapRef.current.get(sat.noradId);
-            const initialPos = bb?.position ?? Cesium.Cartesian3.ZERO;
 
             const baseColor = subtype === 'military' || subtype === 'recon' ? Cesium.Color.RED
                 : subtype === 'commercial' ? Cesium.Color.CYAN
                 : Cesium.Color.LIME;
 
             const radiusMeters = sat.sensor.swathMeters / 2;
-
-            // Compute initial nadir
-            let initialNadir = Cesium.Cartesian3.ZERO;
-            if (!Cesium.Cartesian3.equals(initialPos, Cesium.Cartesian3.ZERO)) {
-                const c = Cesium.Cartographic.fromCartesian(initialPos);
-                initialNadir = Cesium.Cartesian3.fromRadians(c.longitude, c.latitude, 0);
-            }
-
-            const footprintId = `fp-${entityId}`;
-            if (fpDs.entities.getById(footprintId)) continue; // skip duplicate
-            const ellipseEntity = fpDs.entities.add({
-                id: footprintId,
-                position: new Cesium.ConstantPositionProperty(initialNadir),
-                ellipse: {
-                    semiMinorAxis: radiusMeters,
-                    semiMajorAxis: radiusMeters,
-                    material: new Cesium.ColorMaterialProperty(baseColor.withAlpha(0.08)),
-                    height: 0,
-                    outline: true,
-                    outlineColor: baseColor.withAlpha(0.5),
-                    outlineWidth: 1,
-                },
-            });
 
             const fpMeta: SatelliteFootprintMeta = {
                 parentSatId: entityId,
@@ -378,29 +386,14 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                 swathMeters: sat.sensor.swathMeters,
                 source: sat.sensor.source || 'spectator-earth',
             };
-            satelliteFootprintMetaMap.set(footprintId, fpMeta);
 
-            const rayEntities: Cesium.Entity[] = [];
-            for (let k = 0; k < FOOTPRINT_RAY_COUNT; k++) {
-                const rayId = `beam-${entityId}#${k}`;
-                const rayEntity = fpDs.entities.add({
-                    id: rayId,
-                    polyline: {
-                        positions: new Cesium.ConstantProperty(
-                            Cesium.Cartesian3.equals(initialPos, Cesium.Cartesian3.ZERO)
-                                ? [Cesium.Cartesian3.ZERO, Cesium.Cartesian3.ZERO]
-                                : [initialPos, initialNadir]
-                        ),
-                        width: 1,
-                        material: new Cesium.ColorMaterialProperty(baseColor.withAlpha(0.25)),
-                    },
-                });
-                rayEntities.push(rayEntity);
-                satelliteFootprintMetaMap.set(rayId, fpMeta);
-            }
-
-            states.push({ satId: entityId, noradId: sat.noradId, ellipseEntity, rayEntities, radiusMeters });
-            rendered++;
+            configs.push({
+                satId: entityId,
+                noradId: sat.noradId,
+                radiusMeters,
+                baseColor,
+                meta: fpMeta,
+            });
         }
 
         footprintStatesRef.current = states;
@@ -415,16 +408,73 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
             if (nowMs - lastUpdateMs < FOOTPRINT_UPDATE_MS) return;
             lastUpdateMs = nowMs;
 
-            for (const st of footprintStatesRef.current) {
-                const bb = bbMap.get(st.noradId);
+            for (const cfg of configs) {
+                const bb = bbMap.get(cfg.noradId);
                 if (!bb || !bb.show) continue;
                 const satPos = bb.position;
-                if (!satPos || Cesium.Cartesian3.equals(satPos, Cesium.Cartesian3.ZERO)) continue;
+                if (!isFiniteCartesian(satPos) || Cesium.Cartesian3.equals(satPos, Cesium.Cartesian3.ZERO)) continue;
 
                 const carto = Cesium.Cartographic.fromCartesian(satPos);
+                if (!carto) continue;
                 const lat1 = carto.latitude;
                 const lon1 = carto.longitude;
                 const nadir = Cesium.Cartesian3.fromRadians(lon1, lat1, 0);
+                if (!isFiniteCartesian(nadir)) continue;
+                const angDist = cfg.radiusMeters / R_EARTH;
+                const sinLat1 = Math.sin(lat1);
+                const cosLat1 = Math.cos(lat1);
+                const cosAng = Math.cos(angDist);
+                const sinAng = Math.sin(angDist);
+
+                let st = states.get(cfg.noradId);
+                if (!st) {
+                    const footprintId = `fp-${cfg.satId}`;
+                    const ellipseEntity = fpDs.entities.add({
+                        id: footprintId,
+                        position: new Cesium.ConstantPositionProperty(nadir),
+                        ellipse: {
+                            semiMinorAxis: cfg.radiusMeters,
+                            semiMajorAxis: cfg.radiusMeters,
+                            material: new Cesium.ColorMaterialProperty(cfg.baseColor.withAlpha(0.08)),
+                            height: 0,
+                            outline: true,
+                            outlineColor: cfg.baseColor.withAlpha(0.5),
+                            outlineWidth: 1,
+                        },
+                    });
+                    satelliteFootprintMetaMap.set(footprintId, cfg.meta);
+
+                    const rayEntities: Cesium.Entity[] = [];
+                    for (let k = 0; k < FOOTPRINT_RAY_COUNT; k++) {
+                        const angleRad = (k / FOOTPRINT_RAY_COUNT) * 2 * Math.PI;
+                        const lat2 = Math.asin(sinLat1 * cosAng + cosLat1 * sinAng * Math.cos(angleRad));
+                        const lon2 = lon1 + Math.atan2(
+                            Math.sin(angleRad) * sinAng * cosLat1,
+                            cosAng - sinLat1 * Math.sin(lat2)
+                        );
+                        const perimeter = Cesium.Cartesian3.fromRadians(lon2, lat2, 0);
+                        const rayId = `beam-${cfg.satId}#${k}`;
+                        const rayEntity = fpDs.entities.add({
+                            id: rayId,
+                            polyline: {
+                                positions: new Cesium.ConstantProperty([satPos, perimeter]),
+                                width: 1,
+                                material: new Cesium.ColorMaterialProperty(cfg.baseColor.withAlpha(0.25)),
+                            },
+                        });
+                        rayEntities.push(rayEntity);
+                        satelliteFootprintMetaMap.set(rayId, cfg.meta);
+                    }
+
+                    st = {
+                        satId: cfg.satId,
+                        noradId: cfg.noradId,
+                        ellipseEntity,
+                        rayEntities,
+                        radiusMeters: cfg.radiusMeters,
+                    };
+                    states.set(cfg.noradId, st);
+                }
 
                 const ellipsePos = st.ellipseEntity.position as Cesium.ConstantPositionProperty | undefined;
                 if (ellipsePos instanceof Cesium.ConstantPositionProperty) {
@@ -433,11 +483,6 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                     st.ellipseEntity.position = new Cesium.ConstantPositionProperty(nadir);
                 }
 
-                const angDist = st.radiusMeters / R_EARTH;
-                const sinLat1 = Math.sin(lat1);
-                const cosLat1 = Math.cos(lat1);
-                const cosAng = Math.cos(angDist);
-                const sinAng = Math.sin(angDist);
                 for (let k = 0; k < st.rayEntities.length; k++) {
                     const angleRad = (k / st.rayEntities.length) * 2 * Math.PI;
                     const lat2 = Math.asin(sinLat1 * cosAng + cosLat1 * sinAng * Math.cos(angleRad));
@@ -457,24 +502,30 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                     }
                 }
             }
+
+            useTimelineStore.getState().setStreamMetric('satelliteFootprints', {
+                count: states.size,
+                status: states.size > 0 ? 'streaming' : 'warning',
+                speed: states.size > 0 ? `${states.size} sats` : 'waiting for positions',
+            });
         };
 
         onTick();
         footprintTickRemoveRef.current = viewer.clock.onTick.addEventListener(onTick);
 
         useTimelineStore.getState().setStreamMetric('satelliteFootprints', {
-            count: rendered,
-            status: rendered > 0 ? 'streaming' : 'warning',
-            speed: rendered > 0 ? `${rendered} sats` : 'no sensor data',
+            count: states.size,
+            status: states.size > 0 ? 'streaming' : 'warning',
+            speed: states.size > 0 ? `${states.size} sats` : 'waiting for positions',
         });
-        console.log(`[Satellites] Rendered ${rendered} sensor footprints (discrete tick @ ${FOOTPRINT_UPDATE_MS}ms)`);
+        console.log(`[Satellites] Footprint layer armed for ${configs.length} satellites with sensors (discrete tick @ ${FOOTPRINT_UPDATE_MS}ms)`);
 
         return () => {
             if (footprintTickRemoveRef.current) {
                 footprintTickRemoveRef.current();
                 footprintTickRemoveRef.current = null;
             }
-            footprintStatesRef.current = [];
+            footprintStatesRef.current = new Map();
             if (viewer && !viewer.isDestroyed()) {
                 viewer.dataSources.remove(fpDs);
             }
@@ -487,18 +538,17 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
 
     // ---- Effect 4: visibility toggle ----
     useEffect(() => {
-        const show = isSourceOn && isVisible;
         const bc = billboardCollectionRef.current;
         if (bc) {
-            // BillboardCollection doesn't have a single .show —
-            // iterate and set per-billboard
             for (let i = 0; i < bc.length; i++) {
                 const bb = bc.get(i);
-                if (bb) bb.show = show;
+                if (!bb) continue;
+                const meta = satelliteMetaMap.get(bb.id as string);
+                bb.show = getSatelliteBillboardShow(useTimelineStore.getState(), bb.id as string, meta?.subtype);
             }
         }
         if (trailsPrimitiveRef.current) {
-            trailsPrimitiveRef.current.show = show && showTrajectories;
+            trailsPrimitiveRef.current.show = isSourceOn && isVisible && showTrajectories;
         }
     }, [isSourceOn, isVisible, showTrajectories]);
 
@@ -556,8 +606,7 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
             if (!meta) continue;
             const sub = meta.subtype;
             counts[sub] = (counts[sub] || 0) + 1;
-            const subtypeOk = globalShow && subtypeVisibility[`satellites:${sub}`] !== false;
-            const show = subtypeOk && (!isolatedEntityId || isolatedEntityId === (bb.id as string));
+            const show = getSatelliteBillboardShow(useTimelineStore.getState(), bb.id as string, sub);
             bb.show = show;
 
             if (trails && trails.ready) {
@@ -580,8 +629,7 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                     if (!bb) continue;
                     const meta = satelliteMetaMap.get(bb.id as string);
                     if (!meta) continue;
-                    const show = globalShow && subtypeVisibility[`satellites:${meta.subtype}`] !== false
-                        && (!isolatedEntityId || isolatedEntityId === (bb.id as string));
+                    const show = getSatelliteBillboardShow(useTimelineStore.getState(), bb.id as string, meta.subtype);
                     const attrs = trails.getGeometryInstanceAttributes(bb.id);
                     if (attrs) {
                         (attrs as any).show = Cesium.ShowGeometryInstanceAttribute.toValue(show);

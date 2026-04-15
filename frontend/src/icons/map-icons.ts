@@ -8,7 +8,7 @@
 // Public API:
 //   - Named icon constants (AVI_ICONS, VESSEL_ICONS, etc.)
 //   - getMapIcon(layer, subtype) — universal lookup
-//   - getOsintIcon(eventType, alertLevel) — parametric OSINT builder
+//   - getDisasterIcon(eventType, alertLevel) — parametric disaster-event builder
 //   - getFireDot(rgb) — parametric fire dot builder
 //   - svgUri(path, color?) — 32×32 viewBox-24 helper
 //   - svgDataUri(svg) — complete SVG data URI helper
@@ -484,19 +484,19 @@ export function getConflictIcon(eventType: string): string {
   return CONFLICT_ICON_VIOLENCE;
 }
 
-// ======================== OSINT / GDACS icons ===============================
+// ======================== Disaster-event icons ===============================
 // Parametric: (eventType, alertLevel) -> distinct shape + colour.
 // 36×36 output, 24×24 viewBox.
 
 /** Alert-level fill colours. */
-export const OSINT_ALERT_FILL: Record<string, string> = {
+export const DISASTER_ALERT_FILL: Record<string, string> = {
   Red: '#ef4444',
   Orange: '#f97316',
   Green: '#22c55e',
 };
 
 /** SVG body fragments per GDACS event class. */
-export const OSINT_EVENT_BODY: Record<string, string> = {
+export const DISASTER_EVENT_BODY: Record<string, string> = {
   // earthquake — concentric ripples
   EQ: `<circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="6" fill="none" stroke-width="1.5"/><circle cx="12" cy="12" r="9" fill="none" stroke-width="1"/>`,
   // tropical cyclone — spiral
@@ -514,12 +514,12 @@ export const OSINT_EVENT_BODY: Record<string, string> = {
 };
 
 /**
- * Build an OSINT/GDACS icon data URI from event type + alert level.
+ * Build a disaster-event icon data URI from event type + alert level.
  * 36×36 output, 24×24 viewBox, coloured by alert severity.
  */
-export function getOsintIcon(eventType: string, alertLevel: string): string {
-  const body = OSINT_EVENT_BODY[eventType] || OSINT_EVENT_BODY.XX;
-  const fill = OSINT_ALERT_FILL[alertLevel] || OSINT_ALERT_FILL.Green;
+export function getDisasterIcon(eventType: string, alertLevel: string): string {
+  const body = DISASTER_EVENT_BODY[eventType] || DISASTER_EVENT_BODY.XX;
+  const fill = DISASTER_ALERT_FILL[alertLevel] || DISASTER_ALERT_FILL.Green;
   return (
     `data:image/svg+xml,` +
     encodeURIComponent(
@@ -675,10 +675,10 @@ export function getMapIcon(layer: string, subtype: string): string | undefined {
     case 'conflicts':
       return getConflictIcon(subtype);
 
-    // --- OSINT / GDACS (use getOsintIcon for full parametric control) ---
-    case 'osint':
+    // --- Disasters (GDACS / USGS / EONET) ---
+    case 'disasters':
       // subtype doubles as eventType; default to Green alert for the lookup
-      return getOsintIcon(subtype, 'Green');
+      return getDisasterIcon(subtype, 'Green');
 
     // --- Outages ---
     case 'outages':
@@ -723,6 +723,12 @@ export const DEFAULT_SET: IconSet = {
     explosions: CONFLICT_ICON_EXPLOSIONS,
     battles: CONFLICT_ICON_BATTLES,
     violence: CONFLICT_ICON_VIOLENCE,
+    assaults: CONFLICT_ICON_BATTLES,
+    mass_violence: CONFLICT_ICON_VIOLENCE,
+    protests: CONFLICT_ICON_VIOLENCE,
+    threats: CONFLICT_ICON_VIOLENCE,
+    force_posture: CONFLICT_ICON_BATTLES,
+    coercion: CONFLICT_ICON_VIOLENCE,
   },
   outages: {
     critical: OUTAGE_ICON_CRITICAL,

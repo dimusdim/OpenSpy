@@ -3,14 +3,15 @@ import * as Cesium from 'cesium';
 import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
-import { getOsintIcon } from '../icons/map-icons';
+import { getDisasterIcon } from '../icons/map-icons';
+import { safeCartesianFromDegrees } from './position-utils';
 
-export function useOsintLayer(viewer: Cesium.Viewer | null) {
-    // sources.osint = fetch OSINT events; visibility.osint = render them
-    const isOsintSourceOn = useTimelineStore(s => s.sources.osint);
-    const isOsintVisible = useTimelineStore(s => s.visibility.osint);
+export function useDisastersLayer(viewer: Cesium.Viewer | null) {
+    // sources.disasters = fetch disaster events; visibility.disasters = render them
+    const isDisasterSourceOn = useTimelineStore(s => s.sources.disasters);
+    const isDisasterVisible = useTimelineStore(s => s.visibility.disasters);
 
-    const osintDsRef = useRef<Cesium.CustomDataSource | null>(null);
+    const disastersDsRef = useRef<Cesium.CustomDataSource | null>(null);
     // Bumped each time fetchEvents() completes. Dependent effects (subtype
     // counts + visibility) key off this instead of polling on an interval.
     const [eventsLoadedTick, setEventsLoadedTick] = useState(0);
@@ -18,32 +19,32 @@ export function useOsintLayer(viewer: Cesium.Viewer | null) {
     // ---- Effect 1: scene lifetime ----
     useEffect(() => {
         if (!viewer) return;
-        const ds = new Cesium.CustomDataSource('osint');
+        const ds = new Cesium.CustomDataSource('disasters');
         viewer.dataSources.add(ds);
-        osintDsRef.current = ds;
+        disastersDsRef.current = ds;
         return () => {
             if (viewer && !viewer.isDestroyed()) {
                 viewer.dataSources.remove(ds);
             }
-            osintDsRef.current = null;
+            disastersDsRef.current = null;
         };
     }, [viewer]);
 
     // ---- Effect 2: fetch loop ----
     useEffect(() => {
-        if (!viewer || !isOsintSourceOn) return;
+        if (!viewer || !isDisasterSourceOn) return;
 
         let active = true;
 
         async function fetchEvents() {
-            const ds = osintDsRef.current;
+            const ds = disastersDsRef.current;
             if (!ds) return;
             try {
-                const res = await axios.get(`${API_URL}/api/osint`);
+                const res = await axios.get(`${API_URL}/api/disasters`);
                 if (!active) return;
 
                 const events = res.data;
-                useTimelineStore.getState().setStreamMetric('osint', { count: events.length, status: 'streaming' });
+                useTimelineStore.getState().setStreamMetric('disasters', { count: events.length, status: 'streaming' });
 
                 // Reconciliation: remove entities that are no longer in the payload
                 const currentIds = new Set<string>(events.map((e: any) => e.id));
@@ -55,9 +56,9 @@ export function useOsintLayer(viewer: Cesium.Viewer | null) {
                 }
 
                 // Chunked build — USGS weekly earthquake feed can
-                // contribute 1k+ events. Yield every OSINT_CHUNK_SIZE
+                // contribute 1k+ events. Yield every DISASTER_CHUNK_SIZE
                 // to keep input responsive during cold load.
-                const OSINT_CHUNK_SIZE = 200;
+                const DISASTER_CHUNK_SIZE = 200;
                 const evList: any[] = events;
                 for (let evi = 0; evi < evList.length; evi++) {
                     const ev = evList[evi];
@@ -66,6 +67,8 @@ export function useOsintLayer(viewer: Cesium.Viewer | null) {
                     if (ev.lat == null || ev.lng == null || isNaN(ev.lat) || isNaN(ev.lng)) continue;
                     try {
                         if (ev.type === 'strike') {
+                            const position = safeCartesianFromDegrees(ev.lng, ev.lat, 50);
+                            if (!position) continue;
                             const alertColor = ev.alertLevel === 'Red' ? Cesium.Color.RED
                                 : ev.alertLevel === 'Orange' ? Cesium.Color.ORANGE
                                 : Cesium.Color.LIME;
@@ -73,16 +76,16 @@ export function useOsintLayer(viewer: Cesium.Viewer | null) {
                             const opts: any = {
                                 id: ev.id,
                                 name: ev.description || ev.eventType,
-                                position: Cesium.Cartesian3.fromDegrees(ev.lng, ev.lat, 50),
+                                position,
                                 properties: new Cesium.PropertyBag({
-                                    layer: 'OSINT',
+                                    layer: 'Disaster',
                                     subtype: ev.eventType || 'XX',
                                     alertLevel: ev.alertLevel || 'Green',
                                     source: ev.source || 'GDACS',
                                     description: ev.description || '',
                                 }),
                                 billboard: {
-                                    image: getOsintIcon(ev.eventType || 'XX', ev.alertLevel || 'Green'),
+                                    image: getDisasterIcon(ev.eventType || 'XX', ev.alertLevel || 'Green'),
                                     scale: 1.2,
                                 },
                             };
@@ -115,26 +118,26 @@ export function useOsintLayer(viewer: Cesium.Viewer | null) {
                             });
                         }
                     } catch (e: any) {
-                        console.warn('[OSINT] malformed event skipped:', e?.message || e);
+                        console.warn('[Disasters] malformed event skipped:', e?.message || e);
                     }
 
-                    if ((evi + 1) % OSINT_CHUNK_SIZE === 0 && evi + 1 < evList.length) {
+                    if ((evi + 1) % DISASTER_CHUNK_SIZE === 0 && evi + 1 < evList.length) {
                         await new Promise<void>((resolve) => setTimeout(resolve, 0));
                         if (!active) return;
-                        if (!useTimelineStore.getState().sources.osint) return;
+                        if (!useTimelineStore.getState().sources.disasters) return;
                     }
                 }
 
                 // Signal to dependent effects that entities changed.
                 setEventsLoadedTick(t => t + 1);
             } catch (err: any) {
-                console.warn('[OSINT] Fetch failed:', err.message);
-                useTimelineStore.getState().setStreamMetric('osint', { status: 'error' });
+                console.warn('[Disasters] fetch failed:', err.message);
+                useTimelineStore.getState().setStreamMetric('disasters', { status: 'error' });
             }
         }
 
         fetchEvents();
-        // Poll every 5 minutes to match backend OSINT refresh cadence
+        // Poll every 5 minutes to match backend disaster refresh cadence.
         const pollInterval = setInterval(fetchEvents, 5 * 60 * 1000);
 
         return () => {
@@ -142,45 +145,45 @@ export function useOsintLayer(viewer: Cesium.Viewer | null) {
             clearInterval(pollInterval);
             // Keep entities — Effect 1 owns the datasource lifetime.
         };
-    }, [viewer, isOsintSourceOn]);
+    }, [viewer, isDisasterSourceOn]);
 
     // ---- Effect 3: layer visibility ----
     // Effective show = sources && visibility.
     useEffect(() => {
-        if (osintDsRef.current) {
-            osintDsRef.current.show = isOsintSourceOn && isOsintVisible;
+        if (disastersDsRef.current) {
+            disastersDsRef.current.show = isDisasterSourceOn && isDisasterVisible;
         }
-    }, [isOsintSourceOn, isOsintVisible]);
+    }, [isDisasterSourceOn, isDisasterVisible]);
 
     // ---- Effect 4: per-subtype visibility + counts ----
     // Recount + apply per-subtype visibility (eventType is the subtype here).
-    // No setInterval: OSINT entities only change on fetchEvents() (every 5
+    // No setInterval: disaster entities only change on fetchEvents() (every 5
     // minutes) or when the user toggles a filter, so we react to those
     // signals directly instead of scanning every 2s.
     const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
     const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
     useEffect(() => {
         if (!viewer) return;
-        const ds = osintDsRef.current;
+        const ds = disastersDsRef.current;
         if (!ds) return;
         const counts: Record<string, number> = {};
         ds.entities.values.forEach(e => {
             const sub = (e.properties as any)?.subtype?.getValue?.() ?? 'XX';
             counts[sub] = (counts[sub] || 0) + 1;
-            const subtypeOk = subtypeVisibility[`osint:${sub}`] !== false;
+            const subtypeOk = subtypeVisibility[`disasters:${sub}`] !== false;
             e.show = subtypeOk && (!isolatedEntityId || isolatedEntityId === e.id);
         });
-        useTimelineStore.getState().setSubtypeCounts('osint', counts);
+        useTimelineStore.getState().setSubtypeCounts('disasters', counts);
     }, [viewer, subtypeVisibility, eventsLoadedTick, isolatedEntityId]);
 
     // ---- Effect 5: source-off scene clear ----
     useEffect(() => {
-        if (isOsintSourceOn) return;
-        if (osintDsRef.current) osintDsRef.current.entities.removeAll();
-        useTimelineStore.getState().setSubtypeCounts('osint', {});
-        useTimelineStore.getState().setStreamMetric('osint', {
+        if (isDisasterSourceOn) return;
+        if (disastersDsRef.current) disastersDsRef.current.entities.removeAll();
+        useTimelineStore.getState().setSubtypeCounts('disasters', {});
+        useTimelineStore.getState().setStreamMetric('disasters', {
             count: 0,
             status: 'disabled',
         });
-    }, [isOsintSourceOn]);
+    }, [isDisasterSourceOn]);
 }

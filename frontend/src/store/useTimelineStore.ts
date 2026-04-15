@@ -24,7 +24,7 @@ interface LayerFlags {
   satelliteFootprints: boolean;
   aviation: boolean;
   maritime: boolean;
-  osint: boolean;
+  disasters: boolean;
   jamming: boolean;
   labels: boolean;
   fires: boolean;
@@ -65,8 +65,8 @@ const ALL_LAYER_SUBTYPES: Record<string, string[]> = {
   aviation: ['airliner', 'military', 'light', 'general'],
   maritime: ['cargo', 'tanker', 'passenger', 'fishing', 'military', 'unknown'],
   satellites: ['military', 'recon', 'commercial', 'civilian'],
-  conflicts: ['explosions', 'battles', 'violence'],
-  osint: ['EQ', 'TC', 'FL', 'VO', 'WF', 'DR'],
+  conflicts: ['explosions', 'battles', 'assaults', 'mass_violence', 'protests', 'threats', 'force_posture', 'coercion'],
+  disasters: ['EQ', 'TC', 'FL', 'VO', 'WF', 'DR'],
   fires: ['high', 'medium', 'low'],
   infrastructure: ['power_plant', 'power_substation', 'power_line', 'refinery', 'dam', 'desalination', 'military', 'aerodrome', 'communication_tower'],
   pipelines: ['oil', 'gas'],
@@ -103,7 +103,7 @@ export const MISSION_PRESETS: MissionPreset[] = [
     visibility: {
       aviation: true, maritime: true, satellites: true, satelliteFootprints: true,
       conflicts: true, jamming: true, airspace: true, gfw: true,
-      osint: false, fires: false, cables: false, webcams: false,
+      disasters: false, fires: false, cables: false, webcams: false,
       infrastructure: true, pipelines: false, outages: false, clouds: false,
       satellite_imagery: false, traffic: false, labels: true,
     },
@@ -111,7 +111,7 @@ export const MISSION_PRESETS: MissionPreset[] = [
       aviation: ['military'],
       maritime: ['military'],
       satellites: ['military', 'recon'],
-      conflicts: ['explosions', 'battles', 'violence'],
+      conflicts: ['explosions', 'battles', 'assaults', 'mass_violence', 'threats', 'force_posture', 'coercion'],
       jamming: ['high', 'medium', 'low'],
       airspace: ['restricted', 'danger', 'prohibited', 'alert', 'warning'],
       infrastructure: ['military', 'aerodrome'],
@@ -123,7 +123,7 @@ export const MISSION_PRESETS: MissionPreset[] = [
     visibility: {
       maritime: true, gfw: true, cables: true, outages: true,
       aviation: false, satellites: false, satelliteFootprints: false,
-      osint: false, jamming: false, fires: false, webcams: false,
+      disasters: false, jamming: false, fires: false, webcams: false,
       infrastructure: false, pipelines: false, clouds: false,
       satellite_imagery: false, traffic: false, conflicts: false,
       airspace: false, labels: true,
@@ -137,14 +137,14 @@ export const MISSION_PRESETS: MissionPreset[] = [
     name: 'Natural Hazards',
     description: 'Disasters, fires, outages, webcams',
     visibility: {
-      osint: true, fires: true, outages: true, webcams: true,
+      disasters: true, fires: true, outages: true, webcams: true,
       aviation: false, maritime: false, satellites: false, satelliteFootprints: false,
       jamming: false, cables: false, infrastructure: false, pipelines: false,
       clouds: true, satellite_imagery: true, traffic: false, conflicts: false,
       airspace: false, gfw: false, labels: true,
     },
     subtypeVisibility: onlySubtypes({
-      osint: ['EQ', 'TC', 'FL', 'VO', 'WF', 'DR'],
+      disasters: ['EQ', 'TC', 'FL', 'VO', 'WF', 'DR'],
       fires: ['high', 'medium', 'low'],
       outages: ['critical', 'warning'],
     }),
@@ -155,7 +155,7 @@ export const MISSION_PRESETS: MissionPreset[] = [
     visibility: {
       infrastructure: true, pipelines: true, cables: true,
       aviation: false, maritime: false, satellites: false, satelliteFootprints: false,
-      osint: false, jamming: false, fires: false, webcams: false,
+      disasters: false, jamming: false, fires: false, webcams: false,
       outages: true, clouds: false, satellite_imagery: false,
       traffic: false, conflicts: false, airspace: false, gfw: false, labels: true,
     },
@@ -170,7 +170,7 @@ export const MISSION_PRESETS: MissionPreset[] = [
     description: 'Everything enabled',
     visibility: {
       satellites: true, satelliteFootprints: true, aviation: true, maritime: true,
-      osint: true, jamming: true, labels: true, fires: true, cables: true,
+      disasters: true, jamming: true, labels: true, fires: true, cables: true,
       webcams: true, infrastructure: true, pipelines: true, outages: true,
       clouds: true, satellite_imagery: true, traffic: true, conflicts: true,
       airspace: true, gfw: true,
@@ -218,6 +218,7 @@ interface TimelineStore {
   setInfraViewportPct: (pct: number) => void;
   tileMode: 'google' | 'osm' | 'modis';
   clusteringEnabled: boolean;
+  satelliteRenderLimit: number | null;
   // Filter / isolation state
   prevFilterState: { visibility: LayerFlags; subtypeVisibility: Record<string, boolean> } | null;
   activeFilter: ActiveFilter | null;
@@ -226,6 +227,7 @@ interface TimelineStore {
   isolatedEntityId: string | null;
   setTileMode: (mode: 'google' | 'osm' | 'modis') => void;
   toggleClustering: () => void;
+  setSatelliteRenderLimit: (limit: number | null) => void;
   setMode: (mode: 'live' | 'playback') => void;
   setCurrentTime: (time: Date) => void;
   setSpeedMultiplier: (speed: number) => void;
@@ -248,9 +250,16 @@ interface TimelineStore {
   setIsolatedEntityId: (id: string | null) => void;
 }
 
-// Persist sources/visibility to server on change (debounced)
+type PersistedTimelineSettings = Pick<
+  TimelineStore,
+  'sources' | 'visibility' | 'subtypeVisibility' | 'tileMode' | 'showTrajectories' | 'clusteringEnabled' | 'activePreset' | 'activeIconSet' | 'satelliteRenderLimit'
+> & {
+  effectiveTileMode?: 'google' | 'osm' | 'modis';
+};
+
+// Persist control-plane state to server on change (debounced)
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
-function saveSettingsToServer(state: Pick<TimelineStore, 'sources' | 'visibility' | 'subtypeVisibility' | 'tileMode' | 'showTrajectories'>) {
+function saveSettingsToServer(state: PersistedTimelineSettings) {
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
         const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3055';
@@ -262,7 +271,12 @@ function saveSettingsToServer(state: Pick<TimelineStore, 'sources' | 'visibility
                 visibility: state.visibility,
                 subtypeVisibility: state.subtypeVisibility,
                 tileMode: state.tileMode,
+                effectiveTileMode: state.effectiveTileMode || state.tileMode,
                 showTrajectories: state.showTrajectories,
+                clusteringEnabled: state.clusteringEnabled,
+                satelliteRenderLimit: state.satelliteRenderLimit,
+                activePreset: state.activePreset,
+                activeIconSet: state.activeIconSet,
             }),
         }).catch(() => { /* ignore save errors */ });
     }, 500);
@@ -301,7 +315,7 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
     satelliteFootprints: true,
     aviation: true,
     maritime: true,
-    osint: true,
+    disasters: true,
     jamming: true,
     labels: true,
     fires: true,
@@ -326,7 +340,7 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
     satelliteFootprints: true,
     aviation: true,
     maritime: true,
-    osint: true,
+    disasters: true,
     jamming: true,
     labels: true,
     fires: true,
@@ -350,6 +364,7 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
   setInfraViewportPct: (pct) => set({ infraViewportPct: pct }),
   tileMode: 'google' as 'google' | 'osm' | 'modis',
   clusteringEnabled: true,
+  satelliteRenderLimit: 5000,
   prevFilterState: null,
   activeFilter: null,
   activePreset: null,
@@ -361,11 +376,20 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
       saveSettingsToServer(next);
       return { tileMode };
   }),
-  toggleClustering: () => set(s => ({ clusteringEnabled: !s.clusteringEnabled })),
+  toggleClustering: () => set(state => {
+      const next = { ...state, clusteringEnabled: !state.clusteringEnabled };
+      saveSettingsToServer(next);
+      return { clusteringEnabled: next.clusteringEnabled };
+  }),
+  setSatelliteRenderLimit: (limit) => set((state) => {
+      const next = { ...state, satelliteRenderLimit: limit };
+      saveSettingsToServer(next);
+      return { satelliteRenderLimit: limit };
+  }),
   streamMetrics: {
       aviation: { label: 'OpenSky Network', source: 'api.opensky-network.org', type: 'REST Polling (global)', count: 0, speed: '0 bps', status: 'connecting', poll: '90s', upstream: '5–10s ADS-B' },
       maritime: { label: 'AISStream', source: 'wss://stream.aisstream.io', type: 'WebSocket (persistent)', count: 0, speed: '0 msgs/s', status: 'connecting', poll: 'live (~3m update)', upstream: '2–10s AIS' },
-      osint: { label: 'GDACS + USGS + EONET', source: 'gdacs / usgs / nasa', type: 'REST aggregated', count: 0, speed: '-', status: 'connecting', poll: '5m', upstream: 'event-driven (~min)' },
+      disasters: { label: 'GDACS + USGS + EONET', source: 'gdacs / usgs / nasa', type: 'REST aggregated', count: 0, speed: '-', status: 'connecting', poll: '5m', upstream: 'event-driven (~min)' },
       satellites: { label: 'CelesTrak', source: 'celestrak.org', type: 'SGP4', count: 0, speed: '-', status: 'connecting', poll: '24h cache', upstream: '2–3 ×/day' },
       satelliteFootprints: { label: 'Sensor Footprints', source: 'Spectator Earth', type: 'Projected cone', count: 0, speed: '-', status: 'connecting', poll: 'on load', upstream: '24h TTL' },
       jamming:  { label: 'GNSS Jamming Hot Spots', source: 'GPSJam.org', type: 'REST (H3 CSV)', count: 0, speed: '-', status: 'connecting', poll: '6h', upstream: 'daily ADS-B analysis' },
@@ -387,7 +411,11 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
   setCurrentTime: (time) => set({ currentTime: time }),
   setSpeedMultiplier: (speedMultiplier) => set({ speedMultiplier }),
   setIsPlaying: (isPlaying) => set({ isPlaying }),
-  setShowTrajectories: (show) => set({ showTrajectories: show }),
+  setShowTrajectories: (show) => set(state => {
+      const next = { ...state, showTrajectories: show };
+      saveSettingsToServer(next);
+      return { showTrajectories: show };
+  }),
   toggleTrajectories: () => set((state) => {
       const next = { ...state, showTrajectories: !state.showTrajectories };
       saveSettingsToServer(next);
@@ -465,5 +493,9 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
       saveSettingsToServer(next);
       return { visibility: vis, subtypeVisibility: sub, activePreset: presetName, activeFilter: null, prevFilterState: null };
   }),
-  setActiveIconSet: (iconSet) => set({ activeIconSet: iconSet }),
+  setActiveIconSet: (iconSet) => set(state => {
+      const next = { ...state, activeIconSet: iconSet };
+      saveSettingsToServer(next);
+      return { activeIconSet: iconSet };
+  }),
 }));

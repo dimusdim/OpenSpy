@@ -4,6 +4,7 @@ import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
 import { getConflictIcon } from '../icons/map-icons';
+import { safeCartesianFromDegrees } from './position-utils';
 
 function getConflictColor(eventType: string): Cesium.Color {
     if (eventType.includes('Explosions') || eventType.includes('Remote violence')) return Cesium.Color.RED;
@@ -97,13 +98,15 @@ export function useConflictsLayer(viewer: Cesium.Viewer | null) {
 
                 for (const ev of events) {
                     if (ev.lat == null || ev.lng == null || isNaN(ev.lat) || isNaN(ev.lng)) continue;
+                    const position = safeCartesianFromDegrees(ev.lng, ev.lat, 50);
+                    if (!position) continue;
                     const color = getConflictColor(ev.event_type);
                     const subtypeKey = getSubtypeKey(ev.event_type);
 
                     ds.entities.add({
                         id: `conflict-${ev.id}`,
                         name: `${ev.event_type}: ${ev.country}`,
-                        position: Cesium.Cartesian3.fromDegrees(ev.lng, ev.lat, 50),
+                        position,
                         properties: new Cesium.PropertyBag({
                             layer: 'Conflict',
                             subtype: subtypeKey,

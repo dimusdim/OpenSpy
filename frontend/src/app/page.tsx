@@ -55,6 +55,21 @@ export default function Home() {
         if (typeof saved.showTrajectories === 'boolean') {
           useTimelineStore.setState({ showTrajectories: saved.showTrajectories });
         }
+        if (typeof saved.clusteringEnabled === 'boolean') {
+          useTimelineStore.setState({ clusteringEnabled: saved.clusteringEnabled });
+        }
+        if (
+          saved.satelliteRenderLimit === null ||
+          (typeof saved.satelliteRenderLimit === 'number' && Number.isInteger(saved.satelliteRenderLimit) && saved.satelliteRenderLimit >= 0)
+        ) {
+          useTimelineStore.setState({ satelliteRenderLimit: saved.satelliteRenderLimit ?? null });
+        }
+        if (typeof saved.activePreset === 'string' || saved.activePreset === null) {
+          useTimelineStore.setState({ activePreset: saved.activePreset ?? null });
+        }
+        if (saved.activeIconSet === 'default' || saved.activeIconSet === 'enhanced') {
+          useTimelineStore.setState({ activeIconSet: saved.activeIconSet });
+        }
       })
       .catch(() => { /* no saved settings, use defaults */ });
   }, []);

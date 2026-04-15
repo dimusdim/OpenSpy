@@ -251,13 +251,18 @@
           "subtypes": [
             { "id": "explosions", "title": "Explosions / Remote Violence", "enabled": true, "color": "#ef4444" },
             { "id": "battles", "title": "Battles", "enabled": true, "color": "#f97316" },
-            { "id": "violence", "title": "Violence against Civilians", "enabled": true, "color": "#eab308" }
+            { "id": "assaults", "title": "Assaults", "enabled": true, "color": "#fb7185" },
+            { "id": "mass_violence", "title": "Mass Violence", "enabled": true, "color": "#e11d48" },
+            { "id": "protests", "title": "Protests", "enabled": true, "color": "#fde047" },
+            { "id": "threats", "title": "Threats", "enabled": true, "color": "#f59e0b" },
+            { "id": "force_posture", "title": "Force Posture", "enabled": true, "color": "#a855f7" },
+            { "id": "coercion", "title": "Coercion", "enabled": true, "color": "#f97316" }
           ]
         },
         {
           "id": "disasters",
           "title": "Natural Disasters",
-          "catalog_layer": "OSINT",
+          "catalog_layer": "Disasters",
           "enabled_by_default": true,
           "sources": [
             { "source_id": "gdacs", "title": "GDACS (UN/EC Alerts)", "auth": [] },
@@ -287,7 +292,7 @@
             { "id": "medium", "title": "Medium FRP (30-100 MW)", "enabled": true, "color": "#f97316" },
             { "id": "low", "title": "Low FRP (<30 MW)", "enabled": true, "color": "#eab308" }
           ],
-          "data_overlap": "Overlaps with OSINT WF subtype. Different granularity: FIRMS = 60K individual hotspot points, OSINT WF = named wildfire events with impact zones"
+          "data_overlap": "Overlaps with Disasters WF subtype. Different granularity: FIRMS = 60K individual hotspot points, Disasters WF = named wildfire events with impact zones"
         }
       ]
     },

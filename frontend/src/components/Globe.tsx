@@ -6,7 +6,7 @@ import 'cesium/Build/Cesium/Widgets/widgets.css';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { useSatellitesLayer, satelliteFootprintMetaMap, satelliteMetaMap } from '../cesium/useSatellitesLayer';
 import { useDynamicLayers, aircraftMetaMap } from '../cesium/useDynamicLayers';
-import { useOsintLayer } from '../cesium/useOsintLayer';
+import { useDisastersLayer } from '../cesium/useDisastersLayer';
 import { useJammingLayer } from '../cesium/useJammingLayer';
 import { useBordersLayer } from '../cesium/useBordersLayer';
 import { useFiresLayer, fireMetaMap } from '../cesium/useFiresLayer';
@@ -114,7 +114,7 @@ export default function Globe() {
         );
 
         // Custom picking logic — handles both Entity API objects (satellites,
-        // maritime, osint, jamming) and BillboardCollection primitives (aircraft).
+        // maritime, disasters, jamming) and BillboardCollection primitives (aircraft).
         v.cesiumWidget.screenSpaceEventHandler.setInputAction((click: any) => {
             const pickedObject = v.scene.pick(click.position);
             if (!Cesium.defined(pickedObject)) {
@@ -239,7 +239,7 @@ export default function Globe() {
                 }
             }
 
-            // Case 2: Entity API object (satellite, vessel, osint, jamming,
+            // Case 2: Entity API object (satellite, vessel, disaster, jamming,
             // border, infrastructure, pipeline, cable, airspace, …)
             if (pickedObject.id && pickedObject.id instanceof Cesium.Entity) {
                 const entity = pickedObject.id;
@@ -301,7 +301,7 @@ export default function Globe() {
                     id: eid,
                     type: eid.startsWith('sat-') ? 'Satellite'
                         : eid.startsWith('jam-') ? 'Jamming'
-                        : eid.startsWith('gdacs-') || eid.startsWith('usgs-') || eid.startsWith('eonet-') ? 'OSINT'
+                        : eid.startsWith('gdacs-') || eid.startsWith('usgs-') || eid.startsWith('eonet-') ? 'Disaster'
                         : eid.startsWith('infra-') ? 'Infrastructure'
                         : eid.startsWith('pipe-') ? 'Pipeline'
                         : eid.startsWith('pwr-') ? 'Infrastructure'
@@ -698,7 +698,7 @@ export default function Globe() {
     // Add render layers
     useSatellitesLayer(viewer);
     useDynamicLayers(viewer);
-    useOsintLayer(viewer);
+    useDisastersLayer(viewer);
     useJammingLayer(viewer);
     useBordersLayer(viewer);
     useFiresLayer(viewer);
