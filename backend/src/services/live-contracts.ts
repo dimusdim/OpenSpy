@@ -8,106 +8,35 @@ export type PublicSourceLiveContract = {
     notes?: string;
 };
 
-const PUBLIC_SOURCE_LIVE_CONTRACTS: PublicSourceLiveContract[] = [
-    {
-        source_id: 'opensky',
-        delivery_mode: 'delta',
-        stale_after_sec: 300,
-        remove_after_sec: 300,
-    },
-    {
-        source_id: 'aisstream',
-        delivery_mode: 'delta',
-        stale_after_sec: 3600,
-        remove_after_sec: 21600,
-    },
-    {
-        source_id: 'celestrak',
-        delivery_mode: 'replace',
-        stale_after_sec: null,
-        remove_after_sec: null,
-    },
-    {
-        source_id: 'gdacs',
-        delivery_mode: 'replace',
-        stale_after_sec: null,
-        remove_after_sec: null,
-    },
-    {
-        source_id: 'usgs',
-        delivery_mode: 'replace',
-        stale_after_sec: null,
-        remove_after_sec: null,
-    },
-    {
-        source_id: 'eonet',
-        delivery_mode: 'replace',
-        stale_after_sec: null,
-        remove_after_sec: null,
-    },
-    {
-        source_id: 'firms',
-        delivery_mode: 'replace',
-        stale_after_sec: null,
-        remove_after_sec: null,
-    },
-    {
-        source_id: 'gpsjam',
-        delivery_mode: 'replace',
-        stale_after_sec: null,
-        remove_after_sec: null,
-    },
-    {
-        source_id: 'ioda',
-        delivery_mode: 'replace',
-        stale_after_sec: null,
-        remove_after_sec: null,
-    },
-    {
-        source_id: 'cloudflare_radar',
-        delivery_mode: 'replace',
-        stale_after_sec: null,
-        remove_after_sec: null,
-    },
-    {
-        source_id: 'acled',
-        delivery_mode: 'replace',
-        stale_after_sec: null,
-        remove_after_sec: null,
-    },
-    {
-        source_id: 'gdelt',
-        delivery_mode: 'replace',
-        stale_after_sec: null,
-        remove_after_sec: null,
-    },
-    {
-        source_id: 'gfw',
-        delivery_mode: 'replace',
-        stale_after_sec: null,
-        remove_after_sec: null,
-    },
-    {
-        source_id: 'openaip',
-        delivery_mode: 'replace',
-        stale_after_sec: null,
-        remove_after_sec: null,
-    },
-    {
-        source_id: 'osm_pipelines',
-        delivery_mode: 'replace',
-        stale_after_sec: null,
-        remove_after_sec: null,
-    },
-    {
-        source_id: 'telegeography',
-        delivery_mode: 'replace',
-        stale_after_sec: null,
-        remove_after_sec: null,
-    },
-];
+const LIVE_DELIVERY_MODES = new Set<LiveDeliveryMode>(['delta', 'replace', 'snapshot-only', 'none']);
 
-export function getPublicSourceLiveContract(sourceId: string | null | undefined): PublicSourceLiveContract | null {
-    if (!sourceId) return null;
-    return PUBLIC_SOURCE_LIVE_CONTRACTS.find((item) => item.source_id === sourceId) || null;
+function parseNullableSeconds(value: unknown): number | null {
+    if (value == null) return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+export function extractPublicSourceLiveContract(
+    sourceId: string | null | undefined,
+    manifest: any,
+): PublicSourceLiveContract | null {
+    const contract = manifest?.live_contract;
+    if (!sourceId || !contract || typeof contract !== 'object') return null;
+
+    const deliveryMode = contract.delivery_mode;
+    if (!LIVE_DELIVERY_MODES.has(deliveryMode)) return null;
+
+    const staleAfterSec = parseNullableSeconds(contract.stale_after_sec);
+    const removeAfterSec = parseNullableSeconds(contract.remove_after_sec);
+    const notes = typeof contract.notes === 'string' && contract.notes.trim().length > 0
+        ? contract.notes.trim()
+        : undefined;
+
+    return {
+        source_id: sourceId,
+        delivery_mode: deliveryMode,
+        stale_after_sec: staleAfterSec,
+        remove_after_sec: removeAfterSec,
+        ...(notes ? { notes } : {}),
+    };
 }

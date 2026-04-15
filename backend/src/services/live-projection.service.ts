@@ -1,6 +1,6 @@
 import { DatabaseService } from '../db/database.service';
 import type { DisasterEvent } from './live-stream.service';
-import { getPublicSourceLiveContract } from './live-contracts';
+import { extractPublicSourceLiveContract } from './live-contracts';
 import type { FireRecord } from './extended.service';
 import type { JammingZone } from './gpsjam.service';
 import type { OutageRecord } from './ioda.service';
@@ -291,8 +291,20 @@ export class LiveProjectionService {
         return result?.rows || [];
     }
 
-    private getSourceRemovalWindowSeconds(sourceId: string, fallbackSeconds: number): number {
-        const contract = getPublicSourceLiveContract(sourceId);
+    private async getSourceRemovalWindowSeconds(sourceId: string, fallbackSeconds: number): Promise<number> {
+        if (!this.database.isReady()) return fallbackSeconds;
+
+        const result = await this.database.query<{ manifest: any }>(
+            `
+                SELECT manifest
+                FROM catalog.sources
+                WHERE source_id = $1
+                LIMIT 1
+            `,
+            [sourceId],
+        );
+
+        const contract = extractPublicSourceLiveContract(sourceId, result?.rows[0]?.manifest);
         if (contract?.remove_after_sec && Number.isFinite(contract.remove_after_sec)) {
             return contract.remove_after_sec;
         }
@@ -508,7 +520,7 @@ export class LiveProjectionService {
     }
 
     async getAircraftLive(): Promise<LiveAircraftRecord[]> {
-        const rows = await this.listLiveEntities('aircraft', this.getSourceRemovalWindowSeconds('opensky', 300), 25000);
+        const rows = await this.listLiveEntities('aircraft', await this.getSourceRemovalWindowSeconds('opensky', 300), 25000);
         return rows
             .map((row) => {
                 const entityProps = stripStateHash(row.entity_properties);
@@ -541,7 +553,7 @@ export class LiveProjectionService {
     }
 
     async getVesselsLive(): Promise<LiveVesselRecord[]> {
-        const rows = await this.listLiveEntities('vessel', this.getSourceRemovalWindowSeconds('aisstream', 1800), 60000);
+        const rows = await this.listLiveEntities('vessel', await this.getSourceRemovalWindowSeconds('aisstream', 1800), 60000);
         return rows
             .map((row) => {
                 const entityProps = stripStateHash(row.entity_properties);

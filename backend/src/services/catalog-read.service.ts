@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { DatabaseService } from '../db/database.service';
-import { getPublicSourceLiveContract } from './live-contracts';
+import { extractPublicSourceLiveContract } from './live-contracts';
 
 const SOURCES_CATALOG_FILE = path.resolve(__dirname, '../../..', 'sources-catalog.json');
 const LAYER_SETTINGS_FILE = path.resolve(__dirname, '../../..', 'layer-settings-schema.json');
@@ -23,7 +23,9 @@ export class CatalogReadService {
 
     private attachSourceContract<T extends { source_id?: string | null; id?: string | null; manifest?: any }>(source: T | null): (T & { live_contract?: any }) | null {
         if (!source) return null;
-        const liveContract = getPublicSourceLiveContract(source.source_id || source.id || null);
+        const sourceId = source.source_id || source.id || null;
+        const manifest = source.manifest || source;
+        const liveContract = extractPublicSourceLiveContract(sourceId, manifest);
         return {
             ...source,
             ...(liveContract ? { live_contract: liveContract } : {}),
