@@ -3,6 +3,8 @@ import axios from 'axios';
 import WebSocket from 'ws';
 import fs from 'fs';
 import path from 'path';
+import { SourcePersistenceService } from './source-persistence.service';
+import { LiveProjectionService, type LiveAircraftRecord, type LiveVesselRecord } from './live-projection.service';
 
 // Persistent disk cache for vessel-class lookups. AISStream's ShipStaticData
 // arrives ~once every 6 minutes per vessel, so without persistence every
@@ -111,12 +113,42 @@ export interface DarkVessel {
     darkSince: number;   // unix ms
 }
 
-export class SimulatorService { // Keeping name SimulatorService for index.ts compatibility, but it uses real data
+export interface DisasterEvent {
+    id: string;
+    type: string;
+    source: string;
+    eventType: string;
+    alertLevel: string;
+    radiusKm?: number;
+    lat: number;
+    lng: number;
+    startTime: string;
+    endTime: string;
+    description: string;
+    geometry?: {
+        type: string;
+        coordinates: any;
+    } | null;
+}
+
+type DisasterFeedSnapshot = {
+    sourceId: string;
+    events: DisasterEvent[];
+    rawPayload: unknown;
+};
+
+export class LiveStreamService {
     private io: Server;
     private timer: NodeJS.Timeout | null = null;
+    private broadcastInFlight = false;
 
     private aircrafts = new Map<string, any>();
     private aircraftsDirty = false;  // true after fetchOpenSky refresh, false after broadcast
+    private vesselsDirty = false;
+    private liveAircraftCache: LiveAircraftRecord[] = [];
+    private liveVesselCache: LiveVesselRecord[] = [];
+    private lastAircraftCacheRefreshAt = 0;
+    private lastVesselCacheRefreshAt = 0;
     // Health tracking — consumed by /api/status via getHealth().
     private openSkyHealth: 'streaming' | 'error' | 'auth-missing' | 'rate-limited' = 'streaming';
     private openSkyLastError: string | null = null;
@@ -130,14 +162,17 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
     // cache (see VESSEL_TYPES_CACHE_FILE) so restarts retain learned classes.
     private vesselTypes = new Map<string, VesselStaticData>();
     private vesselTypesDirty = false;
-    private osintEvents: any[] = [];
 
     // Dark vessel detection: track last-seen time + report count per MMSI
     private vesselLastSeen = new Map<string, number>();       // MMSI → timestamp ms
     private vesselReportCount = new Map<string, number>();    // MMSI → # position reports received
     private darkVessels = new Map<string, DarkVessel>();
     
-    constructor(io: Server) {
+    constructor(
+        io: Server,
+        private readonly persistence?: SourcePersistenceService,
+        private readonly liveProjection?: LiveProjectionService,
+    ) {
         this.io = io;
     }
 
@@ -146,54 +181,14 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
         this.loadVesselTypesCache();
         this.initOpenSky();
         this.initAisStream();
-        this.initOsint();
+        this.initDisasterFeeds();
+        void this.refreshLiveCaches(true);
 
-        // Broadcast every 2 seconds, but ONLY include aircraft when OpenSky
-        // has actually updated (dirty flag). Between updates (44 out of 45
-        // ticks in a 90-second cycle), we skip the 1.1 MB aircraft array
-        // entirely — the frontend already has the positions and they haven't
-        // changed. Vessels are always included (AIS streams continuously).
-        // Jamming zones sent only on first tick (static data).
-        let tickCount = 0;
+        // DB is the source of truth; this transport cache is derived from DB
+        // snapshots and only exists to keep socket fanout cheap for the
+        // frontend.
         this.timer = setInterval(() => {
-            tickCount++;
-            const vessels = Array.from(this.vessels.values());
-
-            const maritimeCounts: Record<string, number> = {};
-            for (const v of vessels) {
-                maritimeCounts[v.type] = (maritimeCounts[v.type] || 0) + 1;
-            }
-
-            const darkVesselsArr = Array.from(this.darkVessels.values());
-
-            const payload: any = {
-                vessels,
-                darkVessels: darkVesselsArr,
-                meta: {
-                    aviationTotal: this.aircrafts.size,
-                    maritimeTotal: vessels.length,
-                    maritimeCounts,
-                    darkVesselCount: darkVesselsArr.length,
-                },
-            };
-
-
-            // Include aircraft ONLY when fresh data arrived from OpenSky.
-            // OpenSky refreshes every 90s → we broadcast the 1.1MB array once
-            // per refresh instead of every 2s tick. Clients keep old positions
-            // between refreshes (BillboardCollection persists until next update).
-            if (this.aircraftsDirty && this.aircrafts.size > 0) {
-                const aircrafts = Array.from(this.aircrafts.values());
-                payload.aircrafts = aircrafts;
-                const aviationCounts: Record<string, number> = {};
-                for (const ac of aircrafts) {
-                    aviationCounts[ac.type] = (aviationCounts[ac.type] || 0) + 1;
-                }
-                payload.meta.aviationCounts = aviationCounts;
-                this.aircraftsDirty = false;
-            }
-
-            this.io.emit('simulator-update', payload);
+            void this.broadcastLiveSnapshot();
         }, 2000);
 
         // When a new client connects, send the current full snapshot immediately —
@@ -202,36 +197,7 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
         // next OpenSky refresh (up to 90s). Also prevents frontend reconciliation
         // from removing dark vessels it already tracks.
         this.io.on('connection', (socket) => {
-            const aircrafts = this.aircrafts.size > 0 ? Array.from(this.aircrafts.values()) : undefined;
-            const vessels = Array.from(this.vessels.values());
-            const darkVesselsArr = Array.from(this.darkVessels.values());
-
-            const aviationCounts: Record<string, number> = {};
-            if (aircrafts) {
-                for (const ac of aircrafts) {
-                    aviationCounts[ac.type] = (aviationCounts[ac.type] || 0) + 1;
-                }
-            }
-            const maritimeCounts: Record<string, number> = {};
-            for (const v of vessels) {
-                maritimeCounts[v.type] = (maritimeCounts[v.type] || 0) + 1;
-            }
-
-            const payload: any = {
-                vessels,
-                darkVessels: darkVesselsArr,
-                meta: {
-                    aviationTotal: aircrafts?.length ?? 0,
-                    maritimeTotal: vessels.length,
-                    maritimeCounts,
-                    darkVesselCount: darkVesselsArr.length,
-                },
-            };
-            if (aircrafts) {
-                payload.aircrafts = aircrafts;
-                payload.meta.aviationCounts = aviationCounts;
-            }
-            socket.emit('simulator-update', payload);
+            void this.emitInitialSnapshot(socket);
         });
 
         // Periodic disk flush of the vessel-type cache (only when dirty).
@@ -240,6 +206,102 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
         // Dark vessel detection: every 30s, scan vesselLastSeen for vessels
         // that haven't reported in >1h despite having had >3 position reports.
         setInterval(() => this.detectDarkVessels(), 30_000);
+    }
+
+    private countBySubtype(items: Array<{ type?: string | null }>): Record<string, number> {
+        const counts: Record<string, number> = {};
+        for (const item of items) {
+            const subtype = item.type || 'unknown';
+            counts[subtype] = (counts[subtype] || 0) + 1;
+        }
+        return counts;
+    }
+
+    private async refreshLiveCaches(force = false): Promise<void> {
+        if (!this.liveProjection?.isReady()) return;
+
+        const now = Date.now();
+
+        if (
+            force ||
+            this.aircraftsDirty ||
+            this.liveAircraftCache.length === 0 ||
+            now - this.lastAircraftCacheRefreshAt >= 30_000
+        ) {
+            this.liveAircraftCache = await this.liveProjection.getAircraftLive();
+            this.lastAircraftCacheRefreshAt = now;
+            this.aircraftsDirty = false;
+        }
+
+        if (this.persistence) {
+            await this.persistence.flushPendingVesselPositions();
+        }
+        if (
+            force ||
+            this.vesselsDirty ||
+            this.liveVesselCache.length === 0 ||
+            now - this.lastVesselCacheRefreshAt >= 30_000
+        ) {
+            this.liveVesselCache = await this.liveProjection.getVesselsLive();
+            this.lastVesselCacheRefreshAt = now;
+            this.vesselsDirty = false;
+        }
+    }
+
+    private async broadcastLiveSnapshot(): Promise<void> {
+        if (this.broadcastInFlight) return;
+        this.broadcastInFlight = true;
+
+        const shouldIncludeAircraft = this.aircraftsDirty || this.liveAircraftCache.length === 0;
+
+        try {
+            await this.refreshLiveCaches(false);
+
+            const darkVesselsArr = Array.from(this.darkVessels.values());
+            const payload: any = {
+                vessels: this.liveVesselCache,
+                darkVessels: darkVesselsArr,
+                meta: {
+                    aviationTotal: this.liveAircraftCache.length,
+                    maritimeTotal: this.liveVesselCache.length,
+                    aviationCounts: this.countBySubtype(this.liveAircraftCache),
+                    maritimeCounts: this.countBySubtype(this.liveVesselCache),
+                    darkVesselCount: darkVesselsArr.length,
+                },
+            };
+
+            if (shouldIncludeAircraft) {
+                payload.aircrafts = this.liveAircraftCache;
+            }
+
+            this.io.emit('live-update', payload);
+        } catch (err: any) {
+            console.warn('[LiveSocket] failed to build DB-backed live snapshot:', err?.message || err);
+        } finally {
+            this.broadcastInFlight = false;
+        }
+    }
+
+    private async emitInitialSnapshot(socket: any): Promise<void> {
+        try {
+            await this.refreshLiveCaches(true);
+            const darkVesselsArr = Array.from(this.darkVessels.values());
+            const payload: any = {
+                vessels: this.liveVesselCache,
+                darkVessels: darkVesselsArr,
+                meta: {
+                    aviationTotal: this.liveAircraftCache.length,
+                    maritimeTotal: this.liveVesselCache.length,
+                    aviationCounts: this.countBySubtype(this.liveAircraftCache),
+                    maritimeCounts: this.countBySubtype(this.liveVesselCache),
+                    darkVesselCount: darkVesselsArr.length,
+                },
+            };
+            payload.aircrafts = this.liveAircraftCache;
+            socket.emit('live-update', payload);
+        } catch (err: any) {
+            console.warn('[LiveSocket] failed to send initial DB-backed snapshot:', err?.message || err);
+        }
     }
 
     private loadVesselTypesCache() {
@@ -436,9 +498,11 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
                             origin,
                             lat,
                             lng,
+                            altMeters: alt,
                             alt: alt * 3.28084,
                             heading: heading || 0,
                             type: classifyAircraft(callsign, alt, velocity),
+                            speedMps: velocity ?? null,
                             speed: velocity ? velocity * 3.6 : 0,
                             // New fields from state vector
                             onGround: s[8] === true,
@@ -448,8 +512,14 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
                         });
                     });
                     
-                    this.aircrafts = newAircrafts;
-                    this.aircraftsDirty = true;
+                    try {
+                        await this.persistence?.persistAircraftPositions(Array.from(newAircrafts.values()));
+                        this.aircrafts = newAircrafts;
+                        this.aircraftsDirty = true;
+                    } catch (err: any) {
+                        console.warn('[OpenSky] failed to persist aircraft positions:', err?.message || err);
+                        this.aircrafts = newAircrafts;
+                    }
                     console.log(`[OpenSky] Updated ${this.aircrafts.size} real aircraft.`);
                 }
             } catch (err: any) {
@@ -561,8 +631,8 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
 
                          // Per-vessel throttle: skip if updated less than 20s ago
                          const now = Date.now();
-                         const lastSeen = this.vesselLastSeen.get(id);
-                         if (lastSeen && now - lastSeen < SimulatorService.AIS_VESSEL_THROTTLE_MS) return;
+                        const lastSeen = this.vesselLastSeen.get(id);
+                         if (lastSeen && now - lastSeen < LiveStreamService.AIS_VESSEL_THROTTLE_MS) return;
 
                          const cached = this.vesselTypes.get(id);
                          this.vessels.set(id, {
@@ -586,6 +656,27 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
                              length: cached?.length || null,
                              beam: cached?.beam || null,
                          });
+                         this.persistence?.queueVesselPosition({
+                             id,
+                             lat: report.Latitude,
+                             lng: report.Longitude,
+                             heading: report.TrueHeading || 0,
+                             type: cached?.cls || 'unknown',
+                             speedKnots: report.Sog ?? null,
+                             navigationStatus: mapNavStatus(report.NavigationalStatus),
+                             rateOfTurn: report.RateOfTurn ?? null,
+                             cog: report.Cog ?? null,
+                             name: cached?.name || null,
+                             callSign: cached?.callSign || null,
+                             imo: cached?.imo || null,
+                             destination: cached?.destination || null,
+                             eta: cached?.eta || null,
+                             draught: cached?.draught ?? null,
+                             length: cached?.length ?? null,
+                             beam: cached?.beam ?? null,
+                             observedAt: new Date().toISOString(),
+                         });
+                         this.vesselsDirty = true;
 
                          this.vesselLastSeen.set(id, now);
                          this.vesselReportCount.set(id, (this.vesselReportCount.get(id) || 0) + 1);
@@ -648,29 +739,55 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
         connectWS();
     }
 
-    private initOsint() {
-        // OSINT layer aggregates three free open feeds. We refresh them on
+    private initDisasterFeeds() {
+        // Derived disaster view over three real sources. We refresh them on
         // separate intervals because their upstream cadences differ wildly:
         //   GDACS  — disaster bulletins,        ~5 min     (robots.txt 1/60s)
         //   USGS   — earthquakes >M2.5 / week,  ~5 min     (no rate limit doc)
         //   EONET  — NASA natural events,       ~15 min    (curated, slow)
-        // All three return GeoJSON-ish feature collections. We normalise them
-        // into a single shape with `source`/`eventType`/`alertLevel`/coords.
+        // All three return GeoJSON-ish feature collections. We normalize them
+        // into one derived disaster view keyed by source_id in storage.
         const fetchAll = async () => {
-            const merged: any[] = [];
+            const merged: DisasterEvent[] = [];
+            const rawPayloads: Array<{ source_id: string; payload: unknown; metadata: Record<string, any> }> = [];
             const [gdacs, usgs, eonet] = await Promise.allSettled([
                 this.fetchGdacs(),
                 this.fetchUsgs(),
                 this.fetchEonet(),
             ]);
-            if (gdacs.status === 'fulfilled') merged.push(...gdacs.value);
-            if (usgs.status === 'fulfilled')  merged.push(...usgs.value);
-            if (eonet.status === 'fulfilled') merged.push(...eonet.value);
-            this.osintEvents = merged;
-            console.log(`[OSINT] Aggregated ${merged.length} events ` +
-                        `(GDACS=${gdacs.status === 'fulfilled' ? gdacs.value.length : 'err'}, ` +
-                        `USGS=${usgs.status === 'fulfilled' ? usgs.value.length : 'err'}, ` +
-                        `EONET=${eonet.status === 'fulfilled' ? eonet.value.length : 'err'})`);
+            if (gdacs.status === 'fulfilled') {
+                merged.push(...gdacs.value.events);
+                rawPayloads.push({
+                    source_id: gdacs.value.sourceId,
+                    payload: gdacs.value.rawPayload,
+                    metadata: { format: 'json', payloadKind: 'upstream_response' },
+                });
+            }
+            if (usgs.status === 'fulfilled')  {
+                merged.push(...usgs.value.events);
+                rawPayloads.push({
+                    source_id: usgs.value.sourceId,
+                    payload: usgs.value.rawPayload,
+                    metadata: { format: 'json', payloadKind: 'upstream_response' },
+                });
+            }
+            if (eonet.status === 'fulfilled') {
+                merged.push(...eonet.value.events);
+                rawPayloads.push({
+                    source_id: eonet.value.sourceId,
+                    payload: eonet.value.rawPayload,
+                    metadata: { format: 'json', payloadKind: 'upstream_response' },
+                });
+            }
+            try {
+                await this.persistence?.persistDisasterEvents(merged, { rawPayloads });
+            } catch (err: any) {
+                console.warn('[Disasters] failed to persist snapshot:', err?.message || err);
+            }
+            console.log(`[Disasters] Aggregated ${merged.length} events ` +
+                        `(GDACS=${gdacs.status === 'fulfilled' ? gdacs.value.events.length : 'err'}, ` +
+                        `USGS=${usgs.status === 'fulfilled' ? usgs.value.events.length : 'err'}, ` +
+                        `EONET=${eonet.status === 'fulfilled' ? eonet.value.events.length : 'err'})`);
         };
 
         fetchAll();
@@ -680,9 +797,25 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
         setInterval(fetchAll, 300_000);
     }
 
-    private async fetchGdacs(): Promise<any[]> {
+    private extractPointLikeCoordinates(geometry: any): [number, number] | null {
+        if (!geometry?.coordinates) return null;
+
+        if (
+            geometry.type === 'Point' &&
+            Array.isArray(geometry.coordinates) &&
+            geometry.coordinates.length >= 2
+        ) {
+            return [Number(geometry.coordinates[0]), Number(geometry.coordinates[1])];
+        }
+
+        const flat = (geometry.coordinates.flat(Infinity) as unknown[]).filter((value) => typeof value === 'number');
+        if (flat.length < 2) return null;
+        return [Number(flat[0]), Number(flat[1])];
+    }
+
+    private async fetchGdacs(): Promise<DisasterFeedSnapshot> {
         const res = await axios.get('https://www.gdacs.org/gdacsapi/api/events/geteventlist/MAP', { timeout: 15000 });
-        if (!res.data?.features) return [];
+        if (!res.data?.features) return { sourceId: 'gdacs', events: [], rawPayload: res.data ?? null };
         // Approximate impact radius by event type (km). GDACS's per-event
         // severity endpoint has precise values but requires N individual
         // requests — too expensive. These fixed radii give a reasonable
@@ -690,30 +823,40 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
         const defaultRadii: Record<string, number> = {
             EQ: 100, TC: 300, FL: 150, VO: 50, WF: 80, DR: 200,
         };
-        return res.data.features.map((f: any) => {
+        const out: DisasterEvent[] = [];
+        for (const f of res.data.features) {
+            const coords = this.extractPointLikeCoordinates(f.geometry);
+            if (!coords) continue;
             const et = (f.properties.eventtype || 'XX').toUpperCase();
-            return {
+            const [lng, lat] = coords;
+            out.push({
                 id: `gdacs-${f.properties.eventid}`,
                 type: 'strike',
                 source: 'GDACS',
                 eventType: et,
                 alertLevel: f.properties.alertlevel || 'Green',
                 radiusKm: defaultRadii[et] || 100,
-                lat: f.geometry.coordinates[1],
-                lng: f.geometry.coordinates[0],
+                lat,
+                lng,
                 startTime: new Date(f.properties.fromdate).toISOString(),
                 endTime: new Date(Date.now() + 86400000).toISOString(),
                 description: f.properties.name,
-            };
-        });
+                geometry: f.geometry || null,
+            });
+        }
+        return {
+            sourceId: 'gdacs',
+            events: out,
+            rawPayload: res.data,
+        };
     }
 
-    private async fetchUsgs(): Promise<any[]> {
+    private async fetchUsgs(): Promise<DisasterFeedSnapshot> {
         // Past-week M2.5+ earthquakes, GeoJSON, no auth needed.
         // https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_week.geojson
         const res = await axios.get('https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_week.geojson', { timeout: 15000 });
-        if (!res.data?.features) return [];
-        return res.data.features.map((f: any) => {
+        if (!res.data?.features) return { sourceId: 'usgs', events: [], rawPayload: res.data ?? null };
+        const events = res.data.features.map((f: any) => {
             const mag = f.properties.mag ?? 0;
             // Map magnitude to GDACS-style alert level for shared colour code:
             //   M < 5.5 → Green, 5.5–6.5 → Orange, ≥ 6.5 → Red
@@ -733,15 +876,21 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
                 startTime: new Date(f.properties.time).toISOString(),
                 endTime: new Date(f.properties.time + 7 * 86400_000).toISOString(),
                 description: `M${mag.toFixed(1)} — ${f.properties.place || 'unknown location'}`,
+                geometry: f.geometry || null,
             };
         });
+        return {
+            sourceId: 'usgs',
+            events,
+            rawPayload: res.data,
+        };
     }
 
-    private async fetchEonet(): Promise<any[]> {
+    private async fetchEonet(): Promise<DisasterFeedSnapshot> {
         // NASA EONET — wildfires, volcanoes, severe storms, icebergs etc.
         // https://eonet.gsfc.nasa.gov/api/v3/events?status=open
         const res = await axios.get('https://eonet.gsfc.nasa.gov/api/v3/events?status=open&limit=200', { timeout: 15000 });
-        if (!res.data?.events) return [];
+        if (!res.data?.events) return { sourceId: 'eonet', events: [], rawPayload: res.data ?? null };
         // EONET categories → GDACS-style codes (best effort)
         const catToCode: Record<string, string> = {
             wildfires: 'WF',
@@ -758,22 +907,14 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
             waterColor: 'XX',
             tempExtremes: 'XX',
         };
-        const out: any[] = [];
+        const out: DisasterEvent[] = [];
         for (const ev of res.data.events) {
             const cat = ev.categories?.[0]?.id || '';
             const code = catToCode[cat] || 'XX';
             const lastGeom = ev.geometry?.[ev.geometry.length - 1];
-            if (!lastGeom?.coordinates) continue;
-            // EONET geometry coords are [lng, lat] for Point, but Polygon for some events.
-            let lng: number, lat: number;
-            if (lastGeom.type === 'Point') {
-                [lng, lat] = lastGeom.coordinates;
-            } else {
-                // Take centroid-ish first vertex of polygon
-                const flat = (lastGeom.coordinates.flat(Infinity) as number[]);
-                if (flat.length < 2) continue;
-                lng = flat[0]; lat = flat[1];
-            }
+            const coords = this.extractPointLikeCoordinates(lastGeom);
+            if (!coords) continue;
+            const [lng, lat] = coords;
             out.push({
                 id: `eonet-${ev.id}`,
                 type: 'strike',
@@ -785,13 +926,14 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
                 startTime: lastGeom.date || new Date().toISOString(),
                 endTime: new Date(Date.now() + 7 * 86400_000).toISOString(),
                 description: ev.title,
+                geometry: lastGeom || null,
             });
         }
-        return out;
-    }
-
-    getOsintEvents() {
-        return this.osintEvents;
+        return {
+            sourceId: 'eonet',
+            events: out,
+            rawPayload: res.data,
+        };
     }
 
     // Real health state — consumed by /api/status so the frontend can
@@ -802,13 +944,13 @@ export class SimulatorService { // Keeping name SimulatorService for index.ts co
             aviation: {
                 status: this.openSkyHealth,
                 note: this.openSkyLastError || undefined,
-                count: this.aircrafts.size,
+                count: this.liveAircraftCache.length,
                 nextRetry: this.openSkyNextRetry || undefined,
             },
             maritime: {
                 status: this.aisStreamHealth,
                 note: this.aisStreamLastError || undefined,
-                count: this.vessels.size,
+                count: this.liveVesselCache.length,
                 nextRetry: this.aisStreamNextRetry || undefined,
             },
         };

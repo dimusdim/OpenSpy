@@ -19,7 +19,7 @@ process.on('uncaughtException', (err) => {
 });
 import { SatelliteService } from './services/satellite.service';
 import { SpectatorService } from './services/spectator.service';
-import { SimulatorService } from './services/adsb.service';
+import { LiveStreamService } from './services/live-stream.service';
 import { ExtendedDataService } from './services/extended.service';
 import { GPSJamService } from './services/gpsjam.service';
 import { WebcamsService } from './services/webcams.service';
@@ -37,6 +37,18 @@ import { CloudflareService } from './services/cloudflare.service';
 import { WindyService } from './services/windy.service';
 import { GDELTService } from './services/gdelt.service';
 import { setupAIImageRoutes } from './routes/ai-image';
+import { databaseService } from './db/database.service';
+import { ViewStateRepository } from './repositories/view-state.repository';
+import { SelectionRepository } from './repositories/selection.repository';
+import { CatalogBootstrapService } from './services/catalog-bootstrap.service';
+import { CatalogReadService } from './services/catalog-read.service';
+import { ViewControlService } from './services/view-control.service';
+import { RuntimeStateRepository } from './repositories/runtime-state.repository';
+import { SourcePersistenceService } from './services/source-persistence.service';
+import { EventQueryService } from './services/event-query.service';
+import { EntityQueryService } from './services/entity-query.service';
+import { AssetQueryService } from './services/asset-query.service';
+import { LiveProjectionService } from './services/live-projection.service';
 
 // CORS origin whitelist — comma-separated list in ALLOWED_ORIGINS env var.
 // Defaults to localhost dev ports if unset.
@@ -63,27 +75,281 @@ app.use(express.json({ limit: '50mb' }));
 // ---------------------------------------------------------------------------
 import path from 'path';
 import fs from 'fs';
-const SETTINGS_FILE = path.resolve(__dirname, '../data/user-settings.json');
+const viewStateRepository = new ViewStateRepository(databaseService);
+const selectionRepository = new SelectionRepository(databaseService);
+const catalogBootstrapService = new CatalogBootstrapService(databaseService);
+const catalogReadService = new CatalogReadService(databaseService);
+const viewControlService = new ViewControlService(viewStateRepository, catalogReadService);
+const runtimeStateRepository = new RuntimeStateRepository(databaseService);
+const eventQueryService = new EventQueryService(databaseService);
+const entityQueryService = new EntityQueryService(databaseService);
+const assetQueryService = new AssetQueryService(databaseService);
+const liveProjectionService = new LiveProjectionService(databaseService);
 
-app.get('/api/settings', (_req, res) => {
+async function handleGetViewState(_req: express.Request, res: express.Response) {
     try {
-        if (fs.existsSync(SETTINGS_FILE)) {
-            const data = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8'));
-            res.json(data);
-        } else {
-            res.json({});
-        }
-    } catch {
+        const data = await viewStateRepository.loadDefaultViewState();
+        res.json(data);
+    } catch (err) {
+        console.error('[settings] failed to load persisted view state:', err);
         res.json({});
+    }
+}
+
+async function handleSaveViewState(req: express.Request, res: express.Response) {
+    try {
+        await viewStateRepository.saveDefaultViewState(req.body ?? {});
+        res.json({ ok: true });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+}
+
+app.get('/api/settings', handleGetViewState);
+app.post('/api/settings', handleSaveViewState);
+app.get('/api/view-state', handleGetViewState);
+app.post('/api/view-state', handleSaveViewState);
+
+app.get('/api/catalog/sources', async (_req, res) => {
+    try {
+        res.json(await catalogReadService.listSources());
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
     }
 });
 
-app.post('/api/settings', (req, res) => {
+app.get('/api/catalog/sources/:sourceId', async (req, res) => {
     try {
-        const dir = path.dirname(SETTINGS_FILE);
-        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-        fs.writeFileSync(SETTINGS_FILE, JSON.stringify(req.body, null, 2));
-        res.json({ ok: true });
+        const source = await catalogReadService.getSource(req.params.sourceId);
+        if (!source) {
+            res.status(404).json({ error: 'Source not found' });
+            return;
+        }
+        res.json(source);
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/catalog/layers', async (_req, res) => {
+    try {
+        res.json(await catalogReadService.listLayers());
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/catalog/layers/:layerId', async (req, res) => {
+    try {
+        const layer = await catalogReadService.getLayer(req.params.layerId);
+        if (!layer) {
+            res.status(404).json({ error: 'Layer not found' });
+            return;
+        }
+        res.json(layer);
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/catalog/ui-taxonomy', async (_req, res) => {
+    try {
+        res.json(await catalogReadService.getUiTaxonomy());
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/catalog/ui-taxonomy/node', async (req, res) => {
+    try {
+        const requestedId = String(req.query.id || '').trim();
+        if (!requestedId) {
+            res.status(400).json({ error: 'Missing taxonomy node id' });
+            return;
+        }
+        const node = await catalogReadService.getUiTaxonomyNode(requestedId);
+        if (!node) {
+            res.status(404).json({ error: 'Taxonomy node not found' });
+            return;
+        }
+        res.json(node);
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/catalog/ui-taxonomy/:nodeId', async (req, res) => {
+    try {
+        const node = await catalogReadService.getUiTaxonomyNode(req.params.nodeId);
+        if (!node) {
+            res.status(404).json({ error: 'Taxonomy node not found' });
+            return;
+        }
+        res.json(node);
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/legend/tree', async (_req, res) => {
+    try {
+        res.json(await catalogReadService.getUiTaxonomy());
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/legend/node', async (req, res) => {
+    try {
+        const requestedId = String(req.query.id || '').trim();
+        if (!requestedId) {
+            res.status(400).json({ error: 'Missing legend node id' });
+            return;
+        }
+        const node = await catalogReadService.getUiTaxonomyNode(requestedId);
+        if (!node) {
+            res.status(404).json({ error: 'Legend node not found' });
+            return;
+        }
+        res.json(node);
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/view-state/patch', async (req, res) => {
+    try {
+        const patch = req.body?.patch && typeof req.body.patch === 'object'
+            ? req.body.patch
+            : (req.body && typeof req.body === 'object' ? req.body : null);
+        if (!patch) {
+            res.status(400).json({ error: 'Missing patch object' });
+            return;
+        }
+        const state = await viewControlService.patchState(patch);
+        res.json({ updated: true, state });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/view-state/legend-node-state', async (req, res) => {
+    try {
+        const nodeId = String(req.body?.nodeId || req.body?.node_id || '').trim();
+        const enabled = Boolean(req.body?.enabled);
+        const target = req.body?.target === 'sources' ? 'sources' : 'visibility';
+        if (!nodeId) {
+            res.status(400).json({ error: 'Missing nodeId' });
+            return;
+        }
+        const state = await viewControlService.setLegendNodeState(nodeId, enabled, target);
+        res.json({ updated: true, nodeId, target, state });
+    } catch (err: any) {
+        if (/not found/i.test(err.message || '')) {
+            res.status(404).json({ error: err.message });
+            return;
+        }
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/selections', async (req, res) => {
+    try {
+        const selection = await selectionRepository.saveSelection({
+            selectionId: typeof req.body?.selectionId === 'string' ? req.body.selectionId : undefined,
+            layerId: typeof req.body?.layerId === 'string' ? req.body.layerId : null,
+            selectionMode: typeof req.body?.selectionMode === 'string' ? req.body.selectionMode : 'filter',
+            predicate: req.body?.predicate && typeof req.body.predicate === 'object' ? req.body.predicate : {},
+            geometryJson: req.body?.geometry && typeof req.body.geometry === 'object' ? req.body.geometry : null,
+            metadata: req.body?.metadata && typeof req.body.metadata === 'object' ? req.body.metadata : {},
+        });
+        res.json({
+            selection_id: selection.selection_id,
+            layer: selection.layer_id,
+            query_spec: selection.predicate,
+            geometry: selection.geometry_json,
+            metadata: selection.metadata,
+        });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/selections/:selectionId', async (req, res) => {
+    try {
+        const selection = await selectionRepository.getSelection(req.params.selectionId);
+        if (!selection) {
+            res.status(404).json({ error: 'Selection not found' });
+            return;
+        }
+        res.json({
+            selection_id: selection.selection_id,
+            layer: selection.layer_id,
+            query_spec: selection.predicate,
+            geometry: selection.geometry_json,
+            metadata: selection.metadata,
+        });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/selections/:selectionId/patch', async (req, res) => {
+    try {
+        const current = await selectionRepository.getSelection(req.params.selectionId);
+        if (!current) {
+            res.status(404).json({ error: 'Selection not found' });
+            return;
+        }
+        const selection = await selectionRepository.saveSelection({
+            selectionId: current.selection_id,
+            layerId: typeof req.body?.layerId === 'string' ? req.body.layerId : current.layer_id,
+            selectionMode: typeof req.body?.selectionMode === 'string' ? req.body.selectionMode : current.selection_mode,
+            predicate: req.body?.predicate && typeof req.body.predicate === 'object'
+                ? { ...(current.predicate || {}), ...req.body.predicate }
+                : current.predicate,
+            geometryJson: req.body?.geometry && typeof req.body.geometry === 'object' ? req.body.geometry : current.geometry_json,
+            metadata: req.body?.metadata && typeof req.body.metadata === 'object'
+                ? { ...(current.metadata || {}), ...req.body.metadata }
+                : current.metadata,
+        });
+        res.json({
+            selection_id: selection.selection_id,
+            layer: selection.layer_id,
+            query_spec: selection.predicate,
+            geometry: selection.geometry_json,
+            metadata: selection.metadata,
+        });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/map/apply-selection', async (req, res) => {
+    try {
+        const layer = String(req.body?.layer || '').trim();
+        const selectionId = String(req.body?.selectionId || req.body?.selection_id || '').trim();
+        const mode = ['replace', 'append', 'exclude', 'only'].includes(req.body?.mode) ? req.body.mode : 'only';
+        if (!layer || !selectionId) {
+            res.status(400).json({ error: 'Missing layer or selectionId' });
+            return;
+        }
+        const state = await viewControlService.applySelection(layer, selectionId, mode);
+        res.json({ applied: true, layer, selection_id: selectionId, mode, state });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/map/clear-selection', async (req, res) => {
+    try {
+        const layer = String(req.body?.layer || '').trim();
+        if (!layer) {
+            res.status(400).json({ error: 'Missing layer' });
+            return;
+        }
+        const state = await viewControlService.clearSelection(layer);
+        res.json({ cleared: true, layer, state });
     } catch (err: any) {
         res.status(500).json({ error: err.message });
     }
@@ -235,6 +501,23 @@ function parseBbox(bbox: string | undefined, order: BboxOrder = 'swne'): [number
     return parts as [number, number, number, number];
 }
 
+function normalizeLayerId(layerId: string | undefined): string | undefined {
+    return layerId;
+}
+
+function parsePositiveLimit(value: string | undefined, fallback = 200): number {
+    if (!value) return fallback;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+    return Math.max(1, Math.min(5000, Math.trunc(parsed)));
+}
+
+function parseIsoDateOrNull(value: string | undefined): string | null {
+    if (!value) return null;
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
@@ -247,64 +530,442 @@ const io = new Server(server, {
 // /api/satellites so the frontend can draw projected footprint cones
 // sized to real swath widths. Passed into SatelliteService so the two
 // share state and avoid a duplicate catalog fetch.
+const sourcePersistenceService = new SourcePersistenceService(databaseService);
 const spectatorService = new SpectatorService();
-const satelliteService = new SatelliteService(spectatorService);
-const simulatorService = new SimulatorService(io);
-const extendedService = new ExtendedDataService();
-const gpsJamService = new GPSJamService();
+const satelliteService = new SatelliteService(spectatorService, sourcePersistenceService);
+const liveStreamService = new LiveStreamService(io, sourcePersistenceService, liveProjectionService);
+const extendedService = new ExtendedDataService(sourcePersistenceService);
+const gpsJamService = new GPSJamService(sourcePersistenceService);
 const windyService = new WindyService();
 const webcamsService = new WebcamsService(windyService);
-const infrastructureService = new InfrastructureService();
+const infrastructureService = new InfrastructureService(sourcePersistenceService);
 // Overture Maps (opt-in via OVERTURE_ENABLED=true). When enabled, its
 // DuckDB+httpfs queries run in parallel with Overpass and the two
 // result sets are merged + deduped per request. Disabled by default
 // until we've validated the category/class mapping against live
 // Overture data; flipping it off never degrades Overpass behaviour.
 const overtureService = new OvertureService();
-const iodaService = new IODAService();
+const iodaService = new IODAService(sourcePersistenceService);
 const oilPricesService = new OilPricesService();
 const energyService = new EnergyService();
 const tomtomService = new TomTomService();
 const hereTrafficService = new HereTrafficService();
-const acledService = new ACLEDService();
-const gdeltService = new GDELTService();
-const airspaceService = new AirspaceService();
-const gfwService = new GFWService();
-const cloudflareService = new CloudflareService();
+const acledService = new ACLEDService(sourcePersistenceService);
+const gdeltService = new GDELTService(sourcePersistenceService);
+const airspaceService = new AirspaceService(sourcePersistenceService);
+const gfwService = new GFWService(sourcePersistenceService);
+const cloudflareService = new CloudflareService(sourcePersistenceService);
 
 // AI Vision — image generation via OpenRouter Gemini Flash Image
 setupAIImageRoutes(app);
 
-app.get('/api/satellites', (req, res) => {
-    res.json(satelliteService.getSatellites());
+app.get('/api/satellites', async (_req, res) => {
+    if (!liveProjectionService.isReady()) {
+        res.status(503).json({ error: 'Query database is not ready' });
+        return;
+    }
+    try {
+        const rawLimit = typeof _req.query.limit === 'string' ? _req.query.limit.trim().toLowerCase() : '';
+        let limit: number | null | undefined = 5000;
+        if (rawLimit === 'all' || rawLimit === '0') {
+            limit = null;
+        } else if (rawLimit) {
+            const parsed = Number(rawLimit);
+            if (!Number.isInteger(parsed) || parsed < 0) {
+                res.status(400).json({ error: 'Invalid limit (expected positive integer or "all")' });
+                return;
+            }
+            limit = parsed;
+        }
+        res.json(await liveProjectionService.getSatellites(limit));
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.get('/api/satellites/recon', (req, res) => {
-    res.json(satelliteService.getReconSatellites());
+app.get('/api/satellites/recon', async (req, res) => {
+    if (!liveProjectionService.isReady()) {
+        res.status(503).json({ error: 'Query database is not ready' });
+        return;
+    }
+    try {
+        const rawLimit = typeof req.query.limit === 'string' ? req.query.limit.trim().toLowerCase() : '';
+        let limit: number | null | undefined = 5000;
+        if (rawLimit === 'all' || rawLimit === '0') {
+            limit = null;
+        } else if (rawLimit) {
+            const parsed = Number(rawLimit);
+            if (!Number.isInteger(parsed) || parsed < 0) {
+                res.status(400).json({ error: 'Invalid limit (expected positive integer or "all")' });
+                return;
+            }
+            limit = parsed;
+        }
+        res.json(await liveProjectionService.getReconSatellites(limit));
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.get('/api/osint', (req, res) => {
-    res.json(simulatorService.getOsintEvents());
+app.get('/api/disasters', async (_req, res) => {
+    if (!liveProjectionService.isReady()) {
+        res.status(503).json({ error: 'Query database is not ready' });
+        return;
+    }
+    try {
+        res.json(await liveProjectionService.getDisasterEvents());
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.get('/api/cables', (_req, res) => {
-    res.json(extendedService.getCables() ?? { type: 'FeatureCollection', features: [] });
+app.get('/api/replay/events', async (req, res) => {
+    if (!eventQueryService.isReady()) {
+        res.status(503).json({ error: 'Replay database is not ready' });
+        return;
+    }
+
+    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    if (req.query.bbox && !bbox) {
+        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        return;
+    }
+
+    const from = parseIsoDateOrNull(req.query.from as string | undefined);
+    const to = parseIsoDateOrNull(req.query.to as string | undefined);
+    if ((req.query.from && !from) || (req.query.to && !to)) {
+        res.status(400).json({ error: 'Invalid from/to timestamp' });
+        return;
+    }
+
+    try {
+        const filters = {
+            layerId: normalizeLayerId((req.query.layerId as string | undefined) || (req.query.layer as string | undefined)),
+            sourceId: req.query.sourceId as string | undefined,
+            eventId: req.query.eventId as string | undefined,
+            eventKind: req.query.eventKind as string | undefined,
+            subtype: req.query.subtype as string | undefined,
+            from: from || undefined,
+            to: to || undefined,
+            bbox: bbox || undefined,
+            limit: parsePositiveLimit(req.query.limit as string | undefined, 200),
+        };
+        const [items, summary] = await Promise.all([
+            eventQueryService.listSnapshots(filters),
+            eventQueryService.summarizeSnapshots(filters),
+        ]);
+        res.json({
+            mode: 'history',
+            filters,
+            summary,
+            items,
+        });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.get('/api/fires', (_req, res) => {
-    res.json(extendedService.getFires());
+app.get('/api/replay/events/:eventId/snapshots', async (req, res) => {
+    if (!eventQueryService.isReady()) {
+        res.status(503).json({ error: 'Replay database is not ready' });
+        return;
+    }
+
+    try {
+        const items = await eventQueryService.listSnapshots({
+            eventId: req.params.eventId,
+            limit: parsePositiveLimit(req.query.limit as string | undefined, 500),
+        });
+        res.json({
+            mode: 'event-history',
+            eventId: req.params.eventId,
+            count: items.length,
+            items,
+        });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.get('/api/jamming', (_req, res) => {
-    res.json(gpsJamService.getZones());
+app.get('/api/query/events/latest', async (req, res) => {
+    if (!eventQueryService.isReady()) {
+        res.status(503).json({ error: 'Query database is not ready' });
+        return;
+    }
+
+    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    if (req.query.bbox && !bbox) {
+        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        return;
+    }
+
+    const from = parseIsoDateOrNull(req.query.from as string | undefined);
+    const to = parseIsoDateOrNull(req.query.to as string | undefined);
+    if ((req.query.from && !from) || (req.query.to && !to)) {
+        res.status(400).json({ error: 'Invalid from/to timestamp' });
+        return;
+    }
+
+    try {
+        const filters = {
+            layerId: normalizeLayerId((req.query.layerId as string | undefined) || (req.query.layer as string | undefined)),
+            sourceId: req.query.sourceId as string | undefined,
+            eventId: req.query.eventId as string | undefined,
+            eventKind: req.query.eventKind as string | undefined,
+            subtype: req.query.subtype as string | undefined,
+            from: from || undefined,
+            to: to || undefined,
+            bbox: bbox || undefined,
+            limit: parsePositiveLimit(req.query.limit as string | undefined, 200),
+        };
+        const items = await eventQueryService.listLatest(filters);
+        res.json({
+            mode: 'latest',
+            filters,
+            count: items.length,
+            items,
+        });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/query/entities/latest', async (req, res) => {
+    if (!entityQueryService.isReady()) {
+        res.status(503).json({ error: 'Query database is not ready' });
+        return;
+    }
+
+    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    if (req.query.bbox && !bbox) {
+        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        return;
+    }
+
+    const from = parseIsoDateOrNull(req.query.from as string | undefined);
+    const to = parseIsoDateOrNull(req.query.to as string | undefined);
+    if ((req.query.from && !from) || (req.query.to && !to)) {
+        res.status(400).json({ error: 'Invalid from/to timestamp' });
+        return;
+    }
+
+    try {
+        const filters = {
+            layerId: normalizeLayerId((req.query.layerId as string | undefined) || (req.query.layer as string | undefined)),
+            sourceId: req.query.sourceId as string | undefined,
+            entityId: req.query.entityId as string | undefined,
+            entityKind: req.query.entityKind as string | undefined,
+            subtype: req.query.subtype as string | undefined,
+            from: from || undefined,
+            to: to || undefined,
+            bbox: bbox || undefined,
+            limit: parsePositiveLimit(req.query.limit as string | undefined, 200),
+        };
+        const items = await entityQueryService.listLatest(filters);
+        res.json({
+            mode: 'latest',
+            filters,
+            count: items.length,
+            items,
+        });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/query/entities/:entityId/track', async (req, res) => {
+    if (!entityQueryService.isReady()) {
+        res.status(503).json({ error: 'Query database is not ready' });
+        return;
+    }
+
+    const from = parseIsoDateOrNull(req.query.from as string | undefined);
+    const to = parseIsoDateOrNull(req.query.to as string | undefined);
+    if ((req.query.from && !from) || (req.query.to && !to)) {
+        res.status(400).json({ error: 'Invalid from/to timestamp' });
+        return;
+    }
+
+    const order = req.query.order === 'desc' ? 'desc' : 'asc';
+
+    try {
+        const items = await entityQueryService.listTrack({
+            entityId: req.params.entityId,
+            from: from || undefined,
+            to: to || undefined,
+            limit: parsePositiveLimit(req.query.limit as string | undefined, 1000),
+            order,
+        });
+        res.json({
+            mode: 'track',
+            entityId: req.params.entityId,
+            order,
+            count: items.length,
+            items,
+        });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/query/assets/latest', async (req, res) => {
+    if (!assetQueryService.isReady()) {
+        res.status(503).json({ error: 'Query database is not ready' });
+        return;
+    }
+
+    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    if (req.query.bbox && !bbox) {
+        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        return;
+    }
+
+    const from = parseIsoDateOrNull(req.query.from as string | undefined);
+    const to = parseIsoDateOrNull(req.query.to as string | undefined);
+    if ((req.query.from && !from) || (req.query.to && !to)) {
+        res.status(400).json({ error: 'Invalid from/to timestamp' });
+        return;
+    }
+
+    try {
+        const filters = {
+            layerId: normalizeLayerId((req.query.layerId as string | undefined) || (req.query.layer as string | undefined)),
+            sourceId: req.query.sourceId as string | undefined,
+            assetId: req.query.assetId as string | undefined,
+            assetKind: req.query.assetKind as string | undefined,
+            subtype: req.query.subtype as string | undefined,
+            from: from || undefined,
+            to: to || undefined,
+            bbox: bbox || undefined,
+            limit: parsePositiveLimit(req.query.limit as string | undefined, 200),
+        };
+        const items = await assetQueryService.listLatest(filters);
+        res.json({
+            mode: 'latest',
+            filters,
+            count: items.length,
+            items,
+        });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/replay/assets', async (req, res) => {
+    if (!assetQueryService.isReady()) {
+        res.status(503).json({ error: 'Replay database is not ready' });
+        return;
+    }
+
+    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    if (req.query.bbox && !bbox) {
+        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        return;
+    }
+
+    const from = parseIsoDateOrNull(req.query.from as string | undefined);
+    const to = parseIsoDateOrNull(req.query.to as string | undefined);
+    if ((req.query.from && !from) || (req.query.to && !to)) {
+        res.status(400).json({ error: 'Invalid from/to timestamp' });
+        return;
+    }
+
+    try {
+        const filters = {
+            layerId: normalizeLayerId((req.query.layerId as string | undefined) || (req.query.layer as string | undefined)),
+            sourceId: req.query.sourceId as string | undefined,
+            assetId: req.query.assetId as string | undefined,
+            assetKind: req.query.assetKind as string | undefined,
+            subtype: req.query.subtype as string | undefined,
+            from: from || undefined,
+            to: to || undefined,
+            bbox: bbox || undefined,
+            limit: parsePositiveLimit(req.query.limit as string | undefined, 500),
+        };
+        const items = await assetQueryService.listSnapshots(filters);
+        res.json({
+            mode: 'history',
+            filters,
+            count: items.length,
+            items,
+        });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/replay/assets/:assetId/snapshots', async (req, res) => {
+    if (!assetQueryService.isReady()) {
+        res.status(503).json({ error: 'Replay database is not ready' });
+        return;
+    }
+
+    try {
+        const items = await assetQueryService.listSnapshots({
+            assetId: req.params.assetId,
+            limit: parsePositiveLimit(req.query.limit as string | undefined, 1000),
+        });
+        res.json({
+            mode: 'asset-history',
+            assetId: req.params.assetId,
+            count: items.length,
+            items,
+        });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/cables', async (_req, res) => {
+    if (!liveProjectionService.isReady()) {
+        res.status(503).json({ error: 'Query database is not ready' });
+        return;
+    }
+    try {
+        res.json(await liveProjectionService.getCables());
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/fires', async (_req, res) => {
+    if (!liveProjectionService.isReady()) {
+        res.status(503).json({ error: 'Query database is not ready' });
+        return;
+    }
+    try {
+        res.json(await liveProjectionService.getFires());
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/jamming', async (_req, res) => {
+    if (!liveProjectionService.isReady()) {
+        res.status(503).json({ error: 'Query database is not ready' });
+        return;
+    }
+    try {
+        res.json(await liveProjectionService.getJammingZones());
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.get('/api/webcams', (_req, res) => {
     res.json(webcamsService.getWebcams());
 });
 
-app.get('/api/outages', (_req, res) => {
-    res.json(iodaService.getOutages());
+app.get('/api/outages', async (_req, res) => {
+    if (!liveProjectionService.isReady()) {
+        res.status(503).json({ error: 'Query database is not ready' });
+        return;
+    }
+    try {
+        res.json(await liveProjectionService.getIodaOutages());
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // Overpass queries on multi-tag bounding boxes scale faster than linearly.
@@ -451,12 +1112,20 @@ app.get('/api/power-infra', async (req, res) => {
 
 // Oil & gas pipelines from OSM Overpass
 app.get('/api/pipelines', async (_req, res) => {
+    if (!liveProjectionService.isReady()) {
+        res.status(503).json({ error: 'Query database is not ready' });
+        return;
+    }
     try {
-        const data = await infrastructureService.getPipelines();
-        res.json(data);
+        let rows = await liveProjectionService.getPipelines();
+        if (rows.length === 0) {
+            await infrastructureService.getPipelines();
+            rows = await liveProjectionService.getPipelines();
+        }
+        res.json(rows);
     } catch (err: any) {
         console.error('[Pipelines] endpoint error:', err.message);
-        res.status(502).json({ error: 'Failed to fetch pipeline data' });
+        res.status(500).json({ error: err.message });
     }
 });
 
@@ -541,6 +1210,10 @@ app.get('/api/routes/:callsign', async (req, res) => {
         );
         res.json(response.data);
     } catch (err: any) {
+        if (err.response?.status === 404) {
+            res.json({ route: [] });
+            return;
+        }
         const status = err.response?.status || 502;
         res.status(status).json({ error: 'Failed to fetch route' });
     }
@@ -572,28 +1245,68 @@ app.get('/api/traffic/raster/:z/:x/:y', (req, res) => {
 });
 
 // ACLED armed conflict events
-app.get('/api/conflicts', (_req, res) => {
-    res.json(acledService.getEvents());
+app.get('/api/conflicts', async (_req, res) => {
+    if (!liveProjectionService.isReady()) {
+        res.status(503).json({ error: 'Query database is not ready' });
+        return;
+    }
+    try {
+        res.json(await liveProjectionService.getAcledConflicts());
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // GDELT real-time conflict events (no auth, 15-min updates)
-app.get('/api/gdelt-conflicts', (_req, res) => {
-    res.json(gdeltService.getEvents());
+app.get('/api/gdelt-conflicts', async (_req, res) => {
+    if (!liveProjectionService.isReady()) {
+        res.status(503).json({ error: 'Query database is not ready' });
+        return;
+    }
+    try {
+        res.json(await liveProjectionService.getGdeltConflicts());
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // OpenAIP restricted airspace / no-fly zones
-app.get('/api/airspace', (_req, res) => {
-    res.json(airspaceService.getZones());
+app.get('/api/airspace', async (_req, res) => {
+    if (!liveProjectionService.isReady()) {
+        res.status(503).json({ error: 'Query database is not ready' });
+        return;
+    }
+    try {
+        res.json(await liveProjectionService.getAirspaceZones());
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // Global Fishing Watch AIS signal-lost events
-app.get('/api/gfw-events', (_req, res) => {
-    res.json(gfwService.getEvents());
+app.get('/api/gfw-events', async (_req, res) => {
+    if (!liveProjectionService.isReady()) {
+        res.status(503).json({ error: 'Query database is not ready' });
+        return;
+    }
+    try {
+        res.json(await liveProjectionService.getGfwEvents());
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // Cloudflare Radar internet outages
-app.get('/api/cloudflare-outages', (_req, res) => {
-    res.json(cloudflareService.getOutages());
+app.get('/api/cloudflare-outages', async (_req, res) => {
+    if (!liveProjectionService.isReady()) {
+        res.status(503).json({ error: 'Query database is not ready' });
+        return;
+    }
+    try {
+        res.json(await liveProjectionService.getCloudflareOutages());
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // HERE Traffic Flow v7
@@ -646,7 +1359,8 @@ app.get('/api/windy-webcams', async (req, res) => {
 // based on actual upstream success.
 app.get('/api/status', (_req, res) => {
     const envCheck = (key: string) => !!(process.env[key] && process.env[key]!.length > 0);
-    const adsbHealth = simulatorService.getHealth();
+const adsbHealth = liveStreamService.getHealth();
+    const extendedHealth = extendedService.getHealth();
 
     // Outages are an aggregate of two independent upstreams (Cloudflare Radar +
     // IODA). Report the best-of-two status and surface per-source detail in
@@ -714,9 +1428,14 @@ app.get('/api/status', (_req, res) => {
         }
     }
 
-    res.json({
+    const statusPayload = {
+        database: databaseService.getHealth(),
+        satellites: satelliteService.getHealth(),
         aviation: adsbHealth.aviation,
         maritime: adsbHealth.maritime,
+        cables: extendedHealth.cables,
+        fires: extendedHealth.fires,
+        jamming: gpsJamService.getHealth(),
         airspace: airspaceService.getHealth(),
         conflicts: acledService.getHealth(),
         gdelt: gdeltService.getHealth(),
@@ -727,7 +1446,10 @@ app.get('/api/status', (_req, res) => {
         webcams: { status: webcamsStatus, note: webcamsNote },
         infrastructure: { status: infraStatus, note: infraNote },
         overture: os ?? { state: 'disabled' },
-    });
+    };
+
+    void runtimeStateRepository.persistSnapshot(statusPayload);
+    res.json(statusPayload);
 });
 
 // Detailed Overture cache status for the frontend settings panel.
@@ -741,6 +1463,8 @@ app.get('/api/overture-status', (_req, res) => {
 
 async function bootstrap() {
     console.log('Initializing backend services...');
+    await databaseService.init();
+    await catalogBootstrapService.seed();
     // Spectator must init before SatelliteService so the TLE enrichment
     // step sees a populated catalog on first boot. If the Spectator fetch
     // fails (network, missing key) we still continue — SatelliteService
@@ -753,7 +1477,7 @@ async function bootstrap() {
     // service unready and the hybrid merge silently falls back to
     // Overpass-only responses — no request path bails.
     await overtureService.init();
-    simulatorService.start();
+    liveStreamService.start();
     extendedService.start();
     gpsJamService.start();
     webcamsService.start();
