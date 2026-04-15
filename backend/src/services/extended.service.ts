@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { SourcePersistenceService } from './source-persistence.service';
 
 // ---------------------------------------------------------------------------
 // Type definitions
@@ -15,10 +16,11 @@ interface CableGeoJSON {
   features: CableFeature[];
 }
 
-interface FireRecord {
+export interface FireRecord {
   id: string;
   lat: number;
   lng: number;
+  acqDate: string;
   brightness: number;
   confidence: string;
   frp: number;
@@ -48,6 +50,12 @@ export class ExtendedDataService {
   private fires: FireRecord[] = [];
   private airQuality: AirQualityRecord[] = [];
   private firesInterval: ReturnType<typeof setInterval> | null = null;
+  private cablesHealth: 'streaming' | 'error' = 'error';
+  private cablesError: string | null = null;
+  private firesHealth: 'streaming' | 'error' = 'error';
+  private firesError: string | null = null;
+
+  constructor(private readonly persistence?: SourcePersistenceService) {}
 
   // -----------------------------------------------------------------------
   // Public API
@@ -84,6 +92,21 @@ export class ExtendedDataService {
     return this.airQuality;
   }
 
+  getHealth() {
+    return {
+      cables: {
+        status: this.cablesHealth,
+        note: this.cablesError || undefined,
+        count: this.cables?.features?.length ?? 0,
+      },
+      fires: {
+        status: this.firesHealth,
+        note: this.firesError || undefined,
+        count: this.fires.length,
+      },
+    };
+  }
+
   // -----------------------------------------------------------------------
   // Submarine Cables (static, fetched once)
   // -----------------------------------------------------------------------
@@ -94,10 +117,15 @@ export class ExtendedDataService {
     try {
       const { data } = await axios.get<CableGeoJSON>(url, { timeout: 30_000 });
       this.cables = data;
+      this.cablesHealth = 'streaming';
+      this.cablesError = null;
+      await this.persistence?.persistCables(data);
       const count = data?.features?.length ?? 0;
       console.log(`[ExtendedDataService] Cables loaded: ${count} features`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
+      this.cablesHealth = 'error';
+      this.cablesError = msg;
       console.error(`[ExtendedDataService] Failed to fetch cables: ${msg}`);
     }
   }
@@ -128,6 +156,7 @@ export class ExtendedDataService {
       const confIdx = header.indexOf('confidence');
       const frpIdx = header.indexOf('frp');
       const dnIdx = header.indexOf('daynight');
+      const dateIdx = header.indexOf('acq_date');
       const timeIdx = header.indexOf('acq_time');
       const typeIdx = header.indexOf('type');
 
@@ -146,9 +175,10 @@ export class ExtendedDataService {
         if (isNaN(lat) || isNaN(lng)) continue;
 
         records.push({
-          id: `fire-${lat}-${lng}`,
+          id: `fire-${dateIdx !== -1 ? cols[dateIdx] : 'unknown'}-${timeIdx !== -1 ? cols[timeIdx] : '0000'}-${lat}-${lng}`,
           lat,
           lng,
+          acqDate: dateIdx !== -1 ? cols[dateIdx] : '',
           brightness: brightIdx !== -1 ? parseFloat(cols[brightIdx]) || 0 : 0,
           confidence: confIdx !== -1 ? cols[confIdx] : '',
           frp: frpIdx !== -1 ? parseFloat(cols[frpIdx]) || 0 : 0,
@@ -160,9 +190,14 @@ export class ExtendedDataService {
       }
 
       this.fires = records;
+      this.firesHealth = 'streaming';
+      this.firesError = null;
+      await this.persistence?.persistFires(records, { rawCsv: data });
       console.log(`[ExtendedDataService] Fires loaded: ${records.length} records`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
+      this.firesHealth = 'error';
+      this.firesError = msg;
       console.error(`[ExtendedDataService] Failed to fetch fires: ${msg}`);
     }
   }

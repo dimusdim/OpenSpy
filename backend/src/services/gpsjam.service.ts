@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { cellToBoundary, cellToLatLng } from 'h3-js';
+import { SourcePersistenceService } from './source-persistence.service';
 
 export interface JammingZone {
     id: string;
@@ -17,6 +18,10 @@ export class GPSJamService {
     private zones: JammingZone[] = [];
     private lastDate: string | null = null;
     private interval: ReturnType<typeof setInterval> | null = null;
+    private health: 'streaming' | 'error' = 'error';
+    private lastError: string | null = null;
+
+    constructor(private readonly persistence?: SourcePersistenceService) {}
 
     async start(): Promise<void> {
         console.log('[GPSJam] Starting GPSJam feed...');
@@ -29,6 +34,14 @@ export class GPSJamService {
 
     getZones(): JammingZone[] {
         return this.zones;
+    }
+
+    getHealth() {
+        return {
+            status: this.health,
+            note: this.lastError || (this.lastDate ? `date:${this.lastDate}` : undefined),
+            count: this.zones.length,
+        };
     }
 
     private async fetchLatest(): Promise<void> {
@@ -57,6 +70,9 @@ export class GPSJamService {
                     if (zones.length > 0) {
                         this.zones = zones;
                         this.lastDate = dateStr;
+                        this.health = 'streaming';
+                        this.lastError = null;
+                        await this.persistence?.persistJamming(zones, dateStr, { rawCsv: data });
                         console.log(`[GPSJam] Loaded ${zones.length} jamming zones for ${dateStr} (of which ${zones.filter(z => z.intensity === 'high').length} high)`);
                         return;
                     }
@@ -69,6 +85,8 @@ export class GPSJamService {
             }
             console.warn('[GPSJam] No data available for last 3 days');
         } catch (err: any) {
+            this.health = 'error';
+            this.lastError = err.message;
             console.error(`[GPSJam] Failed to fetch: ${err.message}`);
         }
     }

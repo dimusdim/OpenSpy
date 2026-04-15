@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { SourcePersistenceService } from './source-persistence.service';
 
 export interface ConflictEvent {
     id: string;
@@ -19,6 +20,8 @@ export class ACLEDService {
     private timer: NodeJS.Timeout | null = null;
     private health: 'streaming' | 'error' | 'auth-missing' = 'streaming';
     private lastError: string | null = null;
+
+    constructor(private readonly persistence?: SourcePersistenceService) {}
 
     start() {
         const email = process.env.ACLED_EMAIL;
@@ -86,6 +89,7 @@ export class ACLEDService {
             this.events = records;
             this.health = 'streaming';
             this.lastError = null;
+            await this.persistence?.persistAcledConflicts(records, { rawPayload: res.data });
             const battles = records.filter(e => e.event_type === 'Battles').length;
             const explosions = records.filter(e => e.event_type.includes('Explosions')).length;
             const violence = records.filter(e => e.event_type.includes('Violence')).length;

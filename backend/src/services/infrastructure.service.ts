@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { SourcePersistenceService } from './source-persistence.service';
 
 // ---------------------------------------------------------------------------
 // Type definitions
@@ -152,7 +153,7 @@ export class InfrastructureService {
   private readonly POWER_INFRA_TTL = 60 * 60 * 1000; // 1 hour
 
   // Periodic prune of expired entries every 10 minutes (both caches)
-  constructor() {
+  constructor(private readonly persistence?: SourcePersistenceService) {
     setInterval(() => this.pruneExpired(), 10 * 60 * 1000);
   }
 
@@ -455,6 +456,7 @@ out geom;`;
 
       this.pipelinesCache = records;
       this.pipelinesCacheTs = Date.now();
+      await this.persistence?.persistPipelines(records);
       console.log(`[Pipelines] Loaded ${records.length} pipelines (oil+gas)`);
       return records;
     } catch (err: unknown) {

@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { SourcePersistenceService } from './source-persistence.service';
 
 /**
  * One polygon (outer ring + optional holes) in [lat,lng] format. Cesium's
@@ -37,6 +38,8 @@ export class AirspaceService {
     private lastFetch: number = 0;
     private health: 'streaming' | 'error' | 'auth-missing' = 'streaming';
     private lastError: string | null = null;
+
+    constructor(private readonly persistence?: SourcePersistenceService) {}
 
     start() {
         const apiKey = process.env.OPENAIP_API_KEY;
@@ -163,6 +166,7 @@ export class AirspaceService {
             this.lastFetch = Date.now();
             this.health = 'streaming';
             this.lastError = null;
+            await this.persistence?.persistAirspaceZones(allRecords);
             console.log(`[Airspace] ${allRecords.length} restricted/danger/prohibited/alert/warning zones loaded (${page} pages)`);
         } catch (err: any) {
             console.error('[Airspace] Fetch failed:', err.message);

@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { SourcePersistenceService } from './source-persistence.service';
 
 export interface GFWEvent {
     id: string;
@@ -22,6 +23,8 @@ export class GFWService {
     private timer: NodeJS.Timeout | null = null;
     private health: 'streaming' | 'error' | 'auth-missing' = 'streaming';
     private lastError: string | null = null;
+
+    constructor(private readonly persistence?: SourcePersistenceService) {}
 
     start() {
         const token = process.env.GFW_TOKEN;
@@ -106,6 +109,7 @@ export class GFWService {
             this.events = records;
             this.health = 'streaming';
             this.lastError = null;
+            await this.persistence?.persistGfwEvents(records, { rawPayload: res.data });
             console.log(`[GFW] ${records.length} AIS gap events loaded`);
         } catch (err: any) {
             const body = err.response?.data;

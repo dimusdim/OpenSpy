@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { SourcePersistenceService } from './source-persistence.service';
 
 export interface OutageRecord {
     id: string;
@@ -75,6 +76,8 @@ export class IODAService {
     private timer: NodeJS.Timeout | null = null;
     private health: 'streaming' | 'error' = 'streaming';
     private lastError: string | null = null;
+
+    constructor(private readonly persistence?: SourcePersistenceService) {}
 
     start() {
         console.log('[IODA] Starting internet outage monitoring...');
@@ -155,6 +158,10 @@ export class IODAService {
             this.outages = Array.from(byCountry.values());
             this.health = 'streaming';
             this.lastError = null;
+            await this.persistence?.persistOutages(this.outages, {
+                sourceId: 'ioda',
+                rawPayload: res.data,
+            });
             console.log(`[IODA] ${this.outages.length} internet outage alerts (${this.outages.filter(o => o.level === 'critical').length} critical, ${this.outages.filter(o => o.level === 'warning').length} warning)`);
         } catch (err: any) {
             console.error('[IODA] Fetch failed:', err.message);

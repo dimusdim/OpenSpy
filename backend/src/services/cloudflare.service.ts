@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { SourcePersistenceService } from './source-persistence.service';
 
 export interface CloudflareOutage {
     id: string;
@@ -17,6 +18,8 @@ export class CloudflareService {
     private timer: NodeJS.Timeout | null = null;
     private health: 'streaming' | 'error' | 'auth-missing' = 'streaming';
     private lastError: string | null = null;
+
+    constructor(private readonly persistence?: SourcePersistenceService) {}
 
     start() {
         const token = process.env.CLOUDFLARE_API_TOKEN;
@@ -78,6 +81,7 @@ export class CloudflareService {
             this.outages = records;
             this.health = 'streaming';
             this.lastError = null;
+            await this.persistence?.persistCloudflareOutages(records, { rawPayload: res.data });
             console.log(`[Cloudflare] ${records.length} internet outage annotations loaded`);
         } catch (err: any) {
             console.error('[Cloudflare] Fetch failed:', err.message);

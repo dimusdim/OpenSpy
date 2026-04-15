@@ -1,6 +1,7 @@
 import axios from 'axios';
 import * as zlib from 'zlib';
 import { promisify } from 'util';
+import { SourcePersistenceService } from './source-persistence.service';
 
 const unzip = promisify(zlib.unzip);
 
@@ -108,6 +109,8 @@ export class GDELTService {
     private lastError: string | null = null;
     private lastFetchUrl: string = '';
 
+    constructor(private readonly persistence?: SourcePersistenceService) {}
+
     start() {
         console.log('[GDELT] Starting conflict event monitoring (15-min cycle)...');
         this.fetchLatest();
@@ -196,6 +199,7 @@ export class GDELTService {
             this.lastFetchUrl = url;
             this.health = 'streaming';
             this.lastError = null;
+            await this.persistence?.persistGdeltConflicts(parsed);
 
             const fights = parsed.filter(e => e.rootCode === '19').length;
             const assaults = parsed.filter(e => e.rootCode === '18').length;

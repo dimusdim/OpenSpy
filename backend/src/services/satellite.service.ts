@@ -2,9 +2,11 @@ import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
 import { SpectatorService } from './spectator.service';
+import { SourcePersistenceService } from './source-persistence.service';
 
 const CACHE_FILE = path.join(__dirname, '../../satellites_cache.json');
 const CACHE_TTL = 1000 * 60 * 60 * 24; // 24 hours
+const SATELLITE_CACHE_VERSION = 2;
 
 // TLE provider chain — tried in order until one succeeds.
 // 1. Space-Track.org  — US Space Command, primary source, needs login
@@ -47,6 +49,7 @@ export interface SatelliteRecord {
     tleLine1: string;
     tleLine2: string;
     type: 'military' | 'civilian' | 'commercial';
+    classificationSource?: 'derived_name_heuristic';
     // NORAD catalog number — extracted from TLE line 1. Exposed to the
     // frontend so client code can join with external catalogs (e.g.
     // Spectator Earth sensor metadata).
@@ -82,6 +85,9 @@ const RECON_BY_NORAD = new Map(RECON_SATELLITES.map(r => [r.noradId, r]));
 
 export class SatelliteService {
     private satellites: SatelliteRecord[] = [];
+    private health: 'streaming' | 'error' = 'streaming';
+    private lastHealthNote: string | null = null;
+    private lastProvider = 'unknown';
     // Timestamp of the Spectator catalog that was used the last time we
     // enriched `this.satellites`. When SpectatorService.getLastFetchTime()
     // returns a newer value (because a lazy TTL refresh landed between
@@ -92,7 +98,10 @@ export class SatelliteService {
     private lastEnrichedSpectatorFetch = 0;
     // Injected so the same Spectator instance stays shared across services —
     // avoids a double catalog fetch at boot and keeps TTL state in one place.
-    constructor(private spectator: SpectatorService | null = null) {}
+    constructor(
+        private spectator: SpectatorService | null = null,
+        private readonly persistence?: SourcePersistenceService,
+    ) {}
 
     async init() {
         await this.loadSatellites();
@@ -230,8 +239,6 @@ export class SatelliteService {
                         allLines.push(m.name, m.line1, m.line2);
                     }
                 }
-                // Stop after ~5000 sats (enough for our 300 cap)
-                if (allLines.length > 15000) break;
             }
             if (allLines.length > 0) {
                 console.log(`[Satellites] TLE from ivanstanojevic.me (${allLines.length / 3} sats)`);
@@ -270,33 +277,47 @@ export class SatelliteService {
             const reconMeta = RECON_BY_NORAD.get(noradId);
             const isRecon = !!reconMeta;
 
-            const record: SatelliteRecord = { name, tleLine1, tleLine2, type, noradId };
+            const record: SatelliteRecord = {
+                name,
+                tleLine1,
+                tleLine2,
+                type,
+                classificationSource: 'derived_name_heuristic',
+                noradId,
+            };
             if (isRecon) { record.recon = true; record.reconMeta = reconMeta; }
             this.enrichWithSpectator(record);
             parsed.push(record);
         }
 
-        // Priority ordering: sensor-equipped + recon + ISS first
-        const priority = parsed.filter(s => !!s.sensor || s.recon || s.name.toUpperCase().includes('ISS'));
-        const rest = parsed.filter(s => !s.sensor && !s.recon && !s.name.toUpperCase().includes('ISS'));
-        return [...priority, ...rest].slice(0, 2000);
+        return parsed;
     }
 
     /** Write cache with provider tag */
     private writeCache(satellites: SatelliteRecord[], provider: string) {
-        fs.writeFileSync(CACHE_FILE, JSON.stringify({ provider, satellites }, null, 2));
+        fs.writeFileSync(
+            CACHE_FILE,
+            JSON.stringify({ provider, cacheVersion: SATELLITE_CACHE_VERSION, satellites }, null, 2),
+        );
     }
 
     /** Read cache — returns { provider, satellites, fresh } or null */
-    private readCache(): { provider: string; satellites: SatelliteRecord[]; fresh: boolean } | null {
+    private readCache(): { provider: string; satellites: SatelliteRecord[]; fresh: boolean; cacheVersion: number } | null {
         try {
             if (!fs.existsSync(CACHE_FILE)) return null;
             const stat = fs.statSync(CACHE_FILE);
             const fresh = Date.now() - stat.mtimeMs < CACHE_TTL;
             const raw = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8'));
             // Support old format (plain array) and new format ({ provider, satellites })
-            if (Array.isArray(raw)) return { provider: 'unknown', satellites: raw, fresh };
-            if (raw.satellites && Array.isArray(raw.satellites)) return { provider: raw.provider || 'unknown', satellites: raw.satellites, fresh };
+            if (Array.isArray(raw)) return { provider: 'unknown', satellites: raw, fresh, cacheVersion: 0 };
+            if (raw.satellites && Array.isArray(raw.satellites)) {
+                return {
+                    provider: raw.provider || 'unknown',
+                    satellites: raw.satellites,
+                    fresh,
+                    cacheVersion: Number(raw.cacheVersion) || 0,
+                };
+            }
             return null;
         } catch { return null; }
     }
@@ -304,16 +325,24 @@ export class SatelliteService {
     private async loadSatellites() {
         try {
             const cache = this.readCache();
+            const cacheIsCurrent = cache?.cacheVersion === SATELLITE_CACHE_VERSION;
 
-            // If cache is fresh AND from a primary source — use it directly
-            if (cache && cache.fresh && SatelliteService.PROVIDER_PRIORITY[cache.provider] === 0) {
+            // If cache is fresh, current, and from a primary source — use it directly.
+            if (cache && cache.fresh && cacheIsCurrent && SatelliteService.PROVIDER_PRIORITY[cache.provider] === 0) {
                 this.satellites = cache.satellites;
+                this.lastProvider = cache.provider;
+                this.health = 'streaming';
+                this.lastHealthNote = `cache:${cache.provider}`;
                 for (const rec of this.satellites) {
                     if (typeof rec.noradId !== 'number' || rec.noradId < 0) rec.noradId = extractNoradId(rec.tleLine1);
                     delete rec.sensor;
                     this.enrichWithSpectator(rec);
                 }
                 console.log(`[Satellites] ${this.satellites.length} from cache (${cache.provider}, fresh)`);
+                await this.persistence?.persistSatelliteCatalog(this.satellites, {
+                    provider: cache.provider,
+                    loadedFromCache: true,
+                });
                 return;
             }
 
@@ -327,7 +356,7 @@ export class SatelliteService {
             const newPriority = SatelliteService.PROVIDER_PRIORITY[provider] ?? 99;
             const cachePriority = cache ? (SatelliteService.PROVIDER_PRIORITY[cache.provider] ?? 99) : 99;
 
-            if (cache && cache.fresh && cachePriority <= newPriority && cache.satellites.length >= parsed.length) {
+            if (cache && cache.fresh && cacheIsCurrent && cachePriority <= newPriority && cache.satellites.length >= parsed.length) {
                 // Cache is from equal/better source and still fresh — keep it
                 this.satellites = cache.satellites;
                 for (const rec of this.satellites) {
@@ -336,26 +365,38 @@ export class SatelliteService {
                     this.enrichWithSpectator(rec);
                 }
                 console.log(`[Satellites] ${this.satellites.length} from cache (${cache.provider}), skipping ${provider} (${parsed.length} sats)`);
+                await this.persistence?.persistSatelliteCatalog(this.satellites, {
+                    provider: cache.provider,
+                    loadedFromCache: true,
+                });
                 return;
             }
 
             // Use new data
             this.satellites = parsed;
+            this.lastProvider = provider;
+            this.health = 'streaming';
+            this.lastHealthNote = `provider:${provider}`;
             this.writeCache(parsed, provider);
             console.log(`[Satellites] ${this.satellites.length} from ${provider} (cached)`);
+            await this.persistence?.persistSatelliteCatalog(this.satellites, {
+                provider,
+                loadedFromCache: false,
+            });
         } catch (error) {
             console.error('Failed to load TLEs:', error);
-            // Fallback mock
-            this.satellites = [
-                {
-                    name: 'ISS (ZARYA)',
-                    tleLine1: '1 25544U 98067A   23023.53580555  .00010992  00000-0  20042-3 0  9997',
-                    tleLine2: '2 25544  51.6428 171.1895 0004909 238.1633 194.2497 15.49842521379109',
-                    type: 'civilian',
-                    noradId: 25544,
-                }
-            ]
+            this.health = 'error';
+            this.lastHealthNote = error instanceof Error ? error.message : String(error);
+            this.satellites = [];
         }
+    }
+
+    getHealth() {
+        return {
+            status: this.health,
+            note: `${this.lastHealthNote || `provider:${this.lastProvider}`}; type=derived_name_heuristic`,
+            count: this.satellites.length,
+        };
     }
 
     getSatellites() {
