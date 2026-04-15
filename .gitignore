@@ -33,6 +33,7 @@ Thumbs.db
 # Logs
 *.log
 npm-debug.log*
+.local/
 
 # TypeScript
 *.tsbuildinfo
@@ -51,6 +52,7 @@ docs/
 CLAUDE.md
 .claude/
 .gstack/
+.context/
 
 # Misc
 keys.md
