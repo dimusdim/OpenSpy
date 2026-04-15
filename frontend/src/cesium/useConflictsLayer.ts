@@ -5,6 +5,7 @@ import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
 import { getConflictIcon } from '../icons/map-icons';
 import { safeCartesianFromDegrees } from './position-utils';
+import { getLayerSourceVisibilityKey, normalizeLayerSourceId } from '../lib/source-visibility';
 
 function getConflictColor(eventType: string): Cesium.Color {
     if (eventType.includes('Explosions') || eventType.includes('Remote violence')) return Cesium.Color.RED;
@@ -110,6 +111,7 @@ export function useConflictsLayer(viewer: Cesium.Viewer | null) {
                         properties: new Cesium.PropertyBag({
                             layer: 'Conflict',
                             subtype: subtypeKey,
+                            source: ev.source,
                             event_type: ev.event_type,
                             sub_event_type: ev.sub_event_type,
                             fatalities: ev.fatalities,
@@ -166,21 +168,28 @@ export function useConflictsLayer(viewer: Cesium.Viewer | null) {
     }, [isSourceOn, isVisible]);
 
     // ---- Effect 4: per-subtype visibility ----
+    const sourceVisibility = useTimelineStore(s => s.sourceVisibility);
     const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
     useEffect(() => {
         if (!dsRef.current) return;
+        const sourceCounts: Record<string, number> = {};
         dsRef.current.entities.values.forEach(e => {
             const sub = (e.properties as any)?.subtype?.getValue?.() ?? 'violence';
+            const source = normalizeLayerSourceId('conflicts', (e.properties as any)?.source?.getValue?.());
             const subtypeOk = subtypeVisibility[`conflicts:${sub}`] !== false;
-            e.show = subtypeOk && (!isolatedEntityId || isolatedEntityId === e.id);
+            if (source) sourceCounts[source] = (sourceCounts[source] || 0) + 1;
+            const sourceOk = !source || sourceVisibility[getLayerSourceVisibilityKey('conflicts', source)] !== false;
+            e.show = subtypeOk && sourceOk && (!isolatedEntityId || isolatedEntityId === e.id);
         });
-    }, [subtypeVisibility, isolatedEntityId]);
+        useTimelineStore.getState().setSourceCounts('conflicts', sourceCounts);
+    }, [subtypeVisibility, sourceVisibility, isolatedEntityId]);
 
     // ---- Effect 5: source-off scene clear ----
     useEffect(() => {
         if (isSourceOn) return;
         if (dsRef.current) dsRef.current.entities.removeAll();
         useTimelineStore.getState().setSubtypeCounts('conflicts' as any, {});
+        useTimelineStore.getState().setSourceCounts('conflicts', {});
         useTimelineStore.getState().setStreamMetric('conflicts', {
             count: 0,
             status: 'disabled',

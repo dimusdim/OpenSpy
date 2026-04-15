@@ -49,6 +49,11 @@ export default function Home() {
             subtypeVisibility: { ...store.subtypeVisibility, ...saved.subtypeVisibility },
           });
         }
+        if (saved.sourceVisibility) {
+          useTimelineStore.setState({
+            sourceVisibility: { ...store.sourceVisibility, ...saved.sourceVisibility },
+          });
+        }
         if (saved.tileMode) {
           useTimelineStore.setState({ tileMode: saved.tileMode });
         }

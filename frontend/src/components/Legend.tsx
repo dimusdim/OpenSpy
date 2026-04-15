@@ -10,6 +10,7 @@ import {
 import { useTimelineStore, MISSION_PRESETS } from '../store/useTimelineStore';
 import type { LayerName } from '../store/useTimelineStore';
 import type { LucideIcon } from 'lucide-react';
+import { COMPOSITE_LAYER_SOURCES, getLayerSourceVisibilityKey, type CompositeLayerCode } from '../lib/source-visibility';
 
 // ---------------------------------------------------------------------------
 // Status dot color (matches LayerManager / SettingsPanel)
@@ -43,6 +44,7 @@ interface LayerNode {
     label: string;
     icon: LucideIcon;
     subtypes: SubtypeNode[];
+    sources?: Array<{ sourceId: string; label: string }>;
     // special: instead of toggleVisibility, use a different store action
     special?: 'trajectories';
 }
@@ -131,6 +133,7 @@ const DOMAIN_TREE: DomainNode[] = [
         children: [
             {
                 layer: 'conflicts', label: 'Conflicts', icon: Swords,
+                sources: COMPOSITE_LAYER_SOURCES.conflicts,
                 subtypes: [
                     { key: 'explosions', label: 'Explosions', icon: Bomb, color: 'text-red-500' },
                     { key: 'battles', label: 'Battles', icon: Swords, color: 'text-orange-400' },
@@ -144,6 +147,7 @@ const DOMAIN_TREE: DomainNode[] = [
             },
             {
                 layer: 'disasters', label: 'Disasters', icon: Mountain,
+                sources: COMPOSITE_LAYER_SOURCES.disasters,
                 subtypes: [
                     { key: 'EQ', label: 'Earthquake', icon: CircleDot, color: 'text-zinc-300' },
                     { key: 'TC', label: 'Cyclone', icon: Waves, color: 'text-zinc-300' },
@@ -198,6 +202,7 @@ const DOMAIN_TREE: DomainNode[] = [
         children: [
             {
                 layer: 'outages', label: 'Outages', icon: WifiOff,
+                sources: COMPOSITE_LAYER_SOURCES.outages,
                 subtypes: [
                     { key: 'critical', label: 'Critical', icon: WifiOff, color: 'text-red-500' },
                     { key: 'warning', label: 'Warning', icon: WifiOff, color: 'text-orange-400' },
@@ -244,10 +249,13 @@ type Tab = 'domains' | 'missions' | 'all';
 export default function Legend() {
     const visibility = useTimelineStore(s => s.visibility);
     const counts = useTimelineStore(s => s.subtypeCounts);
+    const sourceCounts = useTimelineStore(s => s.sourceCounts);
     const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
+    const sourceVisibility = useTimelineStore(s => s.sourceVisibility);
     const streamMetrics = useTimelineStore(s => s.streamMetrics);
     const toggleVisibility = useTimelineStore(s => s.toggleVisibility);
     const toggleSubtype = useTimelineStore(s => s.toggleSubtype);
+    const toggleSourceVisibility = useTimelineStore(s => s.toggleSourceVisibility);
     const activeFilter = useTimelineStore(s => s.activeFilter);
     const clearFilter = useTimelineStore(s => s.clearFilter);
     const activePreset = useTimelineStore(s => s.activePreset);
@@ -366,10 +374,13 @@ export default function Legend() {
                     toggleDomainVisibility={toggleDomainVisibility}
                     visibility={visibility}
                     subtypeVisibility={subtypeVisibility}
+                    sourceVisibility={sourceVisibility}
                     counts={counts}
+                    sourceCounts={sourceCounts}
                     streamMetrics={streamMetrics}
                     toggleVisibility={toggleVisibility}
                     toggleSubtype={toggleSubtype}
+                    toggleSourceVisibility={toggleSourceVisibility}
                     layerCount={layerCount}
                     showTrajectories={showTrajectories}
                     toggleTrajectories={toggleTrajectories}
@@ -400,8 +411,8 @@ export default function Legend() {
 // ---------------------------------------------------------------------------
 function DomainsTab({
     expandedDomains, expandedLayers, toggleDomain, toggleLayerExpand,
-    toggleDomainVisibility, visibility, subtypeVisibility, counts, streamMetrics,
-    toggleVisibility, toggleSubtype, layerCount, showTrajectories, toggleTrajectories,
+    toggleDomainVisibility, visibility, subtypeVisibility, sourceVisibility, counts, sourceCounts, streamMetrics,
+    toggleVisibility, toggleSubtype, toggleSourceVisibility, layerCount, showTrajectories, toggleTrajectories,
 }: {
     expandedDomains: Record<string, boolean>;
     expandedLayers: Record<string, boolean>;
@@ -410,10 +421,13 @@ function DomainsTab({
     toggleDomainVisibility: (d: string) => void;
     visibility: any;
     subtypeVisibility: Record<string, boolean>;
+    sourceVisibility: Record<string, boolean>;
     counts: Record<string, number>;
+    sourceCounts: Record<string, number>;
     streamMetrics: Record<string, any>;
     toggleVisibility: (l: LayerName) => void;
     toggleSubtype: (k: string) => void;
+    toggleSourceVisibility: (k: string) => void;
     layerCount: (l: LayerName, s: SubtypeNode[]) => number;
     showTrajectories: boolean;
     toggleTrajectories: () => void;
@@ -489,31 +503,62 @@ function DomainsTab({
 
                                             {/* Subtypes */}
                                             {hasSubtypes && isLayerExpanded && (
-                                                <div className={`grid grid-cols-2 gap-x-1 gap-y-0 pl-9 ${layerOn ? '' : 'opacity-25'}`}>
-                                                    {layerNode.subtypes.map(sub => {
-                                                        const fullKey = `${layerNode.layer}:${sub.key}`;
-                                                        const subOn = subtypeVisibility[fullKey] !== false;
-                                                        const n = counts[fullKey] || 0;
-                                                        const SubIcon = sub.icon;
-                                                        return (
-                                                            <button
-                                                                key={sub.key}
-                                                                onClick={() => toggleSubtype(fullKey)}
-                                                                disabled={!layerOn}
-                                                                className={`flex items-center justify-between gap-1 text-[10px] px-1 py-0.5 rounded hover:bg-cyan-900/20 transition-colors ${
-                                                                    subOn ? 'text-zinc-200' : 'text-zinc-600 line-through'
-                                                                }`}
-                                                            >
-                                                                <span className="flex items-center gap-1 truncate">
-                                                                    <SubIcon size={9} className={subOn ? sub.color : 'text-zinc-700'} />
-                                                                    <span className="truncate">{sub.label}</span>
-                                                                </span>
-                                                                <span className={`font-mono text-[9px] tabular-nums ${subOn ? 'text-zinc-500' : 'text-zinc-700'}`}>
-                                                                    {n > 0 ? n.toLocaleString() : ''}
-                                                                </span>
-                                                            </button>
-                                                        );
-                                                    })}
+                                                <div className={`pl-9 ${layerOn ? '' : 'opacity-25'}`}>
+                                                    <div className="grid grid-cols-2 gap-x-1 gap-y-0">
+                                                        {layerNode.subtypes.map(sub => {
+                                                            const fullKey = `${layerNode.layer}:${sub.key}`;
+                                                            const subOn = subtypeVisibility[fullKey] !== false;
+                                                            const n = counts[fullKey] || 0;
+                                                            const SubIcon = sub.icon;
+                                                            return (
+                                                                <button
+                                                                    key={sub.key}
+                                                                    onClick={() => toggleSubtype(fullKey)}
+                                                                    disabled={!layerOn}
+                                                                    className={`flex items-center justify-between gap-1 text-[10px] px-1 py-0.5 rounded hover:bg-cyan-900/20 transition-colors ${
+                                                                        subOn ? 'text-zinc-200' : 'text-zinc-600 line-through'
+                                                                    }`}
+                                                                >
+                                                                    <span className="flex items-center gap-1 truncate">
+                                                                        <SubIcon size={9} className={subOn ? sub.color : 'text-zinc-700'} />
+                                                                        <span className="truncate">{sub.label}</span>
+                                                                    </span>
+                                                                    <span className={`font-mono text-[9px] tabular-nums ${subOn ? 'text-zinc-500' : 'text-zinc-700'}`}>
+                                                                        {n > 0 ? n.toLocaleString() : ''}
+                                                                    </span>
+                                                                </button>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                    {layerNode.sources && layerNode.sources.length > 0 && (
+                                                        <div className="mt-1 border-t border-zinc-800/40 pt-1">
+                                                            <div className="px-1 pb-0.5 text-[9px] font-mono uppercase tracking-wider text-zinc-600">
+                                                                Sources
+                                                            </div>
+                                                            <div className="grid grid-cols-1 gap-y-0">
+                                                                {layerNode.sources.map(sourceNode => {
+                                                                    const fullKey = getLayerSourceVisibilityKey(layerNode.layer as CompositeLayerCode, sourceNode.sourceId);
+                                                                    const sourceOn = sourceVisibility[fullKey] !== false;
+                                                                    const n = sourceCounts[fullKey] || 0;
+                                                                    return (
+                                                                        <button
+                                                                            key={sourceNode.sourceId}
+                                                                            onClick={() => toggleSourceVisibility(fullKey)}
+                                                                            disabled={!layerOn}
+                                                                            className={`flex items-center justify-between gap-1 text-[10px] px-1 py-0.5 rounded hover:bg-cyan-900/20 transition-colors ${
+                                                                                sourceOn ? 'text-zinc-300' : 'text-zinc-600 line-through'
+                                                                            }`}
+                                                                        >
+                                                                            <span className="truncate">{sourceNode.label}</span>
+                                                                            <span className={`font-mono text-[9px] tabular-nums ${sourceOn ? 'text-zinc-500' : 'text-zinc-700'}`}>
+                                                                                {n > 0 ? n.toLocaleString() : ''}
+                                                                            </span>
+                                                                        </button>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        </div>
+                                                    )}
                                                 </div>
                                             )}
                                         </div>

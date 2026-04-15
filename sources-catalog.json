@@ -1,6 +1,6 @@
 {
   "$schema": "Sources catalog for AI Worldview — what we load, what we show, what we don't",
-  "generated": "2026-04-12",
+  "generated": "2026-04-15",
   "sources": [
     {
       "id": "opensky",
@@ -11,6 +11,11 @@
       "status": "LIVE",
       "type": "real-time",
       "refresh": "90s polling",
+      "live_contract": {
+        "delivery_mode": "delta",
+        "stale_after_sec": 300,
+        "remove_after_sec": 300
+      },
       "endpoints": [
         "https://opensky-network.org/api/states/all"
       ],
@@ -80,6 +85,11 @@
       "status": "LIVE",
       "type": "real-time",
       "refresh": "WebSocket continuous stream",
+      "live_contract": {
+        "delivery_mode": "delta",
+        "stale_after_sec": 3600,
+        "remove_after_sec": 21600
+      },
       "endpoints": [
         "wss://stream.aisstream.io/v0/stream"
       ],
@@ -193,6 +203,12 @@
       "status": "LIVE",
       "type": "near-real-time",
       "refresh": "TLE: 24h cache, Spectator: 24h lazy",
+      "live_contract": {
+        "delivery_mode": "replace",
+        "stale_after_sec": null,
+        "remove_after_sec": null,
+        "notes": "Replace-on-refresh layer; lifecycle is managed by latest projection refresh rather than stale removal."
+      },
       "endpoints": [
         "https://www.space-track.org/basicspacedata/query/class/gp/... (primary, US Space Command)",
         "https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle (mirror)",
@@ -286,6 +302,11 @@
       "status": "LIVE",
       "type": "near-real-time",
       "refresh": "5 min",
+      "live_contract": {
+        "delivery_mode": "replace",
+        "stale_after_sec": null,
+        "remove_after_sec": null
+      },
       "endpoints": [
         "https://www.gdacs.org/gdacsapi/api/events/geteventlist/MAP"
       ],
@@ -347,6 +368,11 @@
       "status": "LIVE",
       "type": "near-real-time",
       "refresh": "5 min",
+      "live_contract": {
+        "delivery_mode": "replace",
+        "stale_after_sec": null,
+        "remove_after_sec": null
+      },
       "endpoints": [
         "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_week.geojson"
       ],
@@ -403,6 +429,11 @@
       "status": "LIVE",
       "type": "near-real-time",
       "refresh": "5 min",
+      "live_contract": {
+        "delivery_mode": "replace",
+        "stale_after_sec": null,
+        "remove_after_sec": null
+      },
       "endpoints": [
         "https://eonet.gsfc.nasa.gov/api/v3/events?status=open"
       ],
@@ -449,6 +480,11 @@
       "status": "LIVE",
       "type": "near-real-time",
       "refresh": "30 min (last 7 days)",
+      "live_contract": {
+        "delivery_mode": "replace",
+        "stale_after_sec": null,
+        "remove_after_sec": null
+      },
       "endpoints": [
         "https://api.acleddata.com/acled/read"
       ],
@@ -518,6 +554,67 @@
       }
     },
     {
+      "id": "gdelt",
+      "name": "GDELT Event Database 2.0 — Conflict Events",
+      "provider": "GDELT Project",
+      "category": "conflicts",
+      "layer": "Conflict",
+      "status": "LIVE",
+      "type": "near-real-time",
+      "refresh": "15 min",
+      "live_contract": {
+        "delivery_mode": "replace",
+        "stale_after_sec": null,
+        "remove_after_sec": null
+      },
+      "endpoints": [
+        "http://data.gdeltproject.org/gdeltv2/lastupdate.txt"
+      ],
+      "auth": {
+        "required": false,
+        "method": "none",
+        "env_keys": [],
+        "limits": "public feed, 15-minute export cadence"
+      },
+      "legend": {
+        "subtypes": ["protests", "threats", "force_posture", "coercion", "assaults", "battles", "mass_violence"],
+        "colors": {
+          "protests": "yellow",
+          "threats": "orange",
+          "force_posture": "gold",
+          "coercion": "amber",
+          "assaults": "orange",
+          "battles": "red",
+          "mass_violence": "darkred"
+        }
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "rootCode/eventCode": "mapped to conflict subtype and icon",
+          "lat/lng": "billboard position",
+          "goldstein": "severity cue in HUD",
+          "numMentions": "impact/context signal"
+        },
+        "hud": {
+          "eventType": "event family label",
+          "subEventType": "specific conflict subtype",
+          "actor1": "first actor",
+          "actor2": "second actor",
+          "date": "event date",
+          "sourceUrl": "original article/report URL"
+        }
+      },
+      "fields_loaded_not_displayed": {
+        "rootCode": "used for subtype grouping but not shown raw",
+        "numSources": "stored for diagnostics but not shown directly"
+      },
+      "fields_available_not_loaded": {
+        "theme_dimensions": "broader GDELT event context and topical dimensions",
+        "tone": "source tone and media sentiment context",
+        "source_domain": "media outlet/domain grouping for provenance analysis"
+      }
+    },
+    {
       "id": "gpsjam",
       "name": "GPSJam.org — GNSS Interference",
       "provider": "GPSJam.org (community, ADS-B NIC analysis)",
@@ -526,6 +623,11 @@
       "status": "LIVE",
       "type": "daily snapshot",
       "refresh": "6h (daily CSV)",
+      "live_contract": {
+        "delivery_mode": "replace",
+        "stale_after_sec": null,
+        "remove_after_sec": null
+      },
       "endpoints": [
         "https://gpsjam.org/data/{YYYY-MM-DD}-h3_4.csv"
       ],
@@ -577,6 +679,11 @@
       "status": "LIVE",
       "type": "near-real-time",
       "refresh": "30 min (last 24h)",
+      "live_contract": {
+        "delivery_mode": "replace",
+        "stale_after_sec": null,
+        "remove_after_sec": null
+      },
       "endpoints": [
         "https://firms.modaps.eosdis.nasa.gov/data/active_fire/suomi-npp-viirs-c2/csv/SUOMI_VIIRS_C2_Global_24h.csv"
       ],
@@ -638,6 +745,11 @@
       "status": "LIVE",
       "type": "static",
       "refresh": "once at startup",
+      "live_contract": {
+        "delivery_mode": "replace",
+        "stale_after_sec": null,
+        "remove_after_sec": null
+      },
       "endpoints": [
         "https://www.submarinecablemap.com/api/v3/cable/cable-geo.json"
       ],
@@ -724,6 +836,11 @@
       "status": "LIVE",
       "type": "semi-static",
       "refresh": "1h cache",
+      "live_contract": {
+        "delivery_mode": "replace",
+        "stale_after_sec": null,
+        "remove_after_sec": null
+      },
       "endpoints": [
         "https://api.core.openaip.net/api/airspaces"
       ],
@@ -786,6 +903,11 @@
       "status": "LIVE",
       "type": "near-real-time",
       "refresh": "1h",
+      "live_contract": {
+        "delivery_mode": "replace",
+        "stale_after_sec": null,
+        "remove_after_sec": null
+      },
       "endpoints": [
         "https://gateway.api.globalfishingwatch.org/v3/events"
       ],
@@ -842,6 +964,11 @@
       "status": "LIVE",
       "type": "near-real-time",
       "refresh": "10 min (last 24h)",
+      "live_contract": {
+        "delivery_mode": "replace",
+        "stale_after_sec": null,
+        "remove_after_sec": null
+      },
       "endpoints": [
         "https://api.ioda.caida.org/dev/outages/alerts/country"
       ],
@@ -901,6 +1028,11 @@
       "status": "LIVE",
       "type": "near-real-time",
       "refresh": "15 min (last 24h)",
+      "live_contract": {
+        "delivery_mode": "replace",
+        "stale_after_sec": null,
+        "remove_after_sec": null
+      },
       "endpoints": [
         "https://api.cloudflare.com/client/v4/radar/annotations/outages"
       ],
@@ -1016,6 +1148,11 @@
       "status": "LIVE",
       "type": "static",
       "refresh": "one-shot fetch",
+      "live_contract": {
+        "delivery_mode": "replace",
+        "stale_after_sec": null,
+        "remove_after_sec": null
+      },
       "endpoints": [
         "https://overpass.kumi.systems/api/interpreter"
       ],

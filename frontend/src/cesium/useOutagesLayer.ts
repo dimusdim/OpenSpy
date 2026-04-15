@@ -5,6 +5,7 @@ import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
 import { OUTAGE_ICON_CRITICAL, OUTAGE_ICON_WARNING } from '../icons/map-icons';
 import { safeCartesianFromDegrees } from './position-utils';
+import { getLayerSourceVisibilityKey, normalizeLayerSourceId } from '../lib/source-visibility';
 
 // Subset of country centroids for mapping Cloudflare location codes to coordinates.
 const COUNTRY_CENTROIDS_MINI: Record<string, [number, number]> = {
@@ -218,21 +219,28 @@ export function useOutagesLayer(viewer: Cesium.Viewer | null) {
     }, [isSourceOn, isVisible]);
 
     // ---- Effect 4: per-subtype visibility ----
+    const sourceVisibility = useTimelineStore(s => s.sourceVisibility);
     const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
     useEffect(() => {
         if (!dsRef.current) return;
+        const sourceCounts: Record<string, number> = {};
         dsRef.current.entities.values.forEach(e => {
             const sub = (e.properties as any)?.subtype?.getValue?.() ?? 'warning';
+            const source = normalizeLayerSourceId('outages', (e.properties as any)?.source?.getValue?.());
             const subtypeOk = subtypeVisibility[`outages:${sub}`] !== false;
-            e.show = subtypeOk && (!isolatedEntityId || isolatedEntityId === e.id);
+            if (source) sourceCounts[source] = (sourceCounts[source] || 0) + 1;
+            const sourceOk = !source || sourceVisibility[getLayerSourceVisibilityKey('outages', source)] !== false;
+            e.show = subtypeOk && sourceOk && (!isolatedEntityId || isolatedEntityId === e.id);
         });
-    }, [subtypeVisibility, isolatedEntityId]);
+        useTimelineStore.getState().setSourceCounts('outages', sourceCounts);
+    }, [subtypeVisibility, sourceVisibility, isolatedEntityId]);
 
     // ---- Effect 5: source-off scene clear ----
     useEffect(() => {
         if (isSourceOn) return;
         if (dsRef.current) dsRef.current.entities.removeAll();
         useTimelineStore.getState().setSubtypeCounts('outages' as any, {});
+        useTimelineStore.getState().setSourceCounts('outages', {});
         useTimelineStore.getState().setStreamMetric('outages', {
             count: 0,
             status: 'disabled',

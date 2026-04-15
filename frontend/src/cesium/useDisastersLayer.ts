@@ -5,6 +5,7 @@ import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
 import { getDisasterIcon } from '../icons/map-icons';
 import { safeCartesianFromDegrees } from './position-utils';
+import { getLayerSourceVisibilityKey, normalizeLayerSourceId } from '../lib/source-visibility';
 
 export function useDisastersLayer(viewer: Cesium.Viewer | null) {
     // sources.disasters = fetch disaster events; visibility.disasters = render them
@@ -161,26 +162,33 @@ export function useDisastersLayer(viewer: Cesium.Viewer | null) {
     // minutes) or when the user toggles a filter, so we react to those
     // signals directly instead of scanning every 2s.
     const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
+    const sourceVisibility = useTimelineStore(s => s.sourceVisibility);
     const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
     useEffect(() => {
         if (!viewer) return;
         const ds = disastersDsRef.current;
         if (!ds) return;
         const counts: Record<string, number> = {};
+        const sourceCounts: Record<string, number> = {};
         ds.entities.values.forEach(e => {
             const sub = (e.properties as any)?.subtype?.getValue?.() ?? 'XX';
+            const source = normalizeLayerSourceId('disasters', (e.properties as any)?.source?.getValue?.());
             counts[sub] = (counts[sub] || 0) + 1;
+            if (source) sourceCounts[source] = (sourceCounts[source] || 0) + 1;
             const subtypeOk = subtypeVisibility[`disasters:${sub}`] !== false;
-            e.show = subtypeOk && (!isolatedEntityId || isolatedEntityId === e.id);
+            const sourceOk = !source || sourceVisibility[getLayerSourceVisibilityKey('disasters', source)] !== false;
+            e.show = subtypeOk && sourceOk && (!isolatedEntityId || isolatedEntityId === e.id);
         });
         useTimelineStore.getState().setSubtypeCounts('disasters', counts);
-    }, [viewer, subtypeVisibility, eventsLoadedTick, isolatedEntityId]);
+        useTimelineStore.getState().setSourceCounts('disasters', sourceCounts);
+    }, [viewer, subtypeVisibility, sourceVisibility, eventsLoadedTick, isolatedEntityId]);
 
     // ---- Effect 5: source-off scene clear ----
     useEffect(() => {
         if (isDisasterSourceOn) return;
         if (disastersDsRef.current) disastersDsRef.current.entities.removeAll();
         useTimelineStore.getState().setSubtypeCounts('disasters', {});
+        useTimelineStore.getState().setSourceCounts('disasters', {});
         useTimelineStore.getState().setStreamMetric('disasters', {
             count: 0,
             status: 'disabled',

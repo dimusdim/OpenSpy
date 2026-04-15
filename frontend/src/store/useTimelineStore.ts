@@ -210,9 +210,14 @@ interface TimelineStore {
   // Per-subtype visibility (e.g. "aviation:airliner", "satellite:military").
   // Default = visible. Layer hooks honour these flags when rendering.
   subtypeVisibility: Record<string, boolean>;
+  // Per-layer source visibility for composite logical views
+  // (e.g. "disasters:gdacs", "conflicts:gdelt").
+  sourceVisibility: Record<string, boolean>;
   // Per-subtype counts. Layer hooks update these from the live datasource
   // entity counts; the Legend reads them.
   subtypeCounts: Record<string, number>;
+  // Per-source counts for composite logical views.
+  sourceCounts: Record<string, number>;
   // Infrastructure viewport loading progress (0-100). Set by useInfrastructureLayer.
   infraViewportPct: number;
   setInfraViewportPct: (pct: number) => void;
@@ -241,7 +246,9 @@ interface TimelineStore {
   setSelectedEntityId: (id: string | null, data?: any) => void;
   setStreamMetric: (layer: string, data: Partial<StreamMetric>) => void;
   toggleSubtype: (key: string) => void;
+  toggleSourceVisibility: (key: string) => void;
   setSubtypeCounts: (layer: keyof LayerFlags, counts: Record<string, number>) => void;
+  setSourceCounts: (layer: string, counts: Record<string, number>) => void;
   // Filter / isolation actions
   applyFilter: (type: ActiveFilter['type'], label: string, visOverride: LayerFlags, subOverride?: Record<string, boolean>) => void;
   clearFilter: () => void;
@@ -252,7 +259,7 @@ interface TimelineStore {
 
 type PersistedTimelineSettings = Pick<
   TimelineStore,
-  'sources' | 'visibility' | 'subtypeVisibility' | 'tileMode' | 'showTrajectories' | 'clusteringEnabled' | 'activePreset' | 'activeIconSet' | 'satelliteRenderLimit'
+  'sources' | 'visibility' | 'subtypeVisibility' | 'sourceVisibility' | 'tileMode' | 'showTrajectories' | 'clusteringEnabled' | 'activePreset' | 'activeIconSet' | 'satelliteRenderLimit'
 > & {
   effectiveTileMode?: 'google' | 'osm' | 'modis';
 };
@@ -270,6 +277,7 @@ function saveSettingsToServer(state: PersistedTimelineSettings) {
                 sources: state.sources,
                 visibility: state.visibility,
                 subtypeVisibility: state.subtypeVisibility,
+                sourceVisibility: state.sourceVisibility,
                 tileMode: state.tileMode,
                 effectiveTileMode: state.effectiveTileMode || state.tileMode,
                 showTrajectories: state.showTrajectories,
@@ -359,7 +367,9 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
   selectedEntityId: null,
   selectedEntityData: null,
   subtypeVisibility: {},
+  sourceVisibility: {},
   subtypeCounts: {},
+  sourceCounts: {},
   infraViewportPct: -1,
   setInfraViewportPct: (pct) => set({ infraViewportPct: pct }),
   tileMode: 'google' as 'google' | 'osm' | 'modis',
@@ -448,6 +458,14 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
       saveSettingsToServer({ ...state, subtypeVisibility });
       return { subtypeVisibility };
   }),
+  toggleSourceVisibility: (key) => set(state => {
+      const sourceVisibility = {
+          ...state.sourceVisibility,
+          [key]: state.sourceVisibility[key] === false ? true : false,
+      };
+      saveSettingsToServer({ ...state, sourceVisibility });
+      return { sourceVisibility };
+  }),
   setSubtypeCounts: (layer, counts) => set(state => {
       // Replace all counts for this layer atomically.
       const next: Record<string, number> = { ...state.subtypeCounts };
@@ -456,6 +474,13 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
       for (const k of Object.keys(next)) if (k.startsWith(prefix)) delete next[k];
       for (const [sub, n] of Object.entries(counts)) next[`${prefix}${sub}`] = n;
       return { subtypeCounts: next };
+  }),
+  setSourceCounts: (layer, counts) => set(state => {
+      const next: Record<string, number> = { ...state.sourceCounts };
+      const prefix = `${layer}:`;
+      for (const k of Object.keys(next)) if (k.startsWith(prefix)) delete next[k];
+      for (const [sourceId, n] of Object.entries(counts)) next[`${prefix}${sourceId}`] = n;
+      return { sourceCounts: next };
   }),
   // --- Filter / isolation actions ---
   applyFilter: (type, label, visOverride, subOverride) => set(state => {
