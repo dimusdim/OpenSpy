@@ -4,8 +4,14 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "ts-node src/index.ts",
-    "test": "node ../tests/smoke-api.mjs"
+    "dev": "bash ./scripts/dev-with-db.sh",
+    "dev:raw": "ts-node src/index.ts",
+    "test": "node ../tests/smoke-api.mjs",
+    "db:migrate": "bash ./scripts/db-migrate.sh",
+    "db:init": "bash ./scripts/db-init.sh",
+    "db:start": "bash ./scripts/db-start.sh",
+    "db:stop": "bash ./scripts/db-stop.sh",
+    "db:status": "bash ./scripts/db-status.sh"
   },
   "keywords": [],
   "author": "",
@@ -18,6 +24,7 @@
     "duckdb": "^1.4.4",
     "express": "^5.2.1",
     "h3-js": "^4.4.0",
+    "pg": "^8.20.0",
     "socket.io": "^4.8.3",
     "ws": "^8.20.0",
     "yahoo-finance2": "^3.14.0"
@@ -26,6 +33,7 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^25.5.2",
+    "@types/pg": "^8.20.0",
     "@types/ws": "^8.18.1",
     "nodemon": "^3.1.14",
     "ts-node": "^10.9.2",
