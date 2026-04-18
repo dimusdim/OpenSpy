@@ -1,9 +1,12 @@
 import 'dotenv/config';
+import './telemetry/bootstrap';
 import express from 'express';
 import http from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
+import compression from 'compression';
 import axios from 'axios';
+import { recordRateLimitReject, recordReplayRequest, withSpan } from './telemetry/observability';
 
 // Global process-level safety nets. Without these, a single upstream HTTP
 // client throwing during a response-parsing phase will bring the whole
@@ -49,10 +52,11 @@ import { EventQueryService } from './services/event-query.service';
 import { EntityQueryService } from './services/entity-query.service';
 import { AssetQueryService } from './services/asset-query.service';
 import { LiveProjectionService } from './services/live-projection.service';
+import { ReplayQueryService } from './services/replay-query.service';
 
 // CORS origin whitelist — comma-separated list in ALLOWED_ORIGINS env var.
 // Defaults to localhost dev ports if unset.
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3737,http://localhost:3000')
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3737,http://localhost:3000,http://127.0.0.1:3737,http://127.0.0.1:3000')
     .split(',')
     .map(o => o.trim())
     .filter(Boolean);
@@ -68,7 +72,79 @@ const corsOptions: cors.CorsOptions = {
 
 const app = express();
 app.use(cors(corsOptions));
+app.use(compression({
+    threshold: 1024,
+    level: 6,
+}));
 app.use(express.json({ limit: '50mb' }));
+
+type StorageStatusPayload = {
+    db_bytes: number | null;
+    disk_free_bytes: number | null;
+    disk_total_bytes: number | null;
+    disk_used_percent: number | null;
+    db_percent_of_disk: number | null;
+    updated_at: string;
+};
+
+let storageStatusCache: { expiresAt: number; value: StorageStatusPayload } | null = null;
+
+async function collectStorageStatus(): Promise<StorageStatusPayload> {
+    const now = Date.now();
+    if (storageStatusCache && now < storageStatusCache.expiresAt) {
+        return storageStatusCache.value;
+    }
+
+    let dbBytes: number | null = null;
+    if (databaseService.isReady()) {
+        try {
+            const result = await databaseService.query<{ bytes: string }>(
+                `SELECT pg_database_size(current_database())::text AS bytes`,
+            );
+            const parsed = Number(result?.rows?.[0]?.bytes || '0');
+            dbBytes = Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+        } catch (error: any) {
+            console.warn('[status] failed to read database size:', error?.message || error);
+        }
+    }
+
+    let diskFreeBytes: number | null = null;
+    let diskTotalBytes: number | null = null;
+    try {
+        const dataRoot = path.resolve(process.cwd(), '..', '.local/postgres/data');
+        const statfs = await fs.promises.statfs(dataRoot);
+        const blockSize = Number(statfs.bsize || 0);
+        const availableBlocks = Number(statfs.bavail || 0);
+        const totalBlocks = Number(statfs.blocks || 0);
+        const free = blockSize > 0 && availableBlocks >= 0 ? availableBlocks * blockSize : 0;
+        const total = blockSize > 0 && totalBlocks > 0 ? totalBlocks * blockSize : 0;
+        diskFreeBytes = Number.isFinite(free) ? free : null;
+        diskTotalBytes = Number.isFinite(total) && total > 0 ? total : null;
+    } catch (error: any) {
+        console.warn('[status] failed to read disk usage:', error?.message || error);
+    }
+
+    const diskUsedPercent = diskTotalBytes && diskFreeBytes != null
+        ? Number((((diskTotalBytes - diskFreeBytes) / diskTotalBytes) * 100).toFixed(1))
+        : null;
+    const dbPercentOfDisk = diskTotalBytes && dbBytes != null
+        ? Number(((dbBytes / diskTotalBytes) * 100).toFixed(2))
+        : null;
+
+    const value: StorageStatusPayload = {
+        db_bytes: dbBytes,
+        disk_free_bytes: diskFreeBytes,
+        disk_total_bytes: diskTotalBytes,
+        disk_used_percent: diskUsedPercent,
+        db_percent_of_disk: dbPercentOfDisk,
+        updated_at: new Date().toISOString(),
+    };
+    storageStatusCache = {
+        expiresAt: now + 30_000,
+        value,
+    };
+    return value;
+}
 
 // ---------------------------------------------------------------------------
 // User settings persistence (JSON file on disk)
@@ -85,6 +161,8 @@ const eventQueryService = new EventQueryService(databaseService);
 const entityQueryService = new EntityQueryService(databaseService);
 const assetQueryService = new AssetQueryService(databaseService);
 const liveProjectionService = new LiveProjectionService(databaseService);
+const replayQueryService = new ReplayQueryService(databaseService);
+const liveIngestEnabled = process.env.DISABLE_LIVE_INGEST !== 'true';
 
 async function handleGetViewState(_req: express.Request, res: express.Response) {
     try {
@@ -429,19 +507,44 @@ app.post('/api/keys', (req, res) => {
     }
 });
 
-// Simple in-memory rate limiter — per-IP token bucket, 120 req/min.
+// Simple in-memory rate limiter.
+//
+// Important: historical replay is a legitimate high-churn UI path
+// (timeline seek + playback), so it must not share the same small bucket as
+// the rest of `/api/*`. Otherwise the frontend starts rate-limiting itself
+// during normal scrubbing and playback.
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
 const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX = 120;
+const DEFAULT_RATE_LIMIT_MAX = 600;
+const STATUS_RATE_LIMIT_MAX = 600;
+const INFRA_RATE_LIMIT_MAX = 1_200;
+const REPLAY_RATE_LIMIT_MAX = 2_400;
+
+function classifyRateLimit(reqPath: string): { bucket: string; limitMax: number } {
+    if (reqPath.startsWith('/api/replay/')) {
+        return { bucket: 'replay', limitMax: REPLAY_RATE_LIMIT_MAX };
+    }
+    if (reqPath === '/api/status') {
+        return { bucket: 'status', limitMax: STATUS_RATE_LIMIT_MAX };
+    }
+    if (reqPath === '/api/infrastructure' || reqPath === '/api/power-infra') {
+        return { bucket: 'infrastructure', limitMax: INFRA_RATE_LIMIT_MAX };
+    }
+    return { bucket: 'default', limitMax: DEFAULT_RATE_LIMIT_MAX };
+}
+
 app.use((req, res, next) => {
     const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+    const { bucket: bucketName, limitMax } = classifyRateLimit(req.path);
+    const bucketKey = `${ip}:${bucketName}`;
     const now = Date.now();
-    const bucket = rateLimitMap.get(ip);
+    const bucket = rateLimitMap.get(bucketKey);
     if (!bucket || now >= bucket.resetAt) {
-        rateLimitMap.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+        rateLimitMap.set(bucketKey, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
     } else {
         bucket.count++;
-        if (bucket.count > RATE_LIMIT_MAX) {
+        if (bucket.count > limitMax) {
+            recordRateLimitReject(bucketName, req.path);
             res.status(429).json({ error: 'Too many requests' });
             return;
         }
@@ -502,7 +605,34 @@ function parseBbox(bbox: string | undefined, order: BboxOrder = 'swne'): [number
 }
 
 function normalizeLayerId(layerId: string | undefined): string | undefined {
+    if (!layerId) return layerId;
+    if (layerId === 'satellites') return 'satellite';
     return layerId;
+}
+
+function parseLayerScopeList(value: string | undefined): string[] {
+    if (!value) return [];
+    return value
+        .split(',')
+        .map((part) => normalizeLayerId(part.trim()))
+        .filter((part): part is string => Boolean(part));
+}
+
+function parseLayerLimitMap(value: string | undefined): Record<string, number> {
+    if (!value) return {};
+    const entries = value
+        .split(',')
+        .map((part) => part.trim())
+        .filter(Boolean);
+    const result: Record<string, number> = {};
+    for (const entry of entries) {
+        const [rawLayerId, rawLimit] = entry.split(':');
+        const layerId = normalizeLayerId(rawLayerId?.trim());
+        const limit = parseOptionalPositiveLimit(rawLimit?.trim());
+        if (!layerId || limit == null) continue;
+        result[layerId] = limit;
+    }
+    return result;
 }
 
 function parsePositiveLimit(value: string | undefined, fallback = 200): number {
@@ -510,6 +640,20 @@ function parsePositiveLimit(value: string | undefined, fallback = 200): number {
     const parsed = Number(value);
     if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
     return Math.max(1, Math.min(5000, Math.trunc(parsed)));
+}
+
+function parseOptionalPositiveLimit(value: string | undefined): number | undefined {
+    if (!value || value === 'all') return undefined;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
+    return Math.max(1, Math.trunc(parsed));
+}
+
+function parseOptionalPositiveGridDegrees(value: string | undefined): number | null {
+    if (!value) return null;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) return null;
+    return Math.max(0.1, Math.min(10, parsed));
 }
 
 function parseIsoDateOrNull(value: string | undefined): string | null {
@@ -658,6 +802,312 @@ app.get('/api/replay/events', async (req, res) => {
             mode: 'history',
             filters,
             summary,
+            items,
+        });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/replay/state', async (req, res) => {
+    if (!replayQueryService.isReady()) {
+        res.status(503).json({ error: 'Replay database is not ready' });
+        return;
+    }
+
+    const at = parseIsoDateOrNull(req.query.at as string | undefined);
+    if (!at) {
+        res.status(400).json({ error: 'Missing or invalid at timestamp' });
+        return;
+    }
+
+    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    if (req.query.bbox && !bbox) {
+        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        return;
+    }
+
+    try {
+        const replayLimit = parseOptionalPositiveLimit(req.query.limit as string | undefined);
+        if ((req.query.limit as string | undefined) && replayLimit === undefined && req.query.limit !== 'all') {
+            res.status(400).json({ error: 'Invalid limit (expected positive integer or \"all\")' });
+            return;
+        }
+
+        const layerIds = parseLayerScopeList(req.query.layers as string | undefined);
+        const layerLimitMap = parseLayerLimitMap(req.query.layerLimits as string | undefined);
+        const routeStartedAt = performance.now();
+
+        await withSpan('replay.state', {
+            'replay.layers.count': layerIds.length,
+            'replay.has_bbox': Boolean(bbox),
+        }, async () => {
+            const filters = {
+                at,
+                layerId: normalizeLayerId((req.query.layerId as string | undefined) || (req.query.layer as string | undefined)),
+                sourceId: req.query.sourceId as string | undefined,
+                entityId: req.query.entityId as string | undefined,
+                entityKind: req.query.entityKind as string | undefined,
+                eventId: req.query.eventId as string | undefined,
+                eventKind: req.query.eventKind as string | undefined,
+                assetId: req.query.assetId as string | undefined,
+                assetKind: req.query.assetKind as string | undefined,
+                subtype: req.query.subtype as string | undefined,
+                bbox: bbox || undefined,
+                limit: replayLimit,
+            };
+
+            let entities;
+            let events;
+            let assets;
+            if (layerIds.length > 0) {
+                const perLayer = await Promise.all(
+                    layerIds.map(async (layerId) => {
+                        const scoped = {
+                            ...filters,
+                            layerId,
+                            limit: layerLimitMap[layerId] ?? replayLimit,
+                        };
+                        const [layerEntities, layerEvents, layerAssets] = await Promise.all([
+                            replayQueryService.listEntityStateAt(scoped),
+                            replayQueryService.listEventStateAt(scoped),
+                            replayQueryService.listAssetStateAt(scoped),
+                        ]);
+                        return { layerEntities, layerEvents, layerAssets };
+                    }),
+                );
+                entities = perLayer.flatMap((row) => row.layerEntities);
+                events = perLayer.flatMap((row) => row.layerEvents);
+                assets = perLayer.flatMap((row) => row.layerAssets);
+            } else {
+                [entities, events, assets] = await Promise.all([
+                    replayQueryService.listEntityStateAt(filters),
+                    replayQueryService.listEventStateAt(filters),
+                    replayQueryService.listAssetStateAt(filters),
+                ]);
+            }
+
+            recordReplayRequest(
+                'state',
+                performance.now() - routeStartedAt,
+                entities.length + events.length + assets.length,
+                layerIds.length > 0 ? layerIds.join(',') : filters.layerId || filters.sourceId || 'all',
+            );
+
+            res.json({
+                mode: 'historical-replay',
+                replay_kind: 'state',
+                time_basis: 'observed',
+                at,
+                filters: {
+                    ...filters,
+                    ...(layerIds.length > 0 ? { layers: layerIds } : {}),
+                },
+                semantics: {
+                    entities: 'latest entity snapshot <= at, with latest position fix <= at when available',
+                    events: 'latest event snapshot <= at; valid_to is respected when present',
+                    assets: 'latest asset snapshot <= at',
+                },
+                counts: {
+                    entities: entities.length,
+                    events: events.length,
+                    assets: assets.length,
+                },
+                entities,
+                events,
+                assets,
+            });
+        });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/replay/window', async (req, res) => {
+    if (!replayQueryService.isReady()) {
+        res.status(503).json({ error: 'Replay database is not ready' });
+        return;
+    }
+
+    const from = parseIsoDateOrNull(req.query.from as string | undefined);
+    const to = parseIsoDateOrNull(req.query.to as string | undefined);
+    if (!from || !to) {
+        res.status(400).json({ error: 'Missing or invalid from/to timestamp' });
+        return;
+    }
+
+    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    if (req.query.bbox && !bbox) {
+        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        return;
+    }
+
+    const stepSecondsRaw = req.query.stepSeconds as string | undefined;
+    const stepSeconds = stepSecondsRaw ? Number(stepSecondsRaw) : undefined;
+    if (stepSecondsRaw && (!Number.isFinite(stepSeconds) || stepSeconds! <= 0)) {
+        res.status(400).json({ error: 'Invalid stepSeconds (expected positive integer)' });
+        return;
+    }
+
+    const replayLimit = parseOptionalPositiveLimit(req.query.limit as string | undefined);
+    if ((req.query.limit as string | undefined) && replayLimit === undefined && req.query.limit !== 'all') {
+        res.status(400).json({ error: 'Invalid limit (expected positive integer or "all")' });
+        return;
+    }
+
+    const layerIds = parseLayerScopeList(req.query.layers as string | undefined);
+    const layerLimitMap = parseLayerLimitMap(req.query.layerLimits as string | undefined);
+    const layerId = normalizeLayerId((req.query.layerId as string | undefined) || (req.query.layer as string | undefined));
+    const sourceId = req.query.sourceId as string | undefined;
+    const entityId = req.query.entityId as string | undefined;
+    const eventId = req.query.eventId as string | undefined;
+    const assetId = req.query.assetId as string | undefined;
+
+    if (layerIds.length === 0 && !layerId && !sourceId && !entityId && !eventId && !assetId) {
+        res.status(400).json({ error: 'Replay window requires at least one scope selector (layerId, sourceId, entityId, eventId, assetId)' });
+        return;
+    }
+
+    try {
+        const routeStartedAt = performance.now();
+        const filters = {
+            from,
+            to,
+            layerId,
+            sourceId,
+            entityId,
+            entityKind: req.query.entityKind as string | undefined,
+            eventId,
+            eventKind: req.query.eventKind as string | undefined,
+            assetId,
+            assetKind: req.query.assetKind as string | undefined,
+            subtype: req.query.subtype as string | undefined,
+            bbox: bbox || undefined,
+            limit: replayLimit,
+            stepSeconds: stepSeconds || undefined,
+        };
+
+        await withSpan('replay.window', {
+            'replay.layers.count': layerIds.length,
+            'replay.has_bbox': Boolean(bbox),
+            'replay.step_seconds': stepSeconds || 0,
+        }, async () => {
+            const items = layerIds.length > 0
+                ? (await Promise.all(layerIds.map((scopedLayerId) => replayQueryService.listWindow({
+                    ...filters,
+                    layerId: scopedLayerId,
+                    limit: layerLimitMap[scopedLayerId] ?? replayLimit,
+                })))).flat()
+                    .sort((left, right) => {
+                        const dt = new Date(left.at).getTime() - new Date(right.at).getTime();
+                        if (dt !== 0) return dt;
+                        return left.target_id.localeCompare(right.target_id);
+                    })
+                    .slice(0, replayLimit ?? Number.MAX_SAFE_INTEGER)
+                : await replayQueryService.listWindow(filters);
+            const counts = items.reduce(
+                (acc, item) => {
+                    acc.total += 1;
+                    if (item.op === 'upsert') acc.upserts += 1;
+                    else acc.removes += 1;
+                    if (item.family === 'entity') acc.entities += 1;
+                    else if (item.family === 'event') acc.events += 1;
+                    else acc.assets += 1;
+                    return acc;
+                },
+                { total: 0, upserts: 0, removes: 0, entities: 0, events: 0, assets: 0 },
+            );
+
+            recordReplayRequest(
+                'window',
+                performance.now() - routeStartedAt,
+                counts.total,
+                layerIds.length > 0 ? layerIds.join(',') : filters.layerId || filters.sourceId || 'scoped',
+            );
+
+            res.json({
+                mode: 'historical-replay',
+                replay_kind: 'window',
+                time_basis: 'observed',
+                from,
+                to,
+                filters: {
+                    ...filters,
+                    ...(layerIds.length > 0 ? { layers: layerIds } : {}),
+                },
+                semantics: {
+                    seek: 'use replay/state for point-in-time frame reconstruction',
+                    play: 'use replay/window to apply ordered upsert/remove operations over a bounded interval',
+                    moving_entities: 'position fixes inside the window plus synthetic remove events when remove_after_sec expires before the next fix',
+                    events: 'event snapshots inside the window plus synthetic remove events when valid_to expires before the next snapshot',
+                    assets: 'asset snapshots inside the window; no synthetic remove is emitted unless retirement semantics are modeled explicitly',
+                    satellites: 'propagated positions sampled across the requested window using historical TLE snapshots and stepSeconds',
+                },
+                counts,
+                items,
+            });
+        });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/replay/track/:entityId', async (req, res) => {
+    if (!replayQueryService.isReady() || !entityQueryService.isReady()) {
+        res.status(503).json({ error: 'Replay database is not ready' });
+        return;
+    }
+
+    const from = parseIsoDateOrNull(req.query.from as string | undefined);
+    const to = parseIsoDateOrNull(req.query.to as string | undefined);
+    if ((req.query.from && !from) || (req.query.to && !to)) {
+        res.status(400).json({ error: 'Invalid from/to timestamp' });
+        return;
+    }
+
+    const order = req.query.order === 'desc' ? 'desc' : 'asc';
+    const stepSecondsRaw = req.query.stepSeconds as string | undefined;
+    const stepSeconds = stepSecondsRaw ? Number(stepSecondsRaw) : undefined;
+    if (stepSecondsRaw && (!Number.isFinite(stepSeconds) || stepSeconds! <= 0)) {
+        res.status(400).json({ error: 'Invalid stepSeconds (expected positive integer)' });
+        return;
+    }
+
+    try {
+        const routeStartedAt = performance.now();
+        const [entityState, items] = await Promise.all([
+            replayQueryService.listEntityStateAt({
+                at: to || new Date().toISOString(),
+                entityId: req.params.entityId,
+                limit: 1,
+            }),
+            req.params.entityId.startsWith('satellite:')
+                ? replayQueryService.listSatelliteTrack({
+                    entityId: req.params.entityId,
+                    from: from || undefined,
+                    to: to || undefined,
+                    limit: parsePositiveLimit(req.query.limit as string | undefined, 1000),
+                    order,
+                    stepSeconds: stepSeconds || undefined,
+                })
+                : entityQueryService.listTrack({
+                    entityId: req.params.entityId,
+                    from: from || undefined,
+                    to: to || undefined,
+                    limit: parsePositiveLimit(req.query.limit as string | undefined, 1000),
+                    order,
+                }),
+        ]);
+
+        recordReplayRequest('track', performance.now() - routeStartedAt, items.length, req.params.entityId);
+
+        res.json({
+            mode: 'historical-replay',
+            replay_kind: 'track',
+            entityId: req.params.entityId,
+            order,
+            entity: entityState[0] || null,
+            count: items.length,
             items,
         });
     } catch (err: any) {
@@ -928,13 +1378,26 @@ app.get('/api/cables', async (_req, res) => {
     }
 });
 
-app.get('/api/fires', async (_req, res) => {
+app.get('/api/fires', async (req, res) => {
     if (!liveProjectionService.isReady()) {
         res.status(503).json({ error: 'Query database is not ready' });
         return;
     }
+    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    if (req.query.bbox && !bbox) {
+        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        return;
+    }
+    const gridDegrees = parseOptionalPositiveGridDegrees(req.query.gridDegrees as string | undefined);
+    if ((req.query.gridDegrees as string | undefined) && gridDegrees == null) {
+        res.status(400).json({ error: 'Invalid gridDegrees (expected positive number)' });
+        return;
+    }
     try {
-        res.json(await liveProjectionService.getFires());
+        res.json(await liveProjectionService.getFires({
+            bbox: bbox || undefined,
+            gridDegrees,
+        }));
     } catch (err: any) {
         res.status(500).json({ error: err.message });
     }
@@ -1357,7 +1820,7 @@ app.get('/api/windy-webcams', async (req, res) => {
 // Service health status — real state from each service's getHealth(),
 // not just env-var presence. Services report streaming/error/auth-missing
 // based on actual upstream success.
-app.get('/api/status', (_req, res) => {
+app.get('/api/status', async (_req, res) => {
     const envCheck = (key: string) => !!(process.env[key] && process.env[key]!.length > 0);
 const adsbHealth = liveStreamService.getHealth();
     const extendedHealth = extendedService.getHealth();
@@ -1446,6 +1909,7 @@ const adsbHealth = liveStreamService.getHealth();
         webcams: { status: webcamsStatus, note: webcamsNote },
         infrastructure: { status: infraStatus, note: infraNote },
         overture: os ?? { state: 'disabled' },
+        storage: await collectStorageStatus(),
     };
 
     void runtimeStateRepository.persistSnapshot(statusPayload);
@@ -1477,18 +1941,22 @@ async function bootstrap() {
     // service unready and the hybrid merge silently falls back to
     // Overpass-only responses — no request path bails.
     await overtureService.init();
-    liveStreamService.start();
-    extendedService.start();
-    gpsJamService.start();
-    webcamsService.start();
-    iodaService.start();
-    oilPricesService.start();
-    energyService.start();
-    acledService.start();
-    gdeltService.start();
-    airspaceService.start();
-    gfwService.start();
-    cloudflareService.start();
+    if (liveIngestEnabled) {
+        liveStreamService.start();
+        extendedService.start();
+        gpsJamService.start();
+        webcamsService.start();
+        iodaService.start();
+        oilPricesService.start();
+        energyService.start();
+        acledService.start();
+        gdeltService.start();
+        airspaceService.start();
+        gfwService.start();
+        cloudflareService.start();
+    } else {
+        console.log('[bootstrap] Live ingest disabled via DISABLE_LIVE_INGEST=true');
+    }
 
     io.on('connection', (socket) => {
         console.log('Client connected:', socket.id);

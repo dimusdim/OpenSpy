@@ -161,6 +161,15 @@ With Docker:
 docker-compose up
 ```
 
+Optional local observability:
+
+```bash
+npm run telemetry:up
+# set OTEL_ENABLED=true in backend/.env
+```
+
+See [docs/local-observability.md](docs/local-observability.md).
+
 Most layers work out of the box with zero API keys. For the full experience, register free accounts for: OpenSky, AISStream, ACLED, OpenAIP, and optionally TomTom, Windy, Cloudflare, Global Fishing Watch. Signup links are in `SOURCES.md`.
 
 ---

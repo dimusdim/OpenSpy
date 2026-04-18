@@ -43,6 +43,7 @@ type AssetUpsertRow = {
 
 type EntityUpsertRow = {
     entity_id: string;
+    latest_snapshot_id: string | null;
     layer_id: string;
     source_id: string | null;
     entity_kind: string;
@@ -50,6 +51,18 @@ type EntityUpsertRow = {
     display_name: string | null;
     first_observed_at: string | null;
     last_observed_at: string | null;
+    properties: Record<string, any>;
+};
+
+type EntitySnapshotUpsertRow = {
+    entity_snapshot_id: string;
+    entity_id: string;
+    layer_id: string;
+    source_id: string | null;
+    entity_kind: string;
+    subtype: string | null;
+    display_name: string | null;
+    observed_at: string | null;
     properties: Record<string, any>;
 };
 
@@ -109,6 +122,7 @@ type PositionFixUpsertRow = {
 type OrbitalElementUpsertRow = {
     orbital_element_id: string;
     entity_id: string;
+    layer_id: string;
     source_id: string | null;
     observed_at: string;
     norad_id: string | null;
@@ -517,6 +531,7 @@ export class SourcePersistenceService {
                     SELECT *
                     FROM jsonb_to_recordset($1::jsonb) AS rowset(
                         entity_id text,
+                        latest_snapshot_id text,
                         layer_id text,
                         source_id text,
                         entity_kind text,
@@ -529,6 +544,7 @@ export class SourcePersistenceService {
                 )
                 INSERT INTO core.entities (
                     entity_id,
+                    latest_snapshot_id,
                     layer_id,
                     source_id,
                     entity_kind,
@@ -542,6 +558,7 @@ export class SourcePersistenceService {
                 )
                 SELECT
                     entity_id,
+                    latest_snapshot_id,
                     layer_id,
                     source_id,
                     entity_kind,
@@ -555,6 +572,7 @@ export class SourcePersistenceService {
                 FROM incoming
                 ON CONFLICT (entity_id)
                 DO UPDATE SET
+                    latest_snapshot_id = EXCLUDED.latest_snapshot_id,
                     layer_id = EXCLUDED.layer_id,
                     source_id = EXCLUDED.source_id,
                     entity_kind = EXCLUDED.entity_kind,
@@ -618,6 +636,29 @@ export class SourcePersistenceService {
         );
     }
 
+    private async loadLatestEntityHashes(entityIds: string[]): Promise<Map<string, string>> {
+        const uniqueEntityIds = [...new Set(entityIds)];
+        const hashes = new Map<string, string>();
+        if (!this.database.isReady() || uniqueEntityIds.length === 0) return hashes;
+
+        const result = await this.database.query<{ entity_id: string; state_hash: string | null }>(
+            `
+                SELECT
+                    entity_id,
+                    properties->>'_state_hash' AS state_hash
+                FROM core.entities
+                WHERE entity_id = ANY($1::text[])
+            `,
+            [uniqueEntityIds],
+        );
+
+        for (const row of result?.rows || []) {
+            hashes.set(row.entity_id, row.state_hash || '');
+        }
+
+        return hashes;
+    }
+
     private async loadLatestPositionHashes(entityIds: string[]): Promise<Map<string, string>> {
         const uniqueEntityIds = [...new Set(entityIds)];
         const hashes = new Map<string, string>();
@@ -640,6 +681,58 @@ export class SourcePersistenceService {
         }
 
         return hashes;
+    }
+
+    private async insertEntitySnapshots(rows: EntitySnapshotUpsertRow[], ingestRunId: string | null = null): Promise<void> {
+        if (!this.database.isReady() || rows.length === 0) return;
+
+        await this.database.query(
+            `
+                WITH incoming AS (
+                    SELECT rowset.*, $2::text AS ingest_run_id
+                    FROM jsonb_to_recordset($1::jsonb) AS rowset(
+                        entity_snapshot_id text,
+                        entity_id text,
+                        layer_id text,
+                        source_id text,
+                        entity_kind text,
+                        subtype text,
+                        display_name text,
+                        observed_at timestamptz,
+                        properties jsonb
+                    )
+                )
+                INSERT INTO core.entity_snapshots (
+                    entity_snapshot_id,
+                    entity_id,
+                    ingest_run_id,
+                    layer_id,
+                    source_id,
+                    entity_kind,
+                    subtype,
+                    display_name,
+                    observed_at,
+                    properties,
+                    created_at
+                )
+                SELECT
+                    entity_snapshot_id,
+                    entity_id,
+                    ingest_run_id,
+                    layer_id,
+                    source_id,
+                    entity_kind,
+                    subtype,
+                    display_name,
+                    observed_at,
+                    properties,
+                    now()
+                FROM incoming
+                ON CONFLICT (entity_snapshot_id)
+                DO NOTHING
+            `,
+            [JSON.stringify(rows), ingestRunId],
+        );
     }
 
     private async insertPositionFixes(rows: PositionFixUpsertRow[]): Promise<void> {
@@ -769,6 +862,7 @@ export class SourcePersistenceService {
                     FROM jsonb_to_recordset($1::jsonb) AS rowset(
                         orbital_element_id text,
                         entity_id text,
+                        layer_id text,
                         source_id text,
                         observed_at timestamptz,
                         norad_id text,
@@ -780,6 +874,7 @@ export class SourcePersistenceService {
                 INSERT INTO core.orbital_elements (
                     orbital_element_id,
                     entity_id,
+                    layer_id,
                     source_id,
                     observed_at,
                     norad_id,
@@ -791,6 +886,7 @@ export class SourcePersistenceService {
                 SELECT
                     orbital_element_id,
                     entity_id,
+                    layer_id,
                     source_id,
                     observed_at,
                     norad_id,
@@ -999,6 +1095,7 @@ export class SourcePersistenceService {
 
         const binding = getSourceBinding('opensky');
         const entities: EntityUpsertRow[] = [];
+        const entitySnapshotsSeed: Array<EntitySnapshotUpsertRow & { state_hash: string }> = [];
         const aliases: EntityAliasUpsertRow[] = [];
         const fixesSeed: Array<PositionFixUpsertRow & { state_hash: string }> = [];
 
@@ -1023,6 +1120,7 @@ export class SourcePersistenceService {
 
             entities.push({
                 entity_id: entityId,
+                latest_snapshot_id: `entity-snap:${entityId}:${stateHash}`,
                 layer_id: binding?.layerId || 'aircraft',
                 source_id: binding?.sourceId || 'opensky',
                 entity_kind: binding?.recordKind || 'aircraft',
@@ -1039,6 +1137,27 @@ export class SourcePersistenceService {
                     squawk: record.squawk || null,
                     _state_hash: stateHash,
                 },
+            });
+
+            entitySnapshotsSeed.push({
+                entity_snapshot_id: `entity-snap:${entityId}:${stateHash}`,
+                entity_id: entityId,
+                layer_id: binding?.layerId || 'aircraft',
+                source_id: binding?.sourceId || 'opensky',
+                entity_kind: binding?.recordKind || 'aircraft',
+                subtype: record.type || null,
+                display_name: escapeIdentifier(record.callsign || record.icao24),
+                observed_at: observedAt,
+                properties: {
+                    icao24: record.icao24,
+                    callsign: record.callsign,
+                    origin: record.origin || null,
+                    onGround: record.onGround ?? false,
+                    verticalRate: record.verticalRate ?? null,
+                    squawk: record.squawk || null,
+                    _state_hash: stateHash,
+                },
+                state_hash: stateHash,
             });
 
             aliases.push({
@@ -1081,10 +1200,16 @@ export class SourcePersistenceService {
             });
         }
 
-        const latestHashes = await this.loadLatestPositionHashes(fixesSeed.map((row) => row.entity_id));
+        const [latestEntityHashes, latestPositionHashes] = await Promise.all([
+            this.loadLatestEntityHashes(entitySnapshotsSeed.map((row) => row.entity_id)),
+            this.loadLatestPositionHashes(fixesSeed.map((row) => row.entity_id)),
+        ]);
+        const entitySnapshots = entitySnapshotsSeed
+            .filter((row) => latestEntityHashes.get(row.entity_id) !== row.state_hash)
+            .map(({ state_hash: _stateHash, ...row }) => row);
         const liveRows = fixesSeed.map(({ state_hash: _stateHash, ...row }) => row);
         const fixes = fixesSeed
-            .filter((row) => latestHashes.get(row.entity_id) !== row.state_hash)
+            .filter((row) => latestPositionHashes.get(row.entity_id) !== row.state_hash)
             .map(({ state_hash: _stateHash, ...row }) => row);
 
         await this.runTrackedIngest(
@@ -1094,6 +1219,7 @@ export class SourcePersistenceService {
                 record_count: records.length,
                 metadata: {
                     canonicalTarget: 'entities',
+                    changedEntityCount: entitySnapshots.length,
                     changedFixCount: fixes.length,
                     entityCount: entities.length,
                 },
@@ -1101,6 +1227,7 @@ export class SourcePersistenceService {
             async () => {
                 await this.upsertEntities(entities);
                 await this.upsertEntityAliases(aliases);
+                await this.insertEntitySnapshots(entitySnapshots);
                 await this.upsertEntityLiveStates(liveRows);
                 await this.insertPositionFixes(fixes);
             },
@@ -1153,6 +1280,7 @@ export class SourcePersistenceService {
 
         const binding = getSourceBinding('aisstream');
         const entities: EntityUpsertRow[] = [];
+        const entitySnapshotsSeed: Array<EntitySnapshotUpsertRow & { state_hash: string }> = [];
         const aliases: EntityAliasUpsertRow[] = [];
         const fixesSeed: Array<PositionFixUpsertRow & { state_hash: string }> = [];
 
@@ -1174,6 +1302,7 @@ export class SourcePersistenceService {
 
             entities.push({
                 entity_id: entityId,
+                latest_snapshot_id: `entity-snap:${entityId}:${stateHash}`,
                 layer_id: binding?.layerId || 'vessel',
                 source_id: binding?.sourceId || 'aisstream',
                 entity_kind: binding?.recordKind || 'vessel',
@@ -1196,6 +1325,33 @@ export class SourcePersistenceService {
                     cog: record.cog ?? null,
                     _state_hash: stateHash,
                 },
+            });
+
+            entitySnapshotsSeed.push({
+                entity_snapshot_id: `entity-snap:${entityId}:${stateHash}`,
+                entity_id: entityId,
+                layer_id: binding?.layerId || 'vessel',
+                source_id: binding?.sourceId || 'aisstream',
+                entity_kind: binding?.recordKind || 'vessel',
+                subtype: record.type || null,
+                display_name: escapeIdentifier(record.name || record.callSign || record.id),
+                observed_at: observedAt,
+                properties: {
+                    mmsi: record.id,
+                    name: record.name || null,
+                    callSign: record.callSign || null,
+                    imo: record.imo || null,
+                    destination: record.destination || null,
+                    eta: record.eta || null,
+                    draught: record.draught ?? null,
+                    length: record.length ?? null,
+                    beam: record.beam ?? null,
+                    navigationStatus: record.navigationStatus || null,
+                    rateOfTurn: record.rateOfTurn ?? null,
+                    cog: record.cog ?? null,
+                    _state_hash: stateHash,
+                },
+                state_hash: stateHash,
             });
 
             aliases.push({
@@ -1253,10 +1409,16 @@ export class SourcePersistenceService {
             });
         }
 
-        const latestHashes = await this.loadLatestPositionHashes(fixesSeed.map((row) => row.entity_id));
+        const [latestEntityHashes, latestPositionHashes] = await Promise.all([
+            this.loadLatestEntityHashes(entitySnapshotsSeed.map((row) => row.entity_id)),
+            this.loadLatestPositionHashes(fixesSeed.map((row) => row.entity_id)),
+        ]);
+        const entitySnapshots = entitySnapshotsSeed
+            .filter((row) => latestEntityHashes.get(row.entity_id) !== row.state_hash)
+            .map(({ state_hash: _stateHash, ...row }) => row);
         const liveRows = fixesSeed.map(({ state_hash: _stateHash, ...row }) => row);
         const fixes = fixesSeed
-            .filter((row) => latestHashes.get(row.entity_id) !== row.state_hash)
+            .filter((row) => latestPositionHashes.get(row.entity_id) !== row.state_hash)
             .map(({ state_hash: _stateHash, ...row }) => row);
 
         await this.runTrackedIngest(
@@ -1266,6 +1428,7 @@ export class SourcePersistenceService {
                 record_count: records.length,
                 metadata: {
                     canonicalTarget: 'entities',
+                    changedEntityCount: entitySnapshots.length,
                     changedFixCount: fixes.length,
                     entityCount: entities.length,
                 },
@@ -1273,6 +1436,7 @@ export class SourcePersistenceService {
             async () => {
                 await this.upsertEntities(entities);
                 await this.upsertEntityAliases(aliases);
+                await this.insertEntitySnapshots(entitySnapshots);
                 await this.upsertEntityLiveStates(liveRows);
                 await this.insertPositionFixes(fixes);
             },
@@ -1645,6 +1809,7 @@ export class SourcePersistenceService {
         const binding = getSourceBinding('celestrak');
         const observedAt = new Date().toISOString();
         const entities: EntityUpsertRow[] = [];
+        const entitySnapshotsSeed: Array<EntitySnapshotUpsertRow & { state_hash: string }> = [];
         const aliases: EntityAliasUpsertRow[] = [];
         const orbitalRows: OrbitalElementUpsertRow[] = [];
 
@@ -1662,6 +1827,7 @@ export class SourcePersistenceService {
 
             entities.push({
                 entity_id: entityId,
+                latest_snapshot_id: `entity-snap:${entityId}:${stateHash}`,
                 layer_id: binding?.layerId || 'satellite',
                 source_id: binding?.sourceId || 'celestrak',
                 entity_kind: binding?.recordKind || 'satellite',
@@ -1682,6 +1848,29 @@ export class SourcePersistenceService {
                 },
             });
 
+            entitySnapshotsSeed.push({
+                entity_snapshot_id: `entity-snap:${entityId}:${stateHash}`,
+                entity_id: entityId,
+                layer_id: binding?.layerId || 'satellite',
+                source_id: binding?.sourceId || 'celestrak',
+                entity_kind: binding?.recordKind || 'satellite',
+                subtype: record.type || null,
+                display_name: escapeIdentifier(record.name || noradId || entityId),
+                observed_at: observedAt,
+                properties: {
+                    noradId: record.noradId,
+                    type: record.type,
+                    classificationSource: record.classificationSource || 'derived_name_heuristic',
+                    recon: record.recon || false,
+                    reconMeta: record.reconMeta || null,
+                    sensor: record.sensor || null,
+                    provider: options?.provider || null,
+                    loadedFromCache: options?.loadedFromCache || false,
+                    _state_hash: stateHash,
+                },
+                state_hash: stateHash,
+            });
+
             if (noradId) {
                 aliases.push({
                     entity_alias_id: `alias:${entityId}:norad:${noradId}`,
@@ -1694,6 +1883,7 @@ export class SourcePersistenceService {
             orbitalRows.push({
                 orbital_element_id: `orb:${entityId}:${stateHash}`,
                 entity_id: entityId,
+                layer_id: binding?.layerId || 'satellite',
                 source_id: binding?.sourceId || 'celestrak',
                 observed_at: observedAt,
                 norad_id: noradId,
@@ -1712,6 +1902,11 @@ export class SourcePersistenceService {
             });
         }
 
+        const latestEntityHashes = await this.loadLatestEntityHashes(entitySnapshotsSeed.map((row) => row.entity_id));
+        const entitySnapshots = entitySnapshotsSeed
+            .filter((row) => latestEntityHashes.get(row.entity_id) !== row.state_hash)
+            .map(({ state_hash: _stateHash, ...row }) => row);
+
         await this.runTrackedIngest(
             {
                 source_id: binding?.sourceId || 'celestrak',
@@ -1719,6 +1914,7 @@ export class SourcePersistenceService {
                 record_count: records.length,
                 metadata: {
                     canonicalTarget: binding?.canonicalTarget || 'orbital_elements',
+                    changedEntityCount: entitySnapshots.length,
                     provider: options?.provider || null,
                     loadedFromCache: options?.loadedFromCache || false,
                 },
@@ -1726,6 +1922,7 @@ export class SourcePersistenceService {
             async () => {
                 await this.upsertEntities(entities);
                 await this.upsertEntityAliases(aliases);
+                await this.insertEntitySnapshots(entitySnapshots);
                 await this.insertOrbitalElements(orbitalRows);
             },
         );

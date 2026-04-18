@@ -1,5 +1,6 @@
 import { Pool, type QueryResult, type QueryResultRow } from 'pg';
 import { runMigrations } from './migrator';
+import { recordDbQuery, withSpan } from '../telemetry/observability';
 
 type DatabaseHealthStatus = 'disabled' | 'streaming' | 'error';
 
@@ -78,9 +79,18 @@ export class DatabaseService {
         params: unknown[] = [],
     ): Promise<QueryResult<T> | null> {
         if (!this.pool || !this.ready) return null;
-        return this.pool.query<T>(text, params);
+        const startedAt = performance.now();
+        return withSpan('db.query', { 'db.query.params': params.length }, async () => {
+            try {
+                const result = await this.pool!.query<T>(text, params);
+                recordDbQuery(text, performance.now() - startedAt, true, result.rowCount);
+                return result;
+            } catch (error) {
+                recordDbQuery(text, performance.now() - startedAt, false, null);
+                throw error;
+            }
+        });
     }
 }
 
 export const databaseService = new DatabaseService();
-

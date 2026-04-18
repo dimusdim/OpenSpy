@@ -6,9 +6,19 @@
     "dev:frontend": "cd frontend && npm run dev",
     "dev:backend": "cd backend && npm run dev",
     "install:all": "npm i && cd frontend && npm i && cd ../backend && npm i",
-    "test:smoke": "node tests/smoke-api.mjs"
+    "test:smoke": "node tests/smoke-api.mjs",
+    "test:replay-runtime": "node tests/replay-runtime-diagnostics.mjs",
+    "test:replay-ui-runtime": "node tests/replay-ui-runtime-diagnostics.mjs",
+    "test:replay-scene-ab": "node tests/replay-scene-ab-benchmark.mjs",
+    "telemetry:up": "bash ./ops/telemetry/telemetry-up.sh",
+    "telemetry:down": "bash ./ops/telemetry/telemetry-down.sh",
+    "telemetry:status": "bash ./ops/telemetry/telemetry-status.sh",
+    "telemetry:logs": "bash ./ops/telemetry/telemetry-logs.sh"
   },
   "dependencies": {
     "concurrently": "^8.2.2"
+  },
+  "devDependencies": {
+    "playwright": "^1.59.1"
   }
 }

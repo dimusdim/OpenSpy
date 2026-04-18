@@ -1,4 +1,4 @@
-import { Server } from 'socket.io';
+import { Server, type Socket } from 'socket.io';
 import axios from 'axios';
 import WebSocket from 'ws';
 import fs from 'fs';
@@ -197,6 +197,7 @@ export class LiveStreamService {
         // next OpenSky refresh (up to 90s). Also prevents frontend reconciliation
         // from removing dark vessels it already tracks.
         this.io.on('connection', (socket) => {
+            socket.data.needsInitialLiveSnapshot = true;
             void this.emitInitialSnapshot(socket);
         });
 
@@ -258,23 +259,13 @@ export class LiveStreamService {
             await this.refreshLiveCaches(false);
 
             const darkVesselsArr = Array.from(this.darkVessels.values());
-            const payload: any = {
-                vessels: this.liveVesselCache,
-                darkVessels: darkVesselsArr,
-                meta: {
-                    aviationTotal: this.liveAircraftCache.length,
-                    maritimeTotal: this.liveVesselCache.length,
-                    aviationCounts: this.countBySubtype(this.liveAircraftCache),
-                    maritimeCounts: this.countBySubtype(this.liveVesselCache),
-                    darkVesselCount: darkVesselsArr.length,
-                },
-            };
-
-            if (shouldIncludeAircraft) {
-                payload.aircrafts = this.liveAircraftCache;
+            for (const socket of this.io.sockets.sockets.values()) {
+                const includeAircraft = shouldIncludeAircraft || socket.data?.needsInitialLiveSnapshot === true;
+                socket.emit('live-update', this.buildLivePayload(darkVesselsArr, includeAircraft));
+                if (includeAircraft) {
+                    socket.data.needsInitialLiveSnapshot = false;
+                }
             }
-
-            this.io.emit('live-update', payload);
         } catch (err: any) {
             console.warn('[LiveSocket] failed to build DB-backed live snapshot:', err?.message || err);
         } finally {
@@ -282,23 +273,38 @@ export class LiveStreamService {
         }
     }
 
-    private async emitInitialSnapshot(socket: any): Promise<void> {
+    private buildLivePayload(darkVesselsArr: DarkVessel[], includeAircraft: boolean): any {
+        const aircraftPayload = this.liveAircraftCache.length > 0
+            ? this.liveAircraftCache
+            : Array.from(this.aircrafts.values());
+        const vesselPayload = this.liveVesselCache.length > 0
+            ? this.liveVesselCache
+            : Array.from(this.vessels.values());
+        const payload: any = {
+            vessels: vesselPayload,
+            darkVessels: darkVesselsArr,
+            meta: {
+                aviationTotal: aircraftPayload.length,
+                maritimeTotal: vesselPayload.length,
+                aviationCounts: this.countBySubtype(aircraftPayload),
+                maritimeCounts: this.countBySubtype(vesselPayload),
+                darkVesselCount: darkVesselsArr.length,
+            },
+        };
+
+        if (includeAircraft) {
+            payload.aircrafts = aircraftPayload;
+        }
+
+        return payload;
+    }
+
+    private async emitInitialSnapshot(socket: Socket): Promise<void> {
         try {
             await this.refreshLiveCaches(true);
             const darkVesselsArr = Array.from(this.darkVessels.values());
-            const payload: any = {
-                vessels: this.liveVesselCache,
-                darkVessels: darkVesselsArr,
-                meta: {
-                    aviationTotal: this.liveAircraftCache.length,
-                    maritimeTotal: this.liveVesselCache.length,
-                    aviationCounts: this.countBySubtype(this.liveAircraftCache),
-                    maritimeCounts: this.countBySubtype(this.liveVesselCache),
-                    darkVesselCount: darkVesselsArr.length,
-                },
-            };
-            payload.aircrafts = this.liveAircraftCache;
-            socket.emit('live-update', payload);
+            socket.emit('live-update', this.buildLivePayload(darkVesselsArr, true));
+            socket.data.needsInitialLiveSnapshot = false;
         } catch (err: any) {
             console.warn('[LiveSocket] failed to send initial DB-backed snapshot:', err?.message || err);
         }

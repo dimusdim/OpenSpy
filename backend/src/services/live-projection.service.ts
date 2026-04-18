@@ -95,6 +95,11 @@ type EntityLiveRow = {
     live_properties: Record<string, any>;
 };
 
+type FireQueryOptions = {
+    bbox?: [number, number, number, number];
+    gridDegrees?: number | null;
+};
+
 function stripStateHash<T extends Record<string, any>>(value: T | null | undefined): T {
     const next = { ...(value || {}) } as T;
     delete (next as any)._state_hash;
@@ -327,9 +332,9 @@ export class LiveProjectionService {
         }).filter((row) => Number.isFinite(row.lat) && Number.isFinite(row.lng));
     }
 
-    async getFires(): Promise<FireRecord[]> {
+    async getFires(options?: FireQueryOptions): Promise<Array<FireRecord & { aggregated?: boolean; count?: number }>> {
         const rows = await this.listLatestEvents('fire');
-        return rows.map((row) => {
+        const records = rows.map((row) => {
             const props = stripStateHash(row.properties);
             return {
                 ...props,
@@ -338,6 +343,55 @@ export class LiveProjectionService {
                 lng: Number.isFinite(props.lng) ? props.lng : row.display_lng,
             } as FireRecord;
         }).filter((row) => Number.isFinite(row.lat) && Number.isFinite(row.lng));
+
+        const bbox = options?.bbox;
+        const filtered = bbox
+            ? records.filter((row) => {
+                const [south, west, north, east] = bbox;
+                const inLat = row.lat >= south && row.lat <= north;
+                const crossAM = east < west;
+                const inLng = crossAM
+                    ? row.lng >= west || row.lng <= east
+                    : row.lng >= west && row.lng <= east;
+                return inLat && inLng;
+            })
+            : records;
+
+        const gridDegrees = options?.gridDegrees;
+        if (!gridDegrees || gridDegrees <= 0) return filtered;
+
+        const crossAM = bbox ? bbox[3] < bbox[1] : false;
+        const west = bbox ? bbox[1] : -180;
+        const clusters = new Map<string, FireRecord & { aggregated: true; count: number }>();
+
+        for (const fire of filtered) {
+            const subtype = fire.frp > 100 ? 'high' : fire.frp > 30 ? 'medium' : 'low';
+            const adjustedLng = crossAM && fire.lng < west ? fire.lng + 360 : fire.lng;
+            const latBin = Math.floor(fire.lat / gridDegrees);
+            const lngBin = Math.floor(adjustedLng / gridDegrees);
+            const clusterKey = `${gridDegrees}:${subtype}:${latBin}:${lngBin}`;
+            const existing = clusters.get(clusterKey);
+            if (existing) {
+                const nextCount = existing.count + 1;
+                existing.lat = ((existing.lat * existing.count) + fire.lat) / nextCount;
+                existing.lng = ((existing.lng * existing.count) + adjustedLng) / nextCount;
+                if (crossAM && existing.lng > 180) existing.lng -= 360;
+                existing.count = nextCount;
+                existing.frp = Math.max(existing.frp, fire.frp);
+                existing.brightness = Math.max(existing.brightness, fire.brightness);
+                if (fire.acqTime > existing.acqTime) existing.acqTime = fire.acqTime;
+            } else {
+                clusters.set(clusterKey, {
+                    ...fire,
+                    id: `fire-cluster:${clusterKey}`,
+                    lng: crossAM && adjustedLng > 180 ? adjustedLng - 360 : adjustedLng,
+                    aggregated: true,
+                    count: 1,
+                });
+            }
+        }
+
+        return Array.from(clusters.values());
     }
 
     async getJammingZones(): Promise<JammingZone[]> {
