@@ -33,6 +33,7 @@ export function useJammingLayer(viewer: Cesium.Viewer | null) {
     // sources.jamming = fetch GPSJam; visibility.jamming = render H3 cells
     const isSourceOn = useTimelineStore(s => s.sources.jamming);
     const isVisible = useTimelineStore(s => s.visibility.jamming);
+    const mode = useTimelineStore(s => s.mode);
     const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
     const dsRef = useRef<Cesium.CustomDataSource | null>(null);
 
@@ -163,8 +164,8 @@ export function useJammingLayer(viewer: Cesium.Viewer | null) {
     // ---- Effect 3: layer visibility ----
     // Effective show = sources && visibility.
     useEffect(() => {
-        if (dsRef.current) dsRef.current.show = isSourceOn && isVisible;
-    }, [isSourceOn, isVisible]);
+        if (dsRef.current) dsRef.current.show = mode !== 'playback' && isSourceOn && isVisible;
+    }, [isSourceOn, isVisible, mode]);
 
     // ---- Effect 4: per-subtype visibility ----
     useEffect(() => {

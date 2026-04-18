@@ -3,44 +3,44 @@ import * as Cesium from 'cesium';
 import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
-import { FIRE_DOT_HIGH, FIRE_DOT_MEDIUM, FIRE_DOT_LOW } from '../icons/map-icons';
+import { getViewerAltitudeMeters } from './position-utils';
 
-// NASA FIRMS active fire hotspots rendered via BillboardCollection with
-// HeightReference.CLAMP_TO_GROUND. Billboards latch onto the Google 3D
-// Tileset / globe terrain at render time (Globe.tsx enables
-// `enableCollision` on the tileset for this to work).
-//
-// ### Viewport cull strategy
-//
-// Cull uses `billboard.show = false/true`, NOT add/remove. Why:
-//
-// The earlier iteration tried a remove-and-re-add rebuild on every
-// camera move, reasoning that CLAMP_TO_GROUND height listeners are
-// expensive and pruning the collection to the visible subset would
-// reduce listener churn. In practice the rebuild itself is O(N) with
-// a huge per-billboard constant — each `collection.add()` on a clamped
-// billboard registers a fresh HeightReferenceListener, and
-// `collection.removeAll()` disposes the previous ones. On a 60k FIRMS
-// payload this stalled the main thread for several hundred milliseconds
-// on every settled pan at global zoom, which froze the UI and made the
-// earth fail to render.
-//
-// The cheaper approach is a simple `show` flag mutation: O(N) tight
-// loop with no listener churn, no GPU buffer rebuild. Cesium's internal
-// clamping pipeline already honours `billboard.show` when deciding
-// whether to run its per-tile update work, so hiding most billboards
-// at close zoom still cuts the per-tile clamp cost without paying the
-// rebuild tax.
-//
-// Tradeoff: every billboard retains its HeightReferenceListener for
-// the whole viewer lifetime. Cesium handles tens of thousands of
-// listeners fine at global zoom where tile updates are rare; at close
-// zoom tile streaming is busier but most fires are hidden by the
-// viewport cull so only the visible subset pays the update cost.
+declare global {
+    interface Window {
+        __openspyFireStats?: {
+            renderMode: 'raw' | 'cluster';
+            rawHotspots: number;
+            renderedMarkers: number;
+            gridDegrees: number | null;
+        };
+    }
+}
 
-// Metadata for picking — stores fire info per billboard ID.
-export interface FireMeta { lat: number; lng: number; frp: number; brightness: number; confidence: string; subtype: 'high' | 'medium' | 'low'; daynight: string; acqTime: string; fireType: number; }
+export interface FireMeta {
+    lat: number;
+    lng: number;
+    frp: number;
+    brightness: number;
+    confidence: string;
+    subtype: 'high' | 'medium' | 'low';
+    daynight: string;
+    acqTime: string;
+    fireType: number;
+    aggregated?: boolean;
+    count?: number;
+}
+
+type FireRecord = FireMeta & {
+    id: string;
+};
+
 export const fireMetaMap = new Map<string, FireMeta>();
+
+function colorForSubtype(sub: 'high' | 'medium' | 'low'): Cesium.Color {
+    if (sub === 'high') return Cesium.Color.fromCssColorString('#ef4444').withAlpha(0.95);
+    if (sub === 'medium') return Cesium.Color.fromCssColorString('#f97316').withAlpha(0.9);
+    return Cesium.Color.fromCssColorString('#eab308').withAlpha(0.85);
+}
 
 function frpSubtype(frp: number): 'high' | 'medium' | 'low' {
     if (frp > 100) return 'high';
@@ -48,83 +48,109 @@ function frpSubtype(frp: number): 'high' | 'medium' | 'low' {
     return 'low';
 }
 
-function dotForSubtype(sub: 'high' | 'medium' | 'low'): string {
-    return sub === 'high' ? FIRE_DOT_HIGH : sub === 'medium' ? FIRE_DOT_MEDIUM : FIRE_DOT_LOW;
+function pixelSizeForFrp(frp: number): number {
+    return Math.max(3.0, Math.min(9.0, 3.0 + Math.log2(Math.max(1, frp)) * 0.8));
 }
 
-// Pixel size of the dot billboard. FRP-scaled so high-energy fires read
-// bigger on the map, but clamped so a single megaflare doesn't eat the
-// screen at close zoom.
-function scaleForFrp(frp: number): number {
-    return Math.max(0.25, Math.min(0.85, 0.25 + Math.log2(Math.max(1, frp)) * 0.07));
+function pixelSizeForCluster(count: number, maxFrp: number): number {
+    return Math.max(6.0, Math.min(18.0, 5.0 + Math.log2(Math.max(1, count)) * 2.0 + Math.log2(Math.max(1, maxFrp)) * 0.4));
 }
 
-// Debounce on camera.moveEnd so a continuous pan gesture fires ONE cull
-// at the end instead of dozens during the motion. 150 ms is short enough
-// to feel instant after a settle, long enough to coalesce Cesium's own
-// multi-moveEnd burst when tile loading nudges the camera.
+function getClusterGridDegrees(altitudeMeters: number | null): number | null {
+    if (altitudeMeters == null) return 2.0;
+    if (altitudeMeters >= 10_000_000) return 4.0;
+    if (altitudeMeters >= 5_000_000) return 2.0;
+    if (altitudeMeters >= 2_000_000) return 1.0;
+    return null;
+}
+
 const CAMERA_CULL_DEBOUNCE_MS = 150;
-
-// How many billboards to add to the collection per synchronous chunk
-// before yielding to the browser. Each CLAMP_TO_GROUND billboard.add
-// registers a HeightReferenceListener, so 60k fires in a single pass
-// is a multi-second main-thread stall that freezes pointer events.
-// Chunking to ~1000 per ~1 frame keeps interaction smooth while the
-// layer populates incrementally.
 const FIRES_CHUNK_SIZE = 1000;
 
 export function useFiresLayer(viewer: Cesium.Viewer | null) {
-    // sources.fires → whether we fetch FIRMS data.
-    // visibility.fires → whether the rendered billboards are shown.
     const isSourceOn = useTimelineStore(s => s.sources.fires);
     const isVisible = useTimelineStore(s => s.visibility.fires);
+    const mode = useTimelineStore(s => s.mode);
     const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
     const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
-    const collectionRef = useRef<Cesium.BillboardCollection | null>(null);
-    // Shared cull function so both the fetch success path and the
-    // subtype visibility effect can re-run it without re-deriving the
-    // viewport rect independently.
-    const cullRef = useRef<(() => void) | null>(null);
 
-    // ---- Effect 1: scene lifetime ----
+    const rawCollectionRef = useRef<Cesium.PointPrimitiveCollection | null>(null);
+    const clusterCollectionRef = useRef<Cesium.PointPrimitiveCollection | null>(null);
+    const fireRecordsRef = useRef<FireRecord[]>([]);
+    const clusterIdsRef = useRef<Set<string>>(new Set());
+    const dataVersionRef = useRef(0);
+    const rawBuiltVersionRef = useRef(-1);
+    const renderModeRef = useRef<'raw' | 'cluster'>('raw');
+    const activeGridDegreesRef = useRef<number | null>(null);
+    const responseAggregatedRef = useRef(false);
+    const fetchInFlightRef = useRef(false);
+    const refreshPresentationRef = useRef<(() => Promise<void>) | null>(null);
+    const updateCollectionVisibilityRef = useRef<(() => void) | null>(null);
+    const fetchNowRef = useRef<(() => Promise<void>) | null>(null);
+
+    const requestSceneRender = () => {
+        if (!viewer || viewer.isDestroyed()) return;
+        viewer.scene.requestRender();
+    };
+
     useEffect(() => {
         if (!viewer) return;
 
-        const collection = new Cesium.BillboardCollection({ scene: viewer.scene });
-        viewer.scene.primitives.add(collection);
-        collectionRef.current = collection;
+        const rawCollection = new Cesium.PointPrimitiveCollection({
+            blendOption: Cesium.BlendOption.TRANSLUCENT,
+        });
+        const clusterCollection = new Cesium.PointPrimitiveCollection({
+            blendOption: Cesium.BlendOption.TRANSLUCENT,
+        });
 
-        /**
-         * Walk every billboard in the collection and decide whether it
-         * should be visible under the combined (viewport × subtype)
-         * filter. Writes to `billboard.show`; never calls add/remove so
-         * the GPU buffer stays stable and HeightReferenceListener churn
-         * stays zero.
-         *
-         * Perf: ~60k fires, tight loop of Map.get + two comparisons +
-         * one assignment per billboard. Measured at ~5–10 ms on a
-         * mid-range laptop, well under a frame budget. The old
-         * remove-and-re-add approach was 20–50× slower.
-         */
-        const cullForViewport = () => {
-            const col = collectionRef.current;
-            if (!col || viewer.isDestroyed()) return;
+        viewer.scene.primitives.add(rawCollection);
+        viewer.scene.primitives.add(clusterCollection);
+        rawCollectionRef.current = rawCollection;
+        clusterCollectionRef.current = clusterCollection;
 
+        const clearClusterMeta = () => {
+            clusterIdsRef.current.forEach((id) => {
+                fireMetaMap.delete(id);
+            });
+            clusterIdsRef.current.clear();
+        };
+
+        const clearClusterCollection = () => {
+            clearClusterMeta();
+            clusterCollection.removeAll();
+        };
+
+        const publishStats = () => {
+            window.__openspyFireStats = {
+                renderMode: renderModeRef.current,
+                rawHotspots: fireRecordsRef.current.length,
+                renderedMarkers: renderModeRef.current === 'cluster' ? clusterCollection.length : rawCollection.length,
+                gridDegrees: activeGridDegreesRef.current,
+            };
+        };
+
+        const updateCollectionVisibility = () => {
+            const state = useTimelineStore.getState();
+            const showLayer = state.mode !== 'playback' && state.sources.fires && state.visibility.fires;
+            rawCollection.show = showLayer && renderModeRef.current === 'raw';
+            clusterCollection.show = showLayer && renderModeRef.current === 'cluster';
+        };
+        updateCollectionVisibilityRef.current = updateCollectionVisibility;
+
+        const cullRawForViewport = () => {
+            if (renderModeRef.current !== 'raw') return;
             const storeState = useTimelineStore.getState();
             const subVis = storeState.subtypeVisibility;
             const isolated = storeState.isolatedEntityId;
-            const isSubShown = (sub: string) =>
-                subVis[`fires:${sub}`] !== false;
-
             const rect = viewer.camera.computeViewRectangle();
+
             if (!rect) {
-                // Off-globe / oblique view: fall back to subtype + solo gating.
-                // Happens when the camera points out into space.
-                for (let i = 0; i < col.length; i++) {
-                    const bb = col.get(i);
-                    const meta = fireMetaMap.get(bb.id as string);
-                    bb.show = !!meta && isSubShown(meta.subtype)
-                        && (!isolated || isolated === bb.id);
+                for (let i = 0; i < rawCollection.length; i++) {
+                    const point = rawCollection.get(i);
+                    const meta = fireMetaMap.get(point.id as string);
+                    point.show = !!meta
+                        && subVis[`fires:${meta.subtype}`] !== false
+                        && (!isolated || isolated === point.id);
                 }
                 return;
             }
@@ -135,38 +161,103 @@ export function useFiresLayer(viewer: Cesium.Viewer | null) {
             const east = Cesium.Math.toDegrees(rect.east);
             const crossAM = east < west;
 
-            for (let i = 0; i < col.length; i++) {
-                const bb = col.get(i);
-                const meta = fireMetaMap.get(bb.id as string);
+            for (let i = 0; i < rawCollection.length; i++) {
+                const point = rawCollection.get(i);
+                const meta = fireMetaMap.get(point.id as string);
                 if (!meta) {
-                    bb.show = false;
+                    point.show = false;
                     continue;
                 }
-                if (isolated && isolated !== bb.id) {
-                    bb.show = false;
+                if (isolated && isolated !== point.id) {
+                    point.show = false;
                     continue;
                 }
-                if (!isSubShown(meta.subtype)) {
-                    bb.show = false;
+                if (subVis[`fires:${meta.subtype}`] === false) {
+                    point.show = false;
                     continue;
                 }
                 const inLat = meta.lat >= south && meta.lat <= north;
                 const inLng = crossAM
                     ? meta.lng >= west || meta.lng <= east
                     : meta.lng >= west && meta.lng <= east;
-                bb.show = inLat && inLng;
+                point.show = inLat && inLng;
             }
         };
 
-        cullRef.current = cullForViewport;
+        const ensureRawCollection = async () => {
+            if (rawBuiltVersionRef.current === dataVersionRef.current) return;
 
-        // Debounced camera cull — coalesces bursts of moveEnd events.
+            rawCollection.removeAll();
+            const records = fireRecordsRef.current;
+            for (let i = 0; i < records.length; i++) {
+                const fire = records[i];
+                rawCollection.add({
+                    position: Cesium.Cartesian3.fromDegrees(fire.lng, fire.lat, 0),
+                    color: colorForSubtype(fire.subtype),
+                    outlineColor: Cesium.Color.BLACK.withAlpha(0.35),
+                    outlineWidth: 1,
+                    pixelSize: pixelSizeForFrp(fire.frp),
+                    id: fire.id,
+                });
+                fireMetaMap.set(fire.id, fire);
+
+                if ((i + 1) % FIRES_CHUNK_SIZE === 0 && i + 1 < records.length) {
+                    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+                    if (!viewer || viewer.isDestroyed()) return;
+                    if (rawCollectionRef.current !== rawCollection) return;
+                }
+            }
+            rawBuiltVersionRef.current = dataVersionRef.current;
+        };
+
+        const rebuildClusterCollection = () => {
+            clearClusterCollection();
+
+            const storeState = useTimelineStore.getState();
+            const subVis = storeState.subtypeVisibility;
+            const isolated = storeState.isolatedEntityId;
+
+            for (const fire of fireRecordsRef.current) {
+                if (isolated && isolated !== fire.id) continue;
+                if (subVis[`fires:${fire.subtype}`] === false) continue;
+                clusterCollection.add({
+                    position: Cesium.Cartesian3.fromDegrees(fire.lng, fire.lat, 0),
+                    color: colorForSubtype(fire.subtype),
+                    outlineColor: Cesium.Color.BLACK.withAlpha(0.45),
+                    outlineWidth: 1,
+                    pixelSize: pixelSizeForCluster(fire.count || 1, fire.frp),
+                    id: fire.id,
+                });
+                fireMetaMap.set(fire.id, fire);
+                clusterIdsRef.current.add(fire.id);
+            }
+        };
+
+        const refreshPresentation = async () => {
+            if (!viewer || viewer.isDestroyed()) return;
+            if (responseAggregatedRef.current) {
+                renderModeRef.current = 'cluster';
+                rebuildClusterCollection();
+            } else {
+                renderModeRef.current = 'raw';
+                clearClusterCollection();
+                await ensureRawCollection();
+                cullRawForViewport();
+            }
+
+            updateCollectionVisibility();
+            publishStats();
+            requestSceneRender();
+        };
+
+        refreshPresentationRef.current = refreshPresentation;
+
         let cullTimer: ReturnType<typeof setTimeout> | null = null;
         const onCameraMoveEnd = () => {
             if (cullTimer) clearTimeout(cullTimer);
             cullTimer = setTimeout(() => {
                 cullTimer = null;
-                cullForViewport();
+                void fetchNowRef.current?.();
             }, CAMERA_CULL_DEBOUNCE_MS);
         };
         const removeMoveEnd = viewer.camera.moveEnd.addEventListener(onCameraMoveEnd);
@@ -174,152 +265,142 @@ export function useFiresLayer(viewer: Cesium.Viewer | null) {
         return () => {
             if (cullTimer) clearTimeout(cullTimer);
             removeMoveEnd();
-            cullRef.current = null;
+            refreshPresentationRef.current = null;
+            updateCollectionVisibilityRef.current = null;
+            fetchNowRef.current = null;
+            fireMetaMap.clear();
+            clusterIdsRef.current.clear();
+            delete window.__openspyFireStats;
             if (!viewer.isDestroyed()) {
-                viewer.scene.primitives.remove(collection);
+                viewer.scene.primitives.remove(rawCollection);
+                viewer.scene.primitives.remove(clusterCollection);
             }
-            collectionRef.current = null;
+            rawCollectionRef.current = null;
+            clusterCollectionRef.current = null;
         };
     }, [viewer]);
 
-    // ---- Effect 2: fetch lifetime ----
     useEffect(() => {
-        if (!viewer || !isSourceOn) return;
+        if (!viewer || !isSourceOn || mode === 'playback') return;
 
         let active = true;
+        const abortController = new AbortController();
 
         async function fetchFires() {
-            const collection = collectionRef.current;
-            if (!collection) return;
+            if (fetchInFlightRef.current || !viewer || viewer.isDestroyed()) return;
+            fetchInFlightRef.current = true;
             try {
-                const res = await axios.get(`${API_URL}/api/fires`);
+                const storeState = useTimelineStore.getState();
+                const rect = viewer.camera.computeViewRectangle();
+                const bbox = rect
+                    ? [
+                        Cesium.Math.toDegrees(rect.south),
+                        Cesium.Math.toDegrees(rect.west),
+                        Cesium.Math.toDegrees(rect.north),
+                        Cesium.Math.toDegrees(rect.east),
+                    ]
+                    : null;
+                const gridDegrees = !storeState.isolatedEntityId
+                    ? getClusterGridDegrees(getViewerAltitudeMeters(viewer))
+                    : null;
+                const params = new URLSearchParams();
+                if (bbox) params.set('bbox', bbox.join(','));
+                if (gridDegrees != null) params.set('gridDegrees', String(gridDegrees));
+                responseAggregatedRef.current = gridDegrees != null;
+                activeGridDegreesRef.current = gridDegrees;
+
+                const res = await axios.get(`${API_URL}/api/fires${params.size ? `?${params.toString()}` : ''}`, {
+                    signal: abortController.signal,
+                });
                 if (!active) return;
 
-                // Always clear + reset counts, even on empty payload, so
-                // stale fires from the previous poll don't linger on the
-                // globe when the backend returns [].
-                collection.removeAll();
-                fireMetaMap.clear();
+                const records = (res.data || []).map((fire: any) => {
+                    const frp = fire.frp || 1;
+                    return {
+                        id: fire.id || `fire-${fire.lat}-${fire.lng}`,
+                        lat: fire.lat,
+                        lng: fire.lng,
+                        frp,
+                        brightness: fire.brightness || 0,
+                        confidence: fire.confidence || '',
+                        subtype: (fire.subtype || frpSubtype(frp)) as 'high' | 'medium' | 'low',
+                        daynight: fire.daynight || '',
+                        acqTime: fire.acqTime || '',
+                        fireType: fire.fireType ?? 0,
+                        aggregated: Boolean(fire.aggregated),
+                        count: Number.isFinite(Number(fire.count)) ? Number(fire.count) : undefined,
+                    } satisfies FireRecord;
+                });
+
                 const counts: Record<string, number> = { high: 0, medium: 0, low: 0 };
+                for (const fire of records) counts[fire.subtype] += fire.count || 1;
 
-                if (!res.data?.length) {
-                    useTimelineStore.getState().setSubtypeCounts('fires' as any, counts);
-                    useTimelineStore.getState().setStreamMetric('fires', { count: 0, status: 'streaming' });
-                    return;
-                }
+                fireRecordsRef.current = records;
+                fireMetaMap.clear();
+                clusterIdsRef.current.clear();
+                rawCollectionRef.current?.removeAll();
+                clusterCollectionRef.current?.removeAll();
+                dataVersionRef.current += 1;
+                rawBuiltVersionRef.current = -1;
 
-                // Chunked build — FIRMS often returns 60k+ hotspots and
-                // each CLAMP_TO_GROUND billboard.add registers a fresh
-                // height listener. Running the whole set in one sync
-                // pass stalls the main thread long enough to freeze
-                // pointer events, so we yield to the browser every
-                // FIRES_CHUNK_SIZE records. Result: user sees fires
-                // stream in incrementally while drag/zoom/click stay
-                // responsive.
-                const records: any[] = res.data;
-                for (let i = 0; i < records.length; i++) {
-                    if (!active) return;
-                    const f = records[i];
-                    const frp = f.frp || 1;
-                    const fireId = f.id || `fire-${f.lat}-${f.lng}`;
-                    const subtype = frpSubtype(frp);
-
-                    collection.add({
-                        // Real ground-level position. CLAMP_TO_GROUND will
-                        // project this onto terrain/3D-tile surface at
-                        // render time, so the literal 0 m is fine.
-                        position: Cesium.Cartesian3.fromDegrees(f.lng, f.lat, 0),
-                        image: dotForSubtype(subtype),
-                        scale: scaleForFrp(frp),
-                        heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
-                        verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
-                        id: fireId,
-                    });
-                    fireMetaMap.set(fireId, {
-                        lat: f.lat, lng: f.lng,
-                        frp, brightness: f.brightness || 0,
-                        confidence: f.confidence || '',
-                        subtype,
-                        daynight: f.daynight || '',
-                        acqTime: f.acqTime || '',
-                        fireType: f.fireType ?? 0,
-                    });
-                    counts[subtype]++;
-
-                    // Yield once per chunk so the browser can process
-                    // input events (click, drag, wheel) instead of
-                    // waiting for the whole 60k loop to drain.
-                    if ((i + 1) % FIRES_CHUNK_SIZE === 0 && i + 1 < records.length) {
-                        await new Promise<void>((resolve) => setTimeout(resolve, 0));
-                        if (!active) return;
-                        // Cesium collection may have been destroyed during
-                        // the yield (viewer unmount / source-off clear).
-                        if (collectionRef.current !== collection) return;
-                    }
-                }
-
+                useTimelineStore.getState().setSubtypeCounts('fires' as any, counts);
                 useTimelineStore.getState().setStreamMetric('fires', {
-                    count: collection.length,
+                    count: records.reduce((sum: number, fire: FireRecord) => sum + (fire.count || 1), 0),
                     status: 'streaming',
                 });
-                useTimelineStore.getState().setSubtypeCounts('fires' as any, counts);
 
-                // Apply current viewport + subtype cull to the freshly
-                // populated collection so offscreen fires start hidden.
-                cullRef.current?.();
+                await refreshPresentationRef.current?.();
 
-                // Respect Legend visibility freshly.
-                collection.show =
-                    useTimelineStore.getState().sources.fires &&
-                    useTimelineStore.getState().visibility.fires;
-
-                console.log(`[Fires] Rendered ${collection.length} hotspots via BillboardCollection (chunked ${FIRES_CHUNK_SIZE}/batch)`);
+                const renderedCount = renderModeRef.current === 'cluster'
+                    ? (clusterCollectionRef.current?.length ?? 0)
+                    : (rawCollectionRef.current?.length ?? 0);
+                const logicalCount = records.reduce((sum: number, fire: FireRecord) => sum + (fire.count || 1), 0);
+                console.log(`[Fires] Rendered ${renderedCount} ${renderModeRef.current} markers from ${logicalCount} hotspots`);
             } catch (err: any) {
+                if (axios.isCancel(err) || err?.code === 'ERR_CANCELED') return;
                 console.warn('[Fires] Fetch failed:', err?.message || err);
                 useTimelineStore.getState().setStreamMetric('fires', { status: 'error' });
+            } finally {
+                fetchInFlightRef.current = false;
             }
         }
 
-        fetchFires();
+        fetchNowRef.current = fetchFires;
+
+        void fetchFires();
         const interval = setInterval(fetchFires, 30 * 60_000);
 
         return () => {
             active = false;
             clearInterval(interval);
-            // Do NOT touch the collection — Effect 1 owns its lifetime so
-            // frozen fire data survives source-off.
+            abortController.abort();
         };
-    }, [viewer, isSourceOn]);
+    }, [viewer, isSourceOn, mode]);
 
-    // ---- Effect 3: layer visibility toggle ----
-    // Effective visibility = sources AND visibility. Source off hides
-    // the collection AND stops the fetch loop (Effect 2); visibility
-    // off only hides but lets the fetch continue.
     useEffect(() => {
-        if (collectionRef.current) collectionRef.current.show = isSourceOn && isVisible;
-    }, [isSourceOn, isVisible]);
+        updateCollectionVisibilityRef.current?.();
+    }, [isSourceOn, isVisible, mode]);
 
-    // ---- Effect 4: per-subtype visibility + solo filter ----
-    // Delegates to the cull so subtype + viewport + solo gates stay consistent.
     useEffect(() => {
-        cullRef.current?.();
+        void fetchNowRef.current?.();
     }, [subtypeVisibility, isolatedEntityId]);
 
-    // ---- Effect 5: source-off scene clear ----
-    // When the user turns the fires source off we drop every billboard
-    // so the globe is empty of hotspots. The next source-on re-runs
-    // Effect 2 and the next fetch repopulates with fresh data. Legend
-    // subtype counts are wiped too so the right-panel row doesn't keep
-    // showing pre-toggle numbers against an empty scene.
     useEffect(() => {
         if (isSourceOn) return;
-        const col = collectionRef.current;
-        if (col) col.removeAll();
+        rawCollectionRef.current?.removeAll();
+        clusterCollectionRef.current?.removeAll();
+        fireRecordsRef.current = [];
         fireMetaMap.clear();
+        clusterIdsRef.current.clear();
+        responseAggregatedRef.current = false;
+        dataVersionRef.current += 1;
+        rawBuiltVersionRef.current = -1;
+        delete window.__openspyFireStats;
         useTimelineStore.getState().setSubtypeCounts('fires' as any, {});
         useTimelineStore.getState().setStreamMetric('fires', {
             count: 0,
             status: 'disabled',
         });
+        requestSceneRender();
     }, [isSourceOn]);
 }

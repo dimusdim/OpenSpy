@@ -6,7 +6,7 @@ import * as Cesium from 'cesium';
 import { Crosshair, Filter, X } from 'lucide-react';
 import axios from 'axios';
 import Hls from 'hls.js';
-import { aircraftMetaMap } from '../cesium/useDynamicLayers';
+import { aircraftMetaMap, vesselMetaMap } from '../cesium/useDynamicLayers';
 import { webcamMetaMap } from '../cesium/useWebcamsLayer';
 import { API_URL } from '../lib/config';
 import { fireMetaMap } from '../cesium/useFiresLayer';
@@ -15,6 +15,7 @@ import { pipelineMetaMap } from '../cesium/usePipelinesLayer';
 import { airspaceMetaMap } from '../cesium/useAirspaceLayer';
 import { infraMetaMap } from '../cesium/useInfrastructureLayer';
 import { satelliteMetaMap } from '../cesium/useSatellitesLayer';
+import { replayMetaMap } from '../cesium/useReplayOverlay';
 
 // Squawk code interpretation
 function squawkBadge(code: string | null): { label: string; color: string } | null {
@@ -130,6 +131,28 @@ export default function EntityHUD() {
 
         const update = () => {
             if (!active) return;
+
+            // Webcam billboard — read from metadata map.
+            const replayMeta = replayMetaMap.get(selectedEntityId);
+            if (replayMeta) {
+                const pos = Cesium.Cartesian3.fromDegrees(replayMeta.lng, replayMeta.lat, replayMeta.alt || 0);
+                const canvasPos = Cesium.SceneTransforms.worldToWindowCoordinates(cesViewer.scene, pos);
+                setScreenPos(canvasPos ? { x: canvasPos.x, y: canvasPos.y } : null);
+                setLive({
+                    lat: replayMeta.lat,
+                    lng: replayMeta.lng,
+                    alt: replayMeta.alt,
+                    layer: replayMeta.layer,
+                    subtype: replayMeta.subtype ?? undefined,
+                    source: replayMeta.source || undefined,
+                    speed: replayMeta.speed ?? undefined,
+                    heading: replayMeta.heading ?? undefined,
+                    description: replayMeta.description,
+                    extra: replayMeta.extra,
+                });
+                requestAnimationFrame(update);
+                return;
+            }
 
             // Webcam billboard — read from metadata map.
             const wcMeta = webcamMetaMap.get(selectedEntityId);
@@ -286,6 +309,38 @@ export default function EntityHUD() {
                         lastContact: acMeta.lastContact,
                         callsign: acMeta.callsign,
                         icao24: acMeta.icao24,
+                    },
+                });
+                requestAnimationFrame(update);
+                return;
+            }
+
+            // Live vessel billboard — read from metadata map.
+            const vesselMeta = vesselMetaMap.get(selectedEntityId);
+            if (vesselMeta) {
+                const pos = Cesium.Cartesian3.fromDegrees(vesselMeta.lng, vesselMeta.lat, 0);
+                const canvasPos = Cesium.SceneTransforms.worldToWindowCoordinates(cesViewer.scene, pos);
+                setScreenPos(canvasPos ? { x: canvasPos.x, y: canvasPos.y } : null);
+                setLive({
+                    lat: vesselMeta.lat,
+                    lng: vesselMeta.lng,
+                    alt: 0,
+                    layer: 'Vessel',
+                    subtype: vesselMeta.type,
+                    speed: vesselMeta.speed,
+                    heading: vesselMeta.heading,
+                    extra: {
+                        vesselName: vesselMeta.name,
+                        callSign: vesselMeta.callSign,
+                        imo: vesselMeta.imo,
+                        navigationStatus: vesselMeta.navigationStatus,
+                        destination: vesselMeta.destination,
+                        eta: vesselMeta.eta,
+                        rateOfTurn: vesselMeta.rateOfTurn,
+                        draught: vesselMeta.draught,
+                        vesselLength: vesselMeta.vesselLength,
+                        beam: vesselMeta.beam,
+                        cog: vesselMeta.cog,
                     },
                 });
                 requestAnimationFrame(update);

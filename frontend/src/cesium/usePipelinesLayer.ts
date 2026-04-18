@@ -53,6 +53,7 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
     // sources.pipelines = fetch; visibility.pipelines = primitive.show
     const isSourceOn = useTimelineStore((s) => s.sources.pipelines);
     const isVisible = useTimelineStore((s) => s.visibility.pipelines);
+    const mode = useTimelineStore((s) => s.mode);
     const primitiveRef = useRef<Cesium.Primitive | null>(null);
     const loadedRef = useRef(false);
     // Shared pending-load sentinel + generation counter. Generation is
@@ -90,11 +91,12 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
     // the first run exits early on cancelled without setting loadedRef,
     // and the layer wedges with no dependency change left to re-trigger.
     useEffect(() => {
-        if (!viewer || !isSourceOn) return;
+        if (!viewer || !isSourceOn || mode === 'playback') return;
         if (loadedRef.current) return;
         if (loadPromiseRef.current) return;
 
         const myGen = ++genRef.current;
+        const abortController = new AbortController();
         // Self-reference holder so finally can compare without TS2454.
         const self: { promise?: Promise<void> } = {};
         self.promise = (async () => {
@@ -105,6 +107,7 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
                 });
 
                 const res = await axios.get(`${API_URL}/api/pipelines`, {
+                    signal: abortController.signal,
                     timeout: 150_000, // Overpass can be very slow for global queries
                 });
                 if (viewer.isDestroyed()) return;
@@ -246,7 +249,8 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
                 });
                 useTimelineStore.getState().setSubtypeCounts('pipelines', counts);
                 console.log(`[Pipelines] Rendered ${pipelineMetaMap.size} pipelines (${counts.oil || 0} oil, ${counts.gas || 0} gas) via Primitive`);
-            } catch (err) {
+            } catch (err: any) {
+                if (axios.isCancel(err) || err?.code === 'ERR_CANCELED') return;
                 console.warn('[Pipelines] Fetch failed:', err);
                 useTimelineStore.getState().setStreamMetric('pipelines', {
                     status: 'error',
@@ -260,9 +264,10 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
         })();
         loadPromiseRef.current = self.promise;
 
-        // NO cleanup — one-shot is allowed to finish. Effect 1 owns
-        // teardown on viewer unmount.
-    }, [viewer, isSourceOn]);
+        return () => {
+            abortController.abort();
+        };
+    }, [viewer, isSourceOn, mode]);
 
     // ---- Effect 2a: source-off scene clear ----
     useEffect(() => {
@@ -287,8 +292,8 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
     // ---- Effect 3: layer visibility ----
     // Effective show = sources && visibility.
     useEffect(() => {
-        if (primitiveRef.current) primitiveRef.current.show = isSourceOn && isVisible;
-    }, [isSourceOn, isVisible]);
+        if (primitiveRef.current) primitiveRef.current.show = mode !== 'playback' && isSourceOn && isVisible;
+    }, [isSourceOn, isVisible, mode]);
 
     // ---- Effect 4: per-subtype visibility ----
     useEffect(() => {

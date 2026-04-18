@@ -100,6 +100,7 @@ function ringCentroid(ring: [number, number][]): [number, number] {
 export function useAirspaceLayer(viewer: Cesium.Viewer | null) {
     const isSourceOn = useTimelineStore(s => s.sources.airspace);
     const isVisible = useTimelineStore(s => s.visibility.airspace);
+    const mode = useTimelineStore(s => s.mode);
     const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
     const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
     const fillPrimitiveRef = useRef<Cesium.Primitive | null>(null);
@@ -118,6 +119,7 @@ export function useAirspaceLayer(viewer: Cesium.Viewer | null) {
     // Tracked timers/intervals so cleanup doesn't leave ready-gate callbacks
     // attached to stale primitives after unmount.
     const pendingTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+    const activeFetchAbortRef = useRef<AbortController | null>(null);
     // The shared fetch function, stored in a ref so Effect 2 can call it
     // without re-declaring it on every source toggle.
     const fetchAirspaceRef = useRef<(() => Promise<void>) | null>(null);
@@ -135,8 +137,12 @@ export function useAirspaceLayer(viewer: Cesium.Viewer | null) {
             if (inFlightRef.current) return; // guard against parallel fetches
             inFlightRef.current = true;
             const myGen = genRef.current;
+            const abortController = new AbortController();
+            activeFetchAbortRef.current = abortController;
             try {
-                const res = await axios.get(`${API_URL}/api/airspace`);
+                const res = await axios.get(`${API_URL}/api/airspace`, {
+                    signal: abortController.signal,
+                });
                 if (!activeRef.current || viewer!.isDestroyed()) return;
                 // Stale check — source flipped off while we were loading.
                 if (myGen !== genRef.current) return;
@@ -363,10 +369,14 @@ export function useAirspaceLayer(viewer: Cesium.Viewer | null) {
                     `[Airspace] Rendered ${airspaceMetaMap.size} zones ` +
                     `(${fillInstances.length} polygon parts) via dual Primitive`
                 );
-            } catch (err) {
+            } catch (err: any) {
+                if (axios.isCancel(err) || err?.code === 'ERR_CANCELED') return;
                 console.warn('[Airspace] Fetch failed:', err);
                 useTimelineStore.getState().setStreamMetric('airspace', { status: 'error' });
             } finally {
+                if (activeFetchAbortRef.current === abortController) {
+                    activeFetchAbortRef.current = null;
+                }
                 inFlightRef.current = false;
             }
         }
@@ -379,6 +389,8 @@ export function useAirspaceLayer(viewer: Cesium.Viewer | null) {
             // touch primitives we're about to free.
             pendingTimersRef.current.forEach((t) => clearTimeout(t));
             pendingTimersRef.current.clear();
+            activeFetchAbortRef.current?.abort();
+            activeFetchAbortRef.current = null;
 
             if (fillPrimitiveRef.current && viewer && !viewer.isDestroyed()) {
                 viewer.scene.primitives.remove(fillPrimitiveRef.current);
@@ -401,7 +413,7 @@ export function useAirspaceLayer(viewer: Cesium.Viewer | null) {
     // keep an hourly interval alive while the source stays on. Source-off
     // clears the interval but leaves the already-rendered zones in place.
     useEffect(() => {
-        if (!viewer || !isSourceOn) return;
+        if (!viewer || !isSourceOn || mode === 'playback') return;
         if (!fetchAirspaceRef.current) return;
 
         if (!hasLoadedRef.current) {
@@ -413,17 +425,18 @@ export function useAirspaceLayer(viewer: Cesium.Viewer | null) {
 
         return () => {
             clearInterval(interval);
+            activeFetchAbortRef.current?.abort();
         };
-    }, [viewer, isSourceOn]);
+    }, [viewer, isSourceOn, mode]);
 
     // ---- Effect 3: visibility toggle ----
     // Effective show = sources && visibility. If no data exists yet,
     // this is a no-op (primitives are null until fetch completes).
     useEffect(() => {
-        const show = isSourceOn && isVisible;
+        const show = mode !== 'playback' && isSourceOn && isVisible;
         if (fillPrimitiveRef.current) fillPrimitiveRef.current.show = show;
         if (outlinePrimitiveRef.current) outlinePrimitiveRef.current.show = show;
-    }, [isSourceOn, isVisible]);
+    }, [isSourceOn, isVisible, mode]);
 
     // ---- Effect 3a: source-off scene clear ----
     // On source-off drop both primitives and reset the load sentinels.
@@ -448,6 +461,8 @@ export function useAirspaceLayer(viewer: Cesium.Viewer | null) {
         outlinePrimitiveRef.current = null;
         hasLoadedRef.current = false;
         inFlightRef.current = false;
+        activeFetchAbortRef.current?.abort();
+        activeFetchAbortRef.current = null;
         genRef.current++;
         airspaceMetaMap.clear();
         airspaceInstanceToLogical.clear();

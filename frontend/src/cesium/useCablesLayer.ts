@@ -66,6 +66,7 @@ export function useCablesLayer(viewer: Cesium.Viewer | null) {
     // sources.cables = fetch; visibility.cables = primitive.show
     const isSourceOn = useTimelineStore(s => s.sources.cables);
     const isVisible = useTimelineStore(s => s.visibility.cables);
+    const mode = useTimelineStore(s => s.mode);
     const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
     const primitiveRef = useRef<Cesium.GroundPolylinePrimitive | null>(null);
     // True once the one-shot TeleGeography fetch has finished and the
@@ -121,11 +122,12 @@ export function useCablesLayer(viewer: Cesium.Viewer | null) {
     // `viewer.isDestroyed()` which also drops the primitive via
     // Effect 1's cleanup.
     useEffect(() => {
-        if (!viewer || !isSourceOn) return;
+        if (!viewer || !isSourceOn || mode === 'playback') return;
         if (loadedRef.current) return;
         if (loadPromiseRef.current) return; // already loading
 
         const myGen = ++genRef.current;
+        const abortController = new AbortController();
         // Self-reference holder for the async IIFE's finally block.
         // Using a container lets the finally compare
         // `loadPromiseRef.current === self.promise` without tripping
@@ -133,7 +135,9 @@ export function useCablesLayer(viewer: Cesium.Viewer | null) {
         const self: { promise?: Promise<void> } = {};
         self.promise = (async () => {
             try {
-                const res = await axios.get(`${API_URL}/api/cables`);
+                const res = await axios.get(`${API_URL}/api/cables`, {
+                    signal: abortController.signal,
+                });
                 if (viewer.isDestroyed()) return;
                 // Stale check — source flipped off while we were loading.
                 if (myGen !== genRef.current) return;
@@ -273,6 +277,7 @@ export function useCablesLayer(viewer: Cesium.Viewer | null) {
                 });
                 console.log(`[Cables] Rendered ${instances.length} segments (${cableMetaMap.size} cables) via GroundPolylinePrimitive`);
             } catch (err: any) {
+                if (axios.isCancel(err) || err?.code === 'ERR_CANCELED') return;
                 console.warn('[Cables] Fetch failed:', err?.message || err);
                 useTimelineStore.getState().setStreamMetric('cables', { status: 'error' });
             } finally {
@@ -287,16 +292,16 @@ export function useCablesLayer(viewer: Cesium.Viewer | null) {
         })();
         loadPromiseRef.current = self.promise;
 
-        // NO cleanup — the one-shot is allowed to complete. Effect 1
-        // owns the primitive's teardown on viewer unmount; between
-        // mounts only `viewer.isDestroyed()` matters.
-    }, [viewer, isSourceOn]);
+        return () => {
+            abortController.abort();
+        };
+    }, [viewer, isSourceOn, mode]);
 
     // ---- Effect 3: visibility toggle ----
     // Effective show = sources && visibility.
     useEffect(() => {
-        if (primitiveRef.current) primitiveRef.current.show = isSourceOn && isVisible;
-    }, [isSourceOn, isVisible]);
+        if (primitiveRef.current) primitiveRef.current.show = mode !== 'playback' && isSourceOn && isVisible;
+    }, [isSourceOn, isVisible, mode]);
 
     // ---- Effect 3a: solo filter (isolatedEntityId) ----
     // Per-instance show toggle via ShowGeometryInstanceAttribute. The

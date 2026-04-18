@@ -6,6 +6,22 @@ import { API_URL } from '../lib/config';
 import { getAviIcon, getShipIcon, DARK_VESSEL_ICON } from '../icons/map-icons';
 import { safeCartesianFromDegrees } from './position-utils';
 
+declare global {
+    interface Window {
+        __openspyLiveStats?: {
+            aircraftBillboards: number;
+            vesselBillboards: number;
+            darkVessels: number;
+            queuedUpdate: boolean;
+            processingUpdate: boolean;
+            lastUpdateReceivedAt: string | null;
+            lastProcessStartedAt: string | null;
+            lastProcessFinishedAt: string | null;
+            lastProcessMs: number;
+        };
+    }
+}
+
 const getAviSVG = getAviIcon;
 
 const getShipSVG = getShipIcon;
@@ -33,12 +49,27 @@ interface AircraftMeta {
 // Key = billboard reference (set as billboard.id), value = metadata.
 export const aircraftMetaMap = new Map<string, AircraftMeta>();
 
-// Shared "far past" Julian date used as the start of the sample-prune
-// TimeInterval below. Year 1900 is well before any realistic AIS data so
-// it reliably covers every historical sample in a vessel's
-// SampledPositionProperty. Built once and reused to avoid allocating a
-// new JulianDate on every vessel update.
-const PRUNE_INTERVAL_START = Cesium.JulianDate.fromIso8601('1900-01-01T00:00:00Z');
+interface VesselMeta {
+    id: string;
+    name: string;
+    type: string;
+    lat: number;
+    lng: number;
+    speed: number;
+    heading: number;
+    callSign?: string | null;
+    imo?: string | null;
+    navigationStatus?: string | null;
+    destination?: string | null;
+    eta?: string | null;
+    rateOfTurn?: number | null;
+    draught?: number | null;
+    vesselLength?: number | null;
+    beam?: number | null;
+    cog?: number | null;
+}
+
+export const vesselMetaMap = new Map<string, VesselMeta>();
 
 export function useDynamicLayers(viewer: Cesium.Viewer | null) {
     // Visibility + subtype filters are reactive because they only touch
@@ -49,15 +80,20 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
     const isMaritimeVisible = useTimelineStore(s => s.visibility.maritime);
     const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
     const mode = useTimelineStore(s => s.mode);
-    const currentTime = useTimelineStore(s => s.currentTime);
     const showTrajectories = useTimelineStore(s => s.showTrajectories);
+    const requestSceneRender = () => {
+        if (!viewer || viewer.isDestroyed()) return;
+        viewer.scene.requestRender();
+    };
 
     // Aviation: BillboardCollection (GPU-batched, 1 draw call for 11K billboards)
     const aviBillboardsRef = useRef<Cesium.BillboardCollection | null>(null);
     const aviBillboardMap = useRef<Map<string, Cesium.Billboard>>(new Map());
 
-    // Maritime: still Entity API (only ~300-500 vessels, perf is fine)
-    const maritimeDsRef = useRef<Cesium.CustomDataSource | null>(null);
+    // Maritime: BillboardCollection. The old Entity+SampledPositionProperty path
+    // did not scale well and was the weakest live renderer left in the scene.
+    const maritimeBillboardsRef = useRef<Cesium.BillboardCollection | null>(null);
+    const maritimeBillboardMap = useRef<Map<string, Cesium.Billboard>>(new Map());
     // Dark vessels: separate datasource for AIS-dark flagged vessels
     const darkVesselDsRef = useRef<Cesium.CustomDataSource | null>(null);
     const socketRef = useRef<Socket | null>(null);
@@ -128,16 +164,24 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
         let active = true;
 
         // --- Aviation: BillboardCollection ---
-        const aviBillboards = new Cesium.BillboardCollection({ scene: viewer.scene });
+        const aviBillboards = new Cesium.BillboardCollection({
+            scene: viewer.scene,
+            blendOption: Cesium.BlendOption.TRANSLUCENT,
+        });
         viewer.scene.primitives.add(aviBillboards);
         aviBillboardsRef.current = aviBillboards;
         const billboardMap = new Map<string, Cesium.Billboard>();
         aviBillboardMap.current = billboardMap;
 
-        // --- Maritime: Entity API (small count, clustering useful) ---
-        const maritimeDs = new Cesium.CustomDataSource('maritime');
-        viewer.dataSources.add(maritimeDs);
-        maritimeDsRef.current = maritimeDs;
+        // --- Maritime: BillboardCollection ---
+        const maritimeBillboards = new Cesium.BillboardCollection({
+            scene: viewer.scene,
+            blendOption: Cesium.BlendOption.TRANSLUCENT,
+        });
+        viewer.scene.primitives.add(maritimeBillboards);
+        maritimeBillboardsRef.current = maritimeBillboards;
+        const vesselBillboardMap = new Map<string, Cesium.Billboard>();
+        maritimeBillboardMap.current = vesselBillboardMap;
 
         // --- Dark vessels: AIS-silent vessels flagged by backend ---
         const darkVesselDs = new Cesium.CustomDataSource('dark-vessels');
@@ -208,6 +252,7 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
         // re-enable keeps its full STALE_TTL grace period measured from
         // re-enable instead of from its pre-freeze lastSeen.
         const staleCleanup = setInterval(() => {
+            if (useTimelineStore.getState().mode === 'playback') return;
             const now = Date.now();
             const sources = useTimelineStore.getState().sources;
 
@@ -236,7 +281,12 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                 marLastSeen.forEach((ts, id) => {
                     const effective = ts > floor ? ts : floor;
                     if (now - effective > STALE_TTL) {
-                        maritimeDs.entities.removeById(id);
+                        const bb = vesselBillboardMap.get(id);
+                        if (bb) {
+                            maritimeBillboards.remove(bb);
+                            vesselBillboardMap.delete(id);
+                        }
+                        vesselMetaMap.delete(id);
                         marLastSeen.delete(id);
                     }
                 });
@@ -249,31 +299,49 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
         // single sync loop is a 100-300ms main-thread spike that makes
         // the globe feel laggy on every tick. Chunked with yields keeps
         // pointer events responsive even during a fresh world update.
-        const AVI_CHUNK_SIZE = 1500;
+        const AVI_CHUNK_SIZE = 400;
+        const MARITIME_CHUNK_SIZE = 250;
 
-        // Message sequence counter. Bumped on every live-update
-        // arrival; each async handler captures `mySeq` at start and
-        // bails after any yield if a newer message has come in. This
-        // prevents stale resumed handlers from writing positions older
-        // than the latest snapshot when socket.io delivers two updates
-        // before the first one's chunked loop drains.
-        let messageSeq = 0;
+        let processingLiveUpdate = false;
+        let queuedLiveUpdate: any | null = null;
+        let lastUpdateReceivedAt: string | null = null;
+        let lastProcessStartedAt: string | null = null;
+        let lastProcessFinishedAt: string | null = null;
+        let lastProcessMs = 0;
 
-        socket.on('live-update', async (data: any) => {
+        const publishLiveStats = () => {
+            window.__openspyLiveStats = {
+                aircraftBillboards: billboardMap.size,
+                vesselBillboards: vesselBillboardMap.size,
+                darkVessels: darkVesselDs.entities.values.length,
+                queuedUpdate: Boolean(queuedLiveUpdate),
+                processingUpdate: processingLiveUpdate,
+                lastUpdateReceivedAt,
+                lastProcessStartedAt,
+                lastProcessFinishedAt,
+                lastProcessMs,
+            };
+        };
+
+        const processLiveUpdate = async (data: any) => {
             if (!active) return;
-            const mySeq = ++messageSeq;
+            const processStartedAt = performance.now();
+            lastProcessStartedAt = new Date().toISOString();
+            publishLiveStats();
             const now = Date.now();
+            const initialState = useTimelineStore.getState();
+            if (initialState.mode === 'playback') return;
             // Sources + subtype filters are re-read from the store on
             // every yield boundary so a mid-chunk source-off flip is
-            // seen by the resumed handler (instead of overwriting the
-            // source-off-clear effect with stale positions from the
-            // in-flight payload).
-            let currentSubtypeVisibility = useTimelineStore.getState().subtypeVisibility;
-            let currentSources = useTimelineStore.getState().sources;
-            const refreshStateIfFresh = (): boolean => {
-                if (!active || mySeq !== messageSeq) return false;
-                currentSubtypeVisibility = useTimelineStore.getState().subtypeVisibility;
-                currentSources = useTimelineStore.getState().sources;
+            // seen by the resumed handler.
+            let currentSubtypeVisibility = initialState.subtypeVisibility;
+            let currentSources = initialState.sources;
+            const refreshState = (): boolean => {
+                if (!active) return false;
+                const freshState = useTimelineStore.getState();
+                if (freshState.mode === 'playback') return false;
+                currentSubtypeVisibility = freshState.subtypeVisibility;
+                currentSources = freshState.sources;
                 return true;
             };
 
@@ -333,15 +401,16 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                     // Yield every AVI_CHUNK_SIZE aircraft so input events
                     // (drag / zoom / click) get a chance between chunks.
                     if ((ai + 1) % AVI_CHUNK_SIZE === 0 && ai + 1 < aircrafts.length) {
+                        requestSceneRender();
                         await new Promise<void>((resolve) => setTimeout(resolve, 0));
-                        if (!refreshStateIfFresh()) return;
+                        if (!refreshState()) return;
                         // Source may have flipped off during the yield.
                         if (!currentSources.aviation) break;
                     }
                 }
             }
 
-            if (!refreshStateIfFresh()) return;
+            if (!refreshState()) return;
 
             // Server-computed counts → store (no client forEach).
             // Gate each write on the CURRENT source flag so a flipped-off
@@ -367,174 +436,58 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
             if (!currentSources.maritime) return; // Maritime source disabled — drop vessels + dark vessels
             marMsgs += data.vessels.length;
 
-            const MARITIME_CHUNK_SIZE = 500;
             const vessels: any[] = data.vessels;
             for (let vi = 0; vi < vessels.length; vi++) {
                 const v = vessels[vi];
                 marLastSeen.set(v.id, now);
-                let entity = maritimeDs.entities.getById(v.id);
                 const pos = Cesium.Cartesian3.fromDegrees(v.lng, v.lat, 0);
                 const rotation = Cesium.Math.toRadians(-(v.heading || 0));
-
-                if (!entity) {
-                    const positionProperty = new Cesium.SampledPositionProperty();
-                    positionProperty.forwardExtrapolationType = Cesium.ExtrapolationType.HOLD;
-                    positionProperty.backwardExtrapolationType = Cesium.ExtrapolationType.HOLD;
-                    // Apply subtype visibility filter to new vessels so
-                    // late-arriving ships respect the current LayerManager toggles.
-                    const showVessel = currentSubtypeVisibility[`maritime:${v.type}`] !== false;
-                    // Respect the trajectories toggle at creation time — without
-                    // this, freshly spawned vessels would flash in their wake
-                    // even when the user had hidden trails globally.
-                    const initialShowTrails = useTimelineStore.getState().showTrajectories;
-                    entity = maritimeDs.entities.add({
+                const showVessel = currentSubtypeVisibility[`maritime:${v.type}`] !== false;
+                let bb = vesselBillboardMap.get(v.id);
+                if (!bb) {
+                    bb = maritimeBillboards.add({
+                        position: pos,
+                        image: getShipSVG(v.type),
+                        scale: 0.7,
+                        rotation,
+                        alignedAxis: Cesium.Cartesian3.UNIT_Z,
                         id: v.id,
-                        name: v.name || `Ship ${v.id}`,
-                        position: positionProperty as any,
                         show: showVessel,
-                        properties: new Cesium.PropertyBag({
-                            layer: 'Vessel',
-                            subtype: v.type,
-                            speed: v.speed,
-                            heading: v.heading || 0,
-                            // New AIS fields
-                            vesselName: v.name || null,
-                            callSign: v.callSign || null,
-                            imo: v.imo || null,
-                            navigationStatus: v.navigationStatus || null,
-                            destination: v.destination || null,
-                            eta: v.eta || null,
-                            rateOfTurn: v.rateOfTurn ?? null,
-                            draught: v.draught || null,
-                            vesselLength: v.length || null,
-                            beam: v.beam || null,
-                            cog: v.cog ?? null,
-                        }),
-                        billboard: {
-                            image: getShipSVG(v.type),
-                            scale: 0.7,
-                            rotation,
-                            alignedAxis: Cesium.Cartesian3.UNIT_Z,
-                        },
-                        // Vessel wake — last 30 min of accumulated positions.
-                        // Plain ColorMaterialProperty instead of PolylineGlow
-                        // which uses a heavy custom shader; on 500+ vessels
-                        // glow was a material perf kit for a small visual win.
-                        path: {
-                            leadTime: 0,
-                            trailTime: 1800,
-                            width: 1.5,
-                            material: new Cesium.ColorMaterialProperty(
-                                Cesium.Color.CYAN.withAlpha(0.4)
-                            ),
-                            show: new Cesium.ConstantProperty(initialShowTrails),
-                        },
                     });
+                    vesselBillboardMap.set(v.id, bb);
                 } else {
-                    // Mutate existing ConstantProperty values in place via
-                    // `setValue()` rather than allocating a new property
-                    // on every socket tick. With 500-2000 vessels this
-                    // dropped GC pressure noticeably — each vessel update
-                    // used to churn 3-5 fresh property objects per message,
-                    // and the simulator fires every few seconds.
-                    if (entity.billboard?.rotation instanceof Cesium.ConstantProperty) {
-                        entity.billboard.rotation.setValue(rotation);
-                    } else if (entity.billboard) {
-                        entity.billboard.rotation = new Cesium.ConstantProperty(rotation);
+                    bb.position = pos;
+                    bb.rotation = rotation;
+                    if (v.type !== 'unknown') {
+                        bb.image = getShipSVG(v.type);
                     }
-                    // Update type if known
-                    if (entity.properties && v.type !== 'unknown') {
-                        const subProp = (entity.properties as any).subtype;
-                        if (subProp instanceof Cesium.ConstantProperty) {
-                            subProp.setValue(v.type);
-                        } else {
-                            (entity.properties as any).subtype = new Cesium.ConstantProperty(v.type);
-                        }
-                        if (entity.billboard?.image instanceof Cesium.ConstantProperty) {
-                            entity.billboard.image.setValue(getShipSVG(v.type));
-                        } else if (entity.billboard) {
-                            entity.billboard.image = new Cesium.ConstantProperty(getShipSVG(v.type));
-                        }
-                    }
-                    // Update speed/heading properties for EntityHUD
-                    if (entity.properties) {
-                        const speedProp = (entity.properties as any).speed;
-                        if (speedProp instanceof Cesium.ConstantProperty) {
-                            speedProp.setValue(v.speed || 0);
-                        } else {
-                            (entity.properties as any).speed = new Cesium.ConstantProperty(v.speed || 0);
-                        }
-                        const headingProp = (entity.properties as any).heading;
-                        if (headingProp instanceof Cesium.ConstantProperty) {
-                            headingProp.setValue(v.heading || 0);
-                        } else {
-                            (entity.properties as any).heading = new Cesium.ConstantProperty(v.heading || 0);
-                        }
-                        // Update AIS enriched fields from backend
-                        const aisFields: Record<string, any> = {
-                            vesselName: v.name || null,
-                            callSign: v.callSign || null,
-                            imo: v.imo || null,
-                            navigationStatus: v.navigationStatus || null,
-                            destination: v.destination || null,
-                            eta: v.eta || null,
-                            rateOfTurn: v.rateOfTurn ?? null,
-                            draught: v.draught || null,
-                            vesselLength: v.length || null,
-                            beam: v.beam || null,
-                            cog: v.cog ?? null,
-                        };
-                        for (const [key, val] of Object.entries(aisFields)) {
-                            const prop = (entity.properties as any)[key];
-                            if (prop instanceof Cesium.ConstantProperty) {
-                                prop.setValue(val);
-                            } else {
-                                (entity.properties as any)[key] = new Cesium.ConstantProperty(val);
-                            }
-                        }
-                    }
-                    // Update entity name
-                    if (v.name) entity.name = v.name;
+                    bb.show = showVessel;
                 }
 
-                const positionProperty = entity.position as Cesium.SampledPositionProperty;
-                const prev = positionProperty.getValue(viewer.clock.currentTime);
-                if (!prev || !Cesium.Cartesian3.equalsEpsilon(prev, pos, 0, 1.0)) {
-                    positionProperty.addSample(viewer.clock.currentTime, pos);
-                }
-                // Prune samples older than the visible wake window
-                // (trailTime + a small grace) on EVERY update, not just
-                // position-change ticks. Without this, a long session
-                // accumulates samples forever — addSample is append-only,
-                // `trailTime` only bounds what's drawn, not what's
-                // stored, so path visualiser cost grows linearly with
-                // session duration even though the visible trail stays
-                // the same length.
-                //
-                // The prune must run outside the position-change branch
-                // because stationary/moored vessels stop calling
-                // addSample but still hold whatever history they
-                // accumulated before they stopped. Running it every
-                // update amortises the cleanup across the whole fleet
-                // on each simulator tick.
-                const trailWindowSec = 1800; // matches path.trailTime
-                const graceSec = 60;
-                const cutoff = Cesium.JulianDate.addSeconds(
-                    viewer.clock.currentTime,
-                    -(trailWindowSec + graceSec),
-                    new Cesium.JulianDate()
-                );
-                // Wide-open start so we remove EVERY sample before the
-                // cutoff. Cesium's TimeInterval uses inclusive bounds
-                // by default which is exactly what we want here.
-                positionProperty.removeSamples(new Cesium.TimeInterval({
-                    start: PRUNE_INTERVAL_START,
-                    stop: cutoff,
-                }));
+                vesselMetaMap.set(v.id, {
+                    id: v.id,
+                    name: v.name || `Ship ${v.id}`,
+                    type: v.type || 'unknown',
+                    lat: v.lat,
+                    lng: v.lng,
+                    speed: v.speed || 0,
+                    heading: v.heading || 0,
+                    callSign: v.callSign || null,
+                    imo: v.imo || null,
+                    navigationStatus: v.navigationStatus || null,
+                    destination: v.destination || null,
+                    eta: v.eta || null,
+                    rateOfTurn: v.rateOfTurn ?? null,
+                    draught: v.draught ?? null,
+                    vesselLength: v.length ?? null,
+                    beam: v.beam ?? null,
+                    cog: v.cog ?? null,
+                });
 
                 if ((vi + 1) % MARITIME_CHUNK_SIZE === 0 && vi + 1 < vessels.length) {
+                    requestSceneRender();
                     await new Promise<void>((resolve) => setTimeout(resolve, 0));
-                    if (!refreshStateIfFresh()) return;
+                    if (!refreshState()) return;
                     if (!currentSources.maritime) return;
                 }
             }
@@ -603,6 +556,36 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                 });
                 for (const id of toRemove) darkVesselDs.entities.removeById(id);
             }
+
+            requestSceneRender();
+            lastProcessMs = performance.now() - processStartedAt;
+            lastProcessFinishedAt = new Date().toISOString();
+            publishLiveStats();
+        };
+
+        const drainLiveUpdates = async () => {
+            if (processingLiveUpdate) return;
+            processingLiveUpdate = true;
+            publishLiveStats();
+            try {
+                while (active && queuedLiveUpdate) {
+                    const next = queuedLiveUpdate;
+                    queuedLiveUpdate = null;
+                    publishLiveStats();
+                    await processLiveUpdate(next);
+                }
+            } finally {
+                processingLiveUpdate = false;
+                publishLiveStats();
+            }
+        };
+
+        socket.on('live-update', (data: any) => {
+            if (!active) return;
+            lastUpdateReceivedAt = new Date().toISOString();
+            queuedLiveUpdate = data;
+            publishLiveStats();
+            void drainLiveUpdates();
         });
 
         return () => {
@@ -614,28 +597,31 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
             aircraftMetaMap.clear();
             if (viewer && !viewer.isDestroyed()) {
                 viewer.scene.primitives.remove(aviBillboards);
-                viewer.dataSources.remove(maritimeDs);
+                viewer.scene.primitives.remove(maritimeBillboards);
                 viewer.dataSources.remove(darkVesselDs);
             }
             aviBillboardsRef.current = null;
-            maritimeDsRef.current = null;
+            maritimeBillboardsRef.current = null;
+            maritimeBillboardMap.current.clear();
+            vesselMetaMap.clear();
             darkVesselDsRef.current = null;
+            delete window.__openspyLiveStats;
         };
     }, [viewer]);
 
     // ---- Effect 2: visibility toggles ----
-    // Effective show = source && visibility && !deepHistory. Source-off
-    // hides the aircraft / vessel layers AND (via fresh-read inside the
-    // socket handler) stops adding new entities. The scene clear on
-    // source-off is handled in Effect 0a below.
+    // Historical replay uses a separate overlay, so canonical live layers
+    // must be fully hidden in playback to avoid rendering live + history
+    // on top of each other.
     const aviSourceOnSel = useTimelineStore(s => s.sources.aviation);
     const marSourceOnSel = useTimelineStore(s => s.sources.maritime);
     useEffect(() => {
-        const isDeepHistory = mode === 'playback' && (Date.now() - currentTime.getTime() > 10 * 60 * 1000);
-        if (aviBillboardsRef.current) aviBillboardsRef.current.show = aviSourceOnSel && isAviationVisible && !isDeepHistory;
-        if (maritimeDsRef.current) maritimeDsRef.current.show = marSourceOnSel && isMaritimeVisible && !isDeepHistory;
-        if (darkVesselDsRef.current) darkVesselDsRef.current.show = marSourceOnSel && isMaritimeVisible && !isDeepHistory;
-    }, [aviSourceOnSel, marSourceOnSel, isAviationVisible, isMaritimeVisible, mode, currentTime]);
+        const liveVisible = mode !== 'playback';
+        if (aviBillboardsRef.current) aviBillboardsRef.current.show = aviSourceOnSel && isAviationVisible && liveVisible;
+        if (maritimeBillboardsRef.current) maritimeBillboardsRef.current.show = marSourceOnSel && isMaritimeVisible && liveVisible;
+        if (darkVesselDsRef.current) darkVesselDsRef.current.show = marSourceOnSel && isMaritimeVisible && liveVisible;
+        requestSceneRender();
+    }, [aviSourceOnSel, marSourceOnSel, isAviationVisible, isMaritimeVisible, mode]);
 
     // ---- Effect 0a: source-off scene clear ----
     // When the user turns aviation / maritime OFF, drop the existing
@@ -656,14 +642,17 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                 status: 'disabled',
                 speed: '-',
             });
+            requestSceneRender();
         }
     }, [aviSourceOnSel]);
     useEffect(() => {
         if (!marSourceOnSel) {
-            const mds = maritimeDsRef.current;
             const dvs = darkVesselDsRef.current;
-            if (mds) mds.entities.removeAll();
+            const bbs = maritimeBillboardsRef.current;
+            if (bbs) bbs.removeAll();
             if (dvs) dvs.entities.removeAll();
+            maritimeBillboardMap.current.clear();
+            vesselMetaMap.clear();
             marLastSeenRef.current.clear();
             useTimelineStore.getState().setSubtypeCounts('maritime', {});
             useTimelineStore.getState().setStreamMetric('maritime', {
@@ -671,19 +660,18 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                 status: 'disabled',
                 speed: '-',
             });
+            requestSceneRender();
         }
     }, [marSourceOnSel]);
 
     // ---- Effect 3: vessel trails toggle ----
-    // Flips every existing vessel's `path.show` on any state change —
-    // constant property, no per-frame cost when the flag is steady.
+    // Live maritime now uses billboard batching instead of Entity.path, so
+    // this becomes a no-op. Historical/replay movement remains supported via
+    // the replay overlay. We keep the effect boundary to preserve the public
+    // store contract while removing the hot Entity path visualizer cost.
     useEffect(() => {
-        const ds = maritimeDsRef.current;
-        if (!ds) return;
-        const constant = new Cesium.ConstantProperty(showTrajectories);
-        ds.entities.values.forEach(e => {
-            if (e.path) e.path.show = constant;
-        });
+        void showTrajectories;
+        requestSceneRender();
     }, [showTrajectories]);
 
     // ---- Effect 4: per-subtype visibility + entity isolation (aviation + maritime + dark) ----
@@ -699,14 +687,13 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
         });
 
         // Maritime subtype filtering + Solo isolation
-        if (maritimeDsRef.current) {
-            maritimeDsRef.current.entities.values.forEach(e => {
-                const sub = (e.properties as any)?.subtype?.getValue?.() ?? 'unknown';
-                const subtypeOk = subtypeVisibility[`maritime:${sub}`] !== false;
-                const soloOk = !isolatedEntityId || isolatedEntityId === e.id;
-                e.show = subtypeOk && soloOk;
-            });
-        }
+        maritimeBillboardMap.current.forEach((bb, id) => {
+            const meta = vesselMetaMap.get(id);
+            if (!meta) return;
+            const subtypeOk = subtypeVisibility[`maritime:${meta.type}`] !== false;
+            const soloOk = !isolatedEntityId || isolatedEntityId === id;
+            bb.show = subtypeOk && soloOk;
+        });
 
         // Dark vessel filtering (follows maritime visibility)
         if (darkVesselDsRef.current) {
@@ -715,5 +702,6 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                 e.show = soloOk;
             });
         }
+        requestSceneRender();
     }, [subtypeVisibility, isolatedEntityId]);
 }

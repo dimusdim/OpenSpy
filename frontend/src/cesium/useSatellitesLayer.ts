@@ -67,6 +67,7 @@ function getSatelliteBillboardShow(
     entityId: string,
     subtype: string | undefined
 ): boolean {
+    if (state.mode === 'playback') return false;
     if (!state.sources.satellites || !state.visibility.satellites) return false;
     if (state.isolatedEntityId && state.isolatedEntityId !== entityId) return false;
     if (!subtype) return true;
@@ -100,12 +101,20 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
 
     const isFootprintSourceOn = useTimelineStore(s => s.sources.satelliteFootprints);
     const isFootprintVisible = useTimelineStore(s => s.visibility.satelliteFootprints);
+    const mode = useTimelineStore(s => s.mode);
+    const requestSceneRender = () => {
+        if (!viewer || viewer.isDestroyed()) return;
+        viewer.scene.requestRender();
+    };
 
     // ---- Effect 1: BillboardCollection + trails primitive lifetime ----
     useEffect(() => {
         if (!viewer) return;
 
-        const bc = new Cesium.BillboardCollection({ scene: viewer.scene });
+        const bc = new Cesium.BillboardCollection({
+            scene: viewer.scene,
+            blendOption: Cesium.BlendOption.TRANSLUCENT,
+        });
         viewer.scene.primitives.add(bc);
         billboardCollectionRef.current = bc;
 
@@ -203,10 +212,14 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                             windowMinutes: 240,
                             stepSeconds: 120,
                         });
-                        // Start position ticks
-                        worker.postMessage({ type: 'tick', currentTimeMs: Date.now() });
-                        tickIntervalRef.current = setInterval(() => {
+                        const sendLiveTick = () => {
+                            if (useTimelineStore.getState().mode === 'playback') return;
                             worker.postMessage({ type: 'tick', currentTimeMs: Date.now() });
+                        };
+                        // Start position ticks
+                        sendLiveTick();
+                        tickIntervalRef.current = setInterval(() => {
+                            sendLiveTick();
                         }, WORKER_TICK_INTERVAL);
                     }
 
@@ -216,6 +229,8 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                         const order: number[] = msg.order;
                         const bbMap = billboardMapRef.current;
                         const freshState = useTimelineStore.getState();
+                        if (freshState.mode === 'playback') return;
+                        let updated = false;
 
                         for (let i = 0; i < order.length; i++) {
                             const noradId = order[i];
@@ -232,8 +247,10 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                                 meta.lng = lon;
                                 meta.alt = alt;
                                 bb.show = getSatelliteBillboardShow(freshState, bb.id as string, meta.subtype);
+                                updated = true;
                             }
                         }
+                        if (updated) requestSceneRender();
                     }
 
                     if (msg.type === 'orbits') {
@@ -301,6 +318,7 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
 
                         console.log(`[Satellites] ${trailInstances.length} orbital trails built from Worker data`);
                         setSatellitesLoadedTick(t => t + 1);
+                        requestSceneRender();
                     }
                 };
 
@@ -404,9 +422,11 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
         const bbMap = billboardMapRef.current;
 
         const onTick = () => {
+            if (useTimelineStore.getState().mode === 'playback') return;
             const nowMs = Date.now();
             if (nowMs - lastUpdateMs < FOOTPRINT_UPDATE_MS) return;
             lastUpdateMs = nowMs;
+            let updated = false;
 
             for (const cfg of configs) {
                 const bb = bbMap.get(cfg.noradId);
@@ -501,6 +521,7 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                         }
                     }
                 }
+                updated = true;
             }
 
             useTimelineStore.getState().setStreamMetric('satelliteFootprints', {
@@ -508,6 +529,7 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                 status: states.size > 0 ? 'streaming' : 'warning',
                 speed: states.size > 0 ? `${states.size} sats` : 'waiting for positions',
             });
+            if (updated) requestSceneRender();
         };
 
         onTick();
@@ -548,9 +570,10 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
             }
         }
         if (trailsPrimitiveRef.current) {
-            trailsPrimitiveRef.current.show = isSourceOn && isVisible && showTrajectories;
+            trailsPrimitiveRef.current.show = mode !== 'playback' && isSourceOn && isVisible && showTrajectories;
         }
-    }, [isSourceOn, isVisible, showTrajectories]);
+        requestSceneRender();
+    }, [isSourceOn, isVisible, showTrajectories, mode]);
 
     // ---- Effect 4a: source-off cleanup ----
     useEffect(() => {
@@ -568,14 +591,16 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
             count: 0,
             status: 'disabled',
         });
+        requestSceneRender();
     }, [isSourceOn, viewer]);
 
     // ---- Effect 5: footprint overlay visibility ----
     useEffect(() => {
         if (footprintDsRef.current) {
-            footprintDsRef.current.show = isFootprintSourceOn && isFootprintVisible;
+            footprintDsRef.current.show = mode !== 'playback' && isFootprintSourceOn && isFootprintVisible;
         }
-    }, [isFootprintSourceOn, isFootprintVisible]);
+        requestSceneRender();
+    }, [isFootprintSourceOn, isFootprintVisible, mode]);
 
     // ---- Effect 5a: footprint source-off metric reset ----
     useEffect(() => {
@@ -617,6 +642,7 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
             }
         }
         useTimelineStore.getState().setSubtypeCounts('satellites', counts);
+        requestSceneRender();
 
         // Ready-gate poll for async trail primitive
         if (trails && !trails.ready) {
@@ -635,6 +661,7 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                         (attrs as any).show = Cesium.ShowGeometryInstanceAttribute.toValue(show);
                     }
                 }
+                requestSceneRender();
             };
             setTimeout(poll, 50);
             return () => { cancelled = true; };

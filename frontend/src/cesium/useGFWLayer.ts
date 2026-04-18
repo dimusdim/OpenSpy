@@ -9,6 +9,7 @@ import { safeCartesianFromDegrees } from './position-utils';
 export function useGFWLayer(viewer: Cesium.Viewer | null) {
     const isSourceOn = useTimelineStore(s => s.sources.gfw);
     const isVisible = useTimelineStore(s => s.visibility.gfw);
+    const mode = useTimelineStore(s => s.mode);
     const dsRef = useRef<Cesium.CustomDataSource | null>(null);
 
     // ---- Effect 1: scene lifetime ----
@@ -106,7 +107,7 @@ export function useGFWLayer(viewer: Cesium.Viewer | null) {
     const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
     useEffect(() => {
         if (!dsRef.current) return;
-        const globalShow = isSourceOn && isVisible;
+        const globalShow = mode !== 'playback' && isSourceOn && isVisible;
         dsRef.current.show = globalShow;
         if (globalShow && isolatedEntityId) {
             dsRef.current.entities.values.forEach(e => {
@@ -117,7 +118,7 @@ export function useGFWLayer(viewer: Cesium.Viewer | null) {
                 e.show = true;
             });
         }
-    }, [isSourceOn, isVisible, isolatedEntityId]);
+    }, [isSourceOn, isVisible, isolatedEntityId, mode]);
 
     // ---- Effect 4: source-off scene clear ----
     useEffect(() => {

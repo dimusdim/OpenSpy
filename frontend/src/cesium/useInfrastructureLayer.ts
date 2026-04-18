@@ -217,6 +217,7 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
   // visibility.infrastructure = render the loaded tile billboards/lines.
   const isSourceOn = useTimelineStore((s) => s.sources.infrastructure);
   const isVisible = useTimelineStore((s) => s.visibility.infrastructure);
+  const mode = useTimelineStore((s) => s.mode);
   const subtypeVisibility = useTimelineStore((s) => s.subtypeVisibility);
   const isolatedEntityId = useTimelineStore((s) => s.isolatedEntityId);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -494,7 +495,10 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
             const records: any[] = Array.isArray(mainBody) ? mainBody : (mainBody.data ?? []);
             const mainOverpassTimedOut: boolean = mainBody.overpassTimedOut === true;
             if (records.length > 0) {
-              const collection = new Cesium.BillboardCollection({ scene: v.scene });
+              const collection = new Cesium.BillboardCollection({
+                scene: v.scene,
+                blendOption: Cesium.BlendOption.TRANSLUCENT,
+              });
               for (let ri = 0; ri < records.length; ri++) {
                 const rec = records[ri];
                 const subtype = (rec.type || 'military') as InfraMeta['subtype'];
@@ -558,7 +562,10 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
             const powerBody = powerResult.value.data ?? {};
             const powerRecords: any[] = Array.isArray(powerBody) ? powerBody : (powerBody.data ?? []);
             const powerOverpassTimedOut: boolean = powerBody.overpassTimedOut === true;
-            const powerBillboardCollection = new Cesium.BillboardCollection({ scene: v.scene });
+            const powerBillboardCollection = new Cesium.BillboardCollection({
+              scene: v.scene,
+              blendOption: Cesium.BlendOption.TRANSLUCENT,
+            });
             const powerLineInstances: Cesium.GeometryInstance[] = [];
 
             for (let pri = 0; pri < powerRecords.length; pri++) {
@@ -805,7 +812,7 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
   // data stays visible when the source flips off, and flipping it back
   // on reseeds the viewport against the existing LRU.
   useEffect(() => {
-    if (!viewer || !isSourceOn) return;
+    if (!viewer || !isSourceOn || mode === 'playback') return;
 
     const v = viewer;
     // moveEnd fires once per settled camera pan/zoom — cleaner than
@@ -819,7 +826,8 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
       const altKm = altMeters / 1000;
       const shouldShow = altKm <= INFRA_ALTITUDE_CUTOFF_KM
           && useTimelineStore.getState().sources.infrastructure
-          && useTimelineStore.getState().visibility.infrastructure;
+          && useTimelineStore.getState().visibility.infrastructure
+          && useTimelineStore.getState().mode !== 'playback';
       tilesRef.current.forEach((tile) => {
         if (tile.mainBillboards) tile.mainBillboards.show = shouldShow;
         if (tile.powerBillboards) tile.powerBillboards.show = shouldShow;
@@ -848,18 +856,18 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
         v.camera.moveEnd.removeEventListener(onCameraMoveEnd);
       }
     };
-  }, [viewer, isSourceOn, fetchForViewport]);
+  }, [viewer, isSourceOn, mode, fetchForViewport]);
 
   // ---- Effect 3: layer visibility toggle ----
   // Effective show = sources && visibility for every loaded tile.
   useEffect(() => {
-    const show = isSourceOn && isVisible;
+    const show = mode !== 'playback' && isSourceOn && isVisible;
     tilesRef.current.forEach((tile) => {
       if (tile.mainBillboards) tile.mainBillboards.show = show;
       if (tile.powerBillboards) tile.powerBillboards.show = show;
       if (tile.powerLinePrimitive) tile.powerLinePrimitive.show = show;
     });
-  }, [isSourceOn, isVisible]);
+  }, [isSourceOn, isVisible, mode]);
 
   // ---- Effect 4: per-subtype visibility + Solo isolation ----
   useEffect(() => {

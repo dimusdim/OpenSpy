@@ -23,6 +23,7 @@ import { API_URL } from '../lib/config';
 export function useTrafficLayer(viewer: Cesium.Viewer | null) {
     const isSourceOn = useTimelineStore(s => s.sources.traffic);
     const isVisible = useTimelineStore(s => s.visibility.traffic);
+    const mode = useTimelineStore(s => s.mode);
     const layerRef = useRef<Cesium.ImageryLayer | null>(null);
     const tickRef = useRef<Cesium.Event.RemoveCallback | null>(null);
 
@@ -70,7 +71,10 @@ export function useTrafficLayer(viewer: Cesium.Viewer | null) {
             // must keep the tile layer invisible so Cesium stops issuing tile
             // requests to TomTom.
             const storeState = useTimelineStore.getState();
-            const storeVisible = storeState.sources.traffic && storeState.visibility.traffic;
+            const storeVisible =
+                storeState.mode !== 'playback' &&
+                storeState.sources.traffic &&
+                storeState.visibility.traffic;
             const shouldShow = storeVisible && heightKm < 100;
             layerRef.current.show = shouldShow;
 
@@ -113,8 +117,8 @@ export function useTrafficLayer(viewer: Cesium.Viewer | null) {
         if (!layerRef.current || !viewer || viewer.isDestroyed()) return;
         const carto = viewer.camera.positionCartographic;
         const heightKm = carto.height / 1000;
-        const shouldShow = isSourceOn && isVisible && heightKm < 100;
+        const shouldShow = mode !== 'playback' && isSourceOn && isVisible && heightKm < 100;
         layerRef.current.show = shouldShow;
         console.log(`[Traffic] toggle: source=${isSourceOn} vis=${isVisible} alt=${Math.round(heightKm)}km globe.show=${viewer.scene.globe.show} → layer.show=${shouldShow}`);
-    }, [isSourceOn, isVisible, viewer]);
+    }, [isSourceOn, isVisible, mode, viewer]);
 }

@@ -34,6 +34,7 @@ const COUNTRY_CENTROIDS_MINI: Record<string, [number, number]> = {
 export function useOutagesLayer(viewer: Cesium.Viewer | null) {
     const isSourceOn = useTimelineStore(s => s.sources.outages);
     const isVisible = useTimelineStore(s => s.visibility.outages);
+    const mode = useTimelineStore(s => s.mode);
     const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
     const dsRef = useRef<Cesium.CustomDataSource | null>(null);
 
@@ -215,8 +216,8 @@ export function useOutagesLayer(viewer: Cesium.Viewer | null) {
     // ---- Effect 3: layer visibility ----
     // Effective show = sources && visibility.
     useEffect(() => {
-        if (dsRef.current) dsRef.current.show = isSourceOn && isVisible;
-    }, [isSourceOn, isVisible]);
+        if (dsRef.current) dsRef.current.show = mode !== 'playback' && isSourceOn && isVisible;
+    }, [isSourceOn, isVisible, mode]);
 
     // ---- Effect 4: per-subtype visibility ----
     const sourceVisibility = useTimelineStore(s => s.sourceVisibility);

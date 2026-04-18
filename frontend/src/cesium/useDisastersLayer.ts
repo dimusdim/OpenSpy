@@ -11,6 +11,7 @@ export function useDisastersLayer(viewer: Cesium.Viewer | null) {
     // sources.disasters = fetch disaster events; visibility.disasters = render them
     const isDisasterSourceOn = useTimelineStore(s => s.sources.disasters);
     const isDisasterVisible = useTimelineStore(s => s.visibility.disasters);
+    const mode = useTimelineStore(s => s.mode);
 
     const disastersDsRef = useRef<Cesium.CustomDataSource | null>(null);
     // Bumped each time fetchEvents() completes. Dependent effects (subtype
@@ -152,9 +153,9 @@ export function useDisastersLayer(viewer: Cesium.Viewer | null) {
     // Effective show = sources && visibility.
     useEffect(() => {
         if (disastersDsRef.current) {
-            disastersDsRef.current.show = isDisasterSourceOn && isDisasterVisible;
+            disastersDsRef.current.show = mode !== 'playback' && isDisasterSourceOn && isDisasterVisible;
         }
-    }, [isDisasterSourceOn, isDisasterVisible]);
+    }, [isDisasterSourceOn, isDisasterVisible, mode]);
 
     // ---- Effect 4: per-subtype visibility + counts ----
     // Recount + apply per-subtype visibility (eventType is the subtype here).

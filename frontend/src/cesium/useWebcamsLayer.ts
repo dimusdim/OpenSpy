@@ -25,13 +25,17 @@ export const webcamMetaMap = new Map<string, WebcamMeta>();
 export function useWebcamsLayer(viewer: Cesium.Viewer | null) {
     const isSourceOn = useTimelineStore(s => s.sources.webcams);
     const isVisible = useTimelineStore(s => s.visibility.webcams);
+    const mode = useTimelineStore(s => s.mode);
     const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
     const collectionRef = useRef<Cesium.BillboardCollection | null>(null);
 
     // ---- Effect 1: scene lifetime ----
     useEffect(() => {
         if (!viewer) return;
-        const billboards = new Cesium.BillboardCollection({ scene: viewer.scene });
+        const billboards = new Cesium.BillboardCollection({
+            scene: viewer.scene,
+            blendOption: Cesium.BlendOption.TRANSLUCENT,
+        });
         viewer.scene.primitives.add(billboards);
         collectionRef.current = billboards;
         return () => {
@@ -45,7 +49,7 @@ export function useWebcamsLayer(viewer: Cesium.Viewer | null) {
 
     // ---- Effect 2: fetch loop ----
     useEffect(() => {
-        if (!viewer || !isSourceOn) return;
+        if (!viewer || !isSourceOn || mode === 'playback') return;
         let active = true;
 
         async function fetchWebcams() {
@@ -122,13 +126,13 @@ export function useWebcamsLayer(viewer: Cesium.Viewer | null) {
             clearInterval(interval);
             // Keep billboards — Effect 1 owns their lifetime.
         };
-    }, [viewer, isSourceOn]);
+    }, [viewer, isSourceOn, mode]);
 
     // ---- Effect 3: layer visibility ----
     // Effective show = sources && visibility.
     useEffect(() => {
-        if (collectionRef.current) collectionRef.current.show = isSourceOn && isVisible;
-    }, [isSourceOn, isVisible]);
+        if (collectionRef.current) collectionRef.current.show = mode !== 'playback' && isSourceOn && isVisible;
+    }, [isSourceOn, isVisible, mode]);
 
     // ---- Effect 4: solo filter (isolatedEntityId) ----
     useEffect(() => {

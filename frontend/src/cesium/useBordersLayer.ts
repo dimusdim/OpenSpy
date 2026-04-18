@@ -13,6 +13,7 @@ export function useBordersLayer(viewer: Cesium.Viewer | null) {
     // sources.labels = fetch boundaries; visibility.labels = show rendered walls
     const isSourceOn = useTimelineStore(s => s.sources.labels);
     const isVisible = useTimelineStore(s => s.visibility.labels);
+    const mode = useTimelineStore(s => s.mode);
     const dsRef = useRef<Cesium.CustomDataSource | null>(null);
     // One-shot: borders are static NaturalEarth data. On source-off
     // we clear everything (see Effect 4) and re-fetch fresh on the
@@ -41,7 +42,7 @@ export function useBordersLayer(viewer: Cesium.Viewer | null) {
 
     // ---- Effect 2: single-flight fetch gate ----
     useEffect(() => {
-        if (!viewer || !isSourceOn) return;
+        if (!viewer || !isSourceOn || mode === 'playback') return;
         if (loadedRef.current) return;
         if (loadPromiseRef.current) return;
 
@@ -122,6 +123,7 @@ export function useBordersLayer(viewer: Cesium.Viewer | null) {
                 }
                 loadedRef.current = true;
                 ds.show =
+                    useTimelineStore.getState().mode !== 'playback' &&
                     useTimelineStore.getState().sources.labels &&
                     useTimelineStore.getState().visibility.labels;
                 console.log(`[Borders] Loaded ${ds.entities.values.length} border wall segments`);
@@ -141,13 +143,13 @@ export function useBordersLayer(viewer: Cesium.Viewer | null) {
         loadPromiseRef.current = self.promise;
 
         // NO cleanup — one-shot is allowed to finish.
-    }, [viewer, isSourceOn]);
+    }, [viewer, isSourceOn, mode]);
 
     // ---- Effect 3: visibility toggle ----
     // Effective show = sources && visibility.
     useEffect(() => {
-        if (dsRef.current) dsRef.current.show = isSourceOn && isVisible;
-    }, [isSourceOn, isVisible]);
+        if (dsRef.current) dsRef.current.show = mode !== 'playback' && isSourceOn && isVisible;
+    }, [isSourceOn, isVisible, mode]);
 
     // ---- Effect 4: source-off scene clear ----
     useEffect(() => {

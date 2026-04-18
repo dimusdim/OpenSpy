@@ -33,6 +33,7 @@ function getSubtypeKey(eventType: string): string {
 export function useConflictsLayer(viewer: Cesium.Viewer | null) {
     const isSourceOn = useTimelineStore(s => s.sources.conflicts);
     const isVisible = useTimelineStore(s => s.visibility.conflicts);
+    const mode = useTimelineStore(s => s.mode);
     const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
     const dsRef = useRef<Cesium.CustomDataSource | null>(null);
 
@@ -164,8 +165,8 @@ export function useConflictsLayer(viewer: Cesium.Viewer | null) {
     // ---- Effect 3: visibility toggle ----
     // Effective show = sources && visibility.
     useEffect(() => {
-        if (dsRef.current) dsRef.current.show = isSourceOn && isVisible;
-    }, [isSourceOn, isVisible]);
+        if (dsRef.current) dsRef.current.show = mode !== 'playback' && isSourceOn && isVisible;
+    }, [isSourceOn, isVisible, mode]);
 
     // ---- Effect 4: per-subtype visibility ----
     const sourceVisibility = useTimelineStore(s => s.sourceVisibility);

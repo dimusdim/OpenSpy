@@ -5,7 +5,7 @@ import * as Cesium from 'cesium';
 import 'cesium/Build/Cesium/Widgets/widgets.css';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { useSatellitesLayer, satelliteFootprintMetaMap, satelliteMetaMap } from '../cesium/useSatellitesLayer';
-import { useDynamicLayers, aircraftMetaMap } from '../cesium/useDynamicLayers';
+import { useDynamicLayers, aircraftMetaMap, vesselMetaMap } from '../cesium/useDynamicLayers';
 import { useDisastersLayer } from '../cesium/useDisastersLayer';
 import { useJammingLayer } from '../cesium/useJammingLayer';
 import { useBordersLayer } from '../cesium/useBordersLayer';
@@ -19,6 +19,7 @@ import { useTrafficLayer } from '../cesium/useTrafficLayer';
 import { useConflictsLayer } from '../cesium/useConflictsLayer';
 import { useAirspaceLayer, airspaceMetaMap, airspaceInstanceToLogical } from '../cesium/useAirspaceLayer';
 import { useGFWLayer } from '../cesium/useGFWLayer';
+import { replayMetaMap, useReplayOverlay } from '../cesium/useReplayOverlay';
 
 if (typeof window !== 'undefined') {
     (window as any).CESIUM_BASE_URL = '/cesium';
@@ -87,6 +88,123 @@ export default function Globe() {
         // changes — store-driven toggles (Legend, filters, Solo) don't
         // trigger a scene change, so the globe stays visually stale.
         let prevVis = {} as any, prevSub = {} as any, prevFilter = null as any, prevTrails = false;
+        let prevMode = useTimelineStore.getState().mode;
+        let prevPlaybackKind = useTimelineStore.getState().playbackKind;
+        let prevIsPlaying = useTimelineStore.getState().isPlaying;
+        let prevSpeedMultiplier = useTimelineStore.getState().speedMultiplier;
+        let prevCurrentTimeMs = useTimelineStore.getState().currentTime.getTime();
+        let playbackRenderFrame = 0;
+        let historicalDriverFrame = 0;
+        let historicalDriverAnchorWallMs = 0;
+        let historicalDriverAnchorSimMs = 0;
+        let historicalDriverSpeed = 1;
+        let historicalLastStoreSyncAt = 0;
+        let suppressPlaybackCurrentTimeReaction = false;
+        const stopPlaybackRenderLoop = () => {
+            if (playbackRenderFrame) {
+                cancelAnimationFrame(playbackRenderFrame);
+                playbackRenderFrame = 0;
+            }
+        };
+        const stopHistoricalDriver = () => {
+            if (historicalDriverFrame) {
+                cancelAnimationFrame(historicalDriverFrame);
+                historicalDriverFrame = 0;
+            }
+        };
+        const setHistoricalClock = (timeMs: number, syncStore: boolean) => {
+            const targetDate = new Date(timeMs);
+            v.clock.currentTime = Cesium.JulianDate.fromDate(targetDate);
+            if (syncStore) {
+                suppressPlaybackCurrentTimeReaction = true;
+                useTimelineStore.getState().setCurrentTime(targetDate);
+                suppressPlaybackCurrentTimeReaction = false;
+                historicalLastStoreSyncAt = performance.now();
+            }
+            v.scene.requestRender();
+        };
+        const armHistoricalDriver = (simMs: number, speed: number) => {
+            historicalDriverAnchorWallMs = performance.now();
+            historicalDriverAnchorSimMs = simMs;
+            historicalDriverSpeed = speed;
+        };
+        const startHistoricalDriver = () => {
+            if (historicalDriverFrame) return;
+            const tick = () => {
+                if (v.isDestroyed()) {
+                    historicalDriverFrame = 0;
+                    return;
+                }
+                const state = useTimelineStore.getState();
+                const historicalPlaybackRunning = state.mode === 'playback' && state.playbackKind === 'historical' && state.isPlaying;
+                if (!historicalPlaybackRunning) {
+                    historicalDriverFrame = 0;
+                    return;
+                }
+                const nowPerf = performance.now();
+                const elapsedMs = Math.max(0, nowPerf - historicalDriverAnchorWallMs);
+                const targetMs = historicalDriverAnchorSimMs + elapsedMs * historicalDriverSpeed;
+                const liveEdgeMs = Date.now();
+                const clampedMs = Math.min(targetMs, liveEdgeMs);
+                const shouldSyncStore = nowPerf - historicalLastStoreSyncAt >= 100;
+                setHistoricalClock(clampedMs, shouldSyncStore);
+                if (targetMs >= liveEdgeMs) {
+                    useTimelineStore.getState().setIsPlaying(false);
+                    historicalDriverFrame = 0;
+                    return;
+                }
+                historicalDriverFrame = requestAnimationFrame(tick);
+            };
+            historicalDriverFrame = requestAnimationFrame(tick);
+        };
+        const startPlaybackRenderLoop = () => {
+            if (playbackRenderFrame) return;
+            const tick = () => {
+                if (v.isDestroyed()) {
+                    playbackRenderFrame = 0;
+                    return;
+                }
+                const state = useTimelineStore.getState();
+                const historicalPlaybackRunning = state.mode === 'playback' && state.playbackKind === 'historical' && state.isPlaying;
+                if (!historicalPlaybackRunning) {
+                    playbackRenderFrame = 0;
+                    return;
+                }
+                v.scene.requestRender();
+                playbackRenderFrame = requestAnimationFrame(tick);
+            };
+            playbackRenderFrame = requestAnimationFrame(tick);
+        };
+        const syncRenderTimeBudget = (state: ReturnType<typeof useTimelineStore.getState>) => {
+            const historicalPlaybackRunning = state.mode === 'playback' && state.playbackKind === 'historical' && state.isPlaying;
+            v.scene.maximumRenderTimeChange = historicalPlaybackRunning ? 0.0 : 1.0;
+            if (historicalPlaybackRunning) startPlaybackRenderLoop();
+            else stopPlaybackRenderLoop();
+        };
+        const syncHistoricalPlaybackClock = (state: ReturnType<typeof useTimelineStore.getState>) => {
+            const historicalMode = state.mode === 'playback' && state.playbackKind === 'historical';
+            if (!historicalMode) {
+                stopHistoricalDriver();
+                v.clock.clockStep = Cesium.ClockStep.SYSTEM_CLOCK_MULTIPLIER;
+                v.clock.multiplier = 1.0;
+                v.clock.shouldAnimate = state.isPlaying;
+                return;
+            }
+
+            v.clock.clockStep = Cesium.ClockStep.TICK_DEPENDENT;
+            v.clock.shouldAnimate = false;
+            v.clock.multiplier = state.speedMultiplier;
+
+            if (state.isPlaying) {
+                armHistoricalDriver(state.currentTime.getTime(), state.speedMultiplier);
+                startHistoricalDriver();
+            } else {
+                stopHistoricalDriver();
+                setHistoricalClock(state.currentTime.getTime(), false);
+            }
+        };
+        syncRenderTimeBudget(useTimelineStore.getState());
+        syncHistoricalPlaybackClock(useTimelineStore.getState());
         const unsub = useTimelineStore.subscribe((state) => {
             if (state.visibility !== prevVis ||
                 state.subtypeVisibility !== prevSub ||
@@ -97,6 +215,27 @@ export default function Globe() {
                 prevFilter = state.activeFilter;
                 prevTrails = state.showTrajectories;
                 v.scene.requestRender();
+            }
+            if (state.mode !== prevMode || state.playbackKind !== prevPlaybackKind || state.isPlaying !== prevIsPlaying) {
+                prevMode = state.mode;
+                prevPlaybackKind = state.playbackKind;
+                prevIsPlaying = state.isPlaying;
+                syncRenderTimeBudget(state);
+                syncHistoricalPlaybackClock(state);
+                v.scene.requestRender();
+            }
+            if (state.speedMultiplier !== prevSpeedMultiplier) {
+                prevSpeedMultiplier = state.speedMultiplier;
+                syncHistoricalPlaybackClock(state);
+                v.scene.requestRender();
+            }
+            const currentTimeMs = state.currentTime.getTime();
+            if (currentTimeMs !== prevCurrentTimeMs) {
+                prevCurrentTimeMs = currentTimeMs;
+                const historicalPaused = state.mode === 'playback' && state.playbackKind === 'historical' && !state.isPlaying;
+                if (historicalPaused && !suppressPlaybackCurrentTimeReaction) {
+                    setHistoricalClock(currentTimeMs, false);
+                }
             }
         });
 
@@ -125,6 +264,16 @@ export default function Globe() {
             // Case 1: BillboardCollection billboard (aircraft or webcam) —
             // pickedObject.id is a plain string set in billboard.add({ id: ... }).
             if (typeof pickedObject.id === 'string') {
+                const replayMeta = replayMetaMap.get(pickedObject.id);
+                if (replayMeta) {
+                    useTimelineStore.getState().setSelectedEntityId(pickedObject.id, {
+                        name: replayMeta.name,
+                        id: pickedObject.id,
+                        type: replayMeta.layer,
+                    });
+                    return;
+                }
+
                 // Webcam billboard
                 const wcMeta = webcamMetaMap.get(pickedObject.id);
                 if (wcMeta) {
@@ -156,6 +305,17 @@ export default function Globe() {
                     return;
                 }
 
+                // Vessel billboard
+                const vesselMeta = vesselMetaMap.get(pickedObject.id);
+                if (vesselMeta) {
+                    useTimelineStore.getState().setSelectedEntityId(pickedObject.id, {
+                        name: vesselMeta.name || `Vessel ${pickedObject.id}`,
+                        id: pickedObject.id,
+                        type: 'Vessel',
+                    });
+                    return;
+                }
+
                 // Satellite billboard (BillboardCollection)
                 const satMeta = satelliteMetaMap.get(pickedObject.id);
                 if (satMeta) {
@@ -175,8 +335,11 @@ export default function Globe() {
                 const fireMeta = fireMetaMap.get(pickedObject.id);
                 if (fireMeta) {
                     const level = fireMeta.frp > 100 ? 'High' : fireMeta.frp > 30 ? 'Medium' : 'Low';
+                    const displayName = fireMeta.aggregated
+                        ? `Fire Cluster (${fireMeta.count || 0} hotspots, peak ${fireMeta.frp.toFixed(1)} MW)`
+                        : `Fire (${level} FRP: ${fireMeta.frp.toFixed(1)} MW)`;
                     useTimelineStore.getState().setSelectedEntityId(pickedObject.id, {
-                        name: `Fire (${level} FRP: ${fireMeta.frp.toFixed(1)} MW)`,
+                        name: displayName,
                         id: pickedObject.id,
                         type: 'Fire',
                     });
@@ -360,13 +523,17 @@ export default function Globe() {
         let lastStoreSync = 0;
         v.clock.onTick.addEventListener((clock) => {
              const now = performance.now();
-             if (now - lastStoreSync >= 1000) {
-                 lastStoreSync = now;
-                 const currentDate = Cesium.JulianDate.toDate(clock.currentTime);
-                 const storeTime = useTimelineStore.getState().currentTime;
-                 if (Math.abs(storeTime.getTime() - currentDate.getTime()) > 750) {
-                     useTimelineStore.getState().setCurrentTime(currentDate);
-                 }
+             const state = useTimelineStore.getState();
+             const playbackHistorical = state.mode === 'playback' && state.playbackKind === 'historical';
+             if (playbackHistorical) return;
+             const syncIntervalMs = playbackHistorical ? 100 : 1000;
+             const syncThresholdMs = playbackHistorical ? 40 : 750;
+             if (now - lastStoreSync < syncIntervalMs) return;
+             lastStoreSync = now;
+             const currentDate = Cesium.JulianDate.toDate(clock.currentTime);
+             const storeTime = state.currentTime;
+             if (Math.abs(storeTime.getTime() - currentDate.getTime()) > syncThresholdMs) {
+                 state.setCurrentTime(currentDate);
              }
         });
 
@@ -380,11 +547,16 @@ export default function Globe() {
 
         const handleTimelineCtrl = (e: Event) => {
             const detail = (e as CustomEvent).detail;
-            if (detail.action === 'play') v.clock.shouldAnimate = true;
-            if (detail.action === 'pause') v.clock.shouldAnimate = false;
-            if (detail.action === 'speed') v.clock.multiplier = detail.value;
+            const state = useTimelineStore.getState();
+            const playbackHistorical = state.mode === 'playback' && state.playbackKind === 'historical';
+            if (!playbackHistorical) {
+                if (detail.action === 'play') v.clock.shouldAnimate = true;
+                if (detail.action === 'pause') v.clock.shouldAnimate = false;
+                if (detail.action === 'speed') v.clock.multiplier = detail.value;
+            }
             if (detail.action === 'seek' && detail.time) {
                 v.clock.currentTime = Cesium.JulianDate.fromIso8601(detail.time);
+                historicalLastStoreSyncAt = performance.now();
             }
         };
         document.addEventListener('timeline-ctrl', handleTimelineCtrl);
@@ -400,12 +572,16 @@ export default function Globe() {
 
         (window as any).viewerContext = v;
         // Publish viewer through React state so layer hooks see it and re-run.
+        (window as any).__openspyViewer = v;
         setViewer(v);
 
         return () => {
+            stopPlaybackRenderLoop();
+            stopHistoricalDriver();
             unsub();
             document.removeEventListener('timeline-ctrl', handleTimelineCtrl);
             document.removeEventListener('fly-to', handleFlyTo);
+            delete (window as any).__openspyViewer;
             if (!v.isDestroyed()) {
                 v.destroy();
             }
@@ -426,6 +602,8 @@ export default function Globe() {
     // ImageMaterialProperty + equirectangular projection on an ellipsoid
     // gets us a proper cloud shell with one HTTP fetch.
     const showClouds = useTimelineStore(s => s.sources.clouds && s.visibility.clouds);
+    const mode = useTimelineStore(s => s.mode);
+    const playbackKind = useTimelineStore(s => s.playbackKind);
     const cloudPrimRef = useRef<Cesium.Primitive | null>(null);
 
     useEffect(() => {
@@ -550,7 +728,7 @@ export default function Globe() {
                     // mid-range hardware without visibly degrading the
                     // photorealistic look at typical command-centre zoom
                     // levels (we rarely sit at a single building for long).
-                    maximumScreenSpaceError: 16,
+                    maximumScreenSpaceError: 48,
                     // Skip intermediate LOD levels — jump straight to the target,
                     // avoids rendering multiple LOD layers during zoom transitions.
                     skipLevelOfDetail: true,
@@ -695,6 +873,108 @@ export default function Globe() {
         return () => { active = false; };
     }, [viewer, tileMode]);
 
+    useEffect(() => {
+        if (!viewer) return;
+        const frameTimes: number[] = [];
+        const renderCycleTimes: number[] = [];
+        const sceneRenderTimes: number[] = [];
+        let lastRenderAt = 0;
+        let lastPreRenderAt = 0;
+        let maxFrameMs = 0;
+        let maxRenderCycleMs = 0;
+        let maxSceneRenderMs = 0;
+        let totalFrames = 0;
+        let longFrames16 = 0;
+        let longFrames33 = 0;
+        let longFrames50 = 0;
+        let lastPublishAt = 0;
+
+        const quantile = (values: number[], q: number) => {
+            if (!values.length) return 0;
+            const sorted = [...values].sort((a, b) => a - b);
+            const index = Math.min(sorted.length - 1, Math.floor(sorted.length * q));
+            return sorted[index];
+        };
+
+        const publishStats = (now: number) => {
+            if (!frameTimes.length) return;
+            const avgFrameMs = frameTimes.reduce((sum, value) => sum + value, 0) / frameTimes.length;
+            const avgRenderCycleMs = renderCycleTimes.length
+                ? renderCycleTimes.reduce((sum, value) => sum + value, 0) / renderCycleTimes.length
+                : 0;
+            const avgSceneRenderMs = sceneRenderTimes.length
+                ? sceneRenderTimes.reduce((sum, value) => sum + value, 0) / sceneRenderTimes.length
+                : 0;
+            const storeState = useTimelineStore.getState();
+            const replayStats = (window as any).__openspyReplayStats;
+            (window as any).__openspyRenderStats = {
+                avgFps: avgFrameMs > 0 ? 1000 / avgFrameMs : 0,
+                avgFrameMs,
+                p95FrameMs: quantile(frameTimes, 0.95),
+                maxFrameMs,
+                lastRenderCycleMs: renderCycleTimes[renderCycleTimes.length - 1] ?? 0,
+                avgRenderCycleMs,
+                p95RenderCycleMs: quantile(renderCycleTimes, 0.95),
+                maxRenderCycleMs,
+                lastSceneRenderMs: sceneRenderTimes[sceneRenderTimes.length - 1] ?? 0,
+                avgSceneRenderMs,
+                p95SceneRenderMs: quantile(sceneRenderTimes, 0.95),
+                maxSceneRenderMs,
+                lastReplayDrainMs: replayStats?.lastDrainMs ?? 0,
+                totalFrames,
+                longFrames16,
+                longFrames33,
+                longFrames50,
+                mode: storeState.mode,
+                playbackKind: storeState.playbackKind,
+                isPlaying: storeState.isPlaying,
+                currentTimeIso: storeState.currentTime.toISOString(),
+            };
+            lastPublishAt = now;
+        };
+
+        const handlePreRender = () => {
+            lastPreRenderAt = performance.now();
+        };
+
+        const handlePostRender = () => {
+            const now = performance.now();
+            if (lastRenderAt > 0) {
+                const frameMs = now - lastRenderAt;
+                frameTimes.push(frameMs);
+                if (frameTimes.length > 180) frameTimes.shift();
+                maxFrameMs = Math.max(maxFrameMs, frameMs);
+                if (frameMs > 16.7) longFrames16 += 1;
+                if (frameMs > 33.3) longFrames33 += 1;
+                if (frameMs > 50.0) longFrames50 += 1;
+            }
+            if (lastPreRenderAt > 0) {
+                const renderCycleMs = now - lastPreRenderAt;
+                renderCycleTimes.push(renderCycleMs);
+                if (renderCycleTimes.length > 180) renderCycleTimes.shift();
+                maxRenderCycleMs = Math.max(maxRenderCycleMs, renderCycleMs);
+                const replayDrainMs = (window as any).__openspyReplayStats?.lastDrainMs ?? 0;
+                const sceneRenderMs = Math.max(0, renderCycleMs - replayDrainMs);
+                sceneRenderTimes.push(sceneRenderMs);
+                if (sceneRenderTimes.length > 180) sceneRenderTimes.shift();
+                maxSceneRenderMs = Math.max(maxSceneRenderMs, sceneRenderMs);
+            }
+            lastRenderAt = now;
+            totalFrames += 1;
+            if (now - lastPublishAt >= 500) publishStats(now);
+        };
+
+        viewer.scene.preRender.addEventListener(handlePreRender);
+        viewer.scene.postRender.addEventListener(handlePostRender);
+        return () => {
+            if (!viewer.isDestroyed()) {
+                viewer.scene.preRender.removeEventListener(handlePreRender);
+                viewer.scene.postRender.removeEventListener(handlePostRender);
+            }
+            delete (window as any).__openspyRenderStats;
+        };
+    }, [viewer]);
+
     // Add render layers
     useSatellitesLayer(viewer);
     useDynamicLayers(viewer);
@@ -711,6 +991,7 @@ export default function Globe() {
     useConflictsLayer(viewer);
     useAirspaceLayer(viewer);
     useGFWLayer(viewer);
+    useReplayOverlay(viewer);
 
     return (
         <div ref={containerRef} className="absolute inset-0 w-full h-full" />
