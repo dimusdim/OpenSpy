@@ -10,6 +10,8 @@ import TileModeToggle from '../components/TileModeToggle';
 import TrackReplay from '../components/TrackReplay';
 import CameraHUD from '../components/CameraHUD';
 import SettingsPanel from '../components/SettingsPanel';
+import SystemStorageStatus from '../components/SystemStorageStatus';
+import RenderPerfStatus from '../components/RenderPerfStatus';
 import AIImagePanel, { AIImageToggle } from '../components/AIImagePanel';
 import { useAIImageStore } from '../store/useAIImageStore';
 import { useTimelineStore } from '../store/useTimelineStore';
@@ -79,6 +81,14 @@ export default function Home() {
       .catch(() => { /* no saved settings, use defaults */ });
   }, []);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    (window as any).__openspyTimelineStore = useTimelineStore;
+    return () => {
+      delete (window as any).__openspyTimelineStore;
+    };
+  }, []);
+
   return (
     <main className="relative w-screen h-screen overflow-hidden bg-zinc-950 text-white selection:bg-cyan-500 selection:text-black">
         <GlobeDynamic />
@@ -93,6 +103,8 @@ export default function Home() {
 
                 {/* Right column: controls stacked vertically, no overlap */}
                 <div className="absolute top-4 right-4 z-10 flex flex-col gap-2 max-h-[calc(100vh-100px)] w-80">
+                    <SystemStorageStatus />
+                    <RenderPerfStatus />
                     <SearchBar />
                     <TileModeToggle />
                     <AIImageToggle />

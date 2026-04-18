@@ -35,14 +35,26 @@ export function useStatusPoller() {
                     if (!r.ok) throw new Error(`HTTP ${r.status}`);
                     return r.json();
                 })
-                .then((status: Record<string, { status: string; count?: number; note?: string }>) => {
+                .then((status: Record<string, any>) => {
                     if (cancelled) return;
                     setBackendReachable(true);
                     setRetrying(false);
                     attempts = 0; // reset on success
-                    const { setStreamMetric } = useTimelineStore.getState();
+                    const { setStreamMetric, setStorageStatus } = useTimelineStore.getState();
                     const known = ['connecting', 'streaming', 'error', 'auth-missing', 'disabled', 'degraded', 'limited', 'warning', 'rate-limited'];
                     for (const [layer, info] of Object.entries(status)) {
+                        if (layer === 'storage' && info && typeof info === 'object') {
+                            setStorageStatus({
+                                dbBytes: typeof info.db_bytes === 'number' ? info.db_bytes : null,
+                                diskFreeBytes: typeof info.disk_free_bytes === 'number' ? info.disk_free_bytes : null,
+                                diskTotalBytes: typeof info.disk_total_bytes === 'number' ? info.disk_total_bytes : null,
+                                diskUsedPercent: typeof info.disk_used_percent === 'number' ? info.disk_used_percent : null,
+                                dbPercentOfDisk: typeof info.db_percent_of_disk === 'number' ? info.db_percent_of_disk : null,
+                                updatedAt: typeof info.updated_at === 'string' ? info.updated_at : null,
+                            });
+                            continue;
+                        }
+                        if (!info || typeof info !== 'object') continue;
                         const patch: Partial<{ status: string; note: string }> = {};
                         if (known.includes(info.status)) patch.status = info.status;
                         if (info.note !== undefined) patch.note = info.note;

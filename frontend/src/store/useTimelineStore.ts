@@ -195,9 +195,21 @@ export interface StreamMetric {
     note?: string;
 }
 
+export interface StorageStatus {
+    dbBytes: number | null;
+    diskFreeBytes: number | null;
+    diskTotalBytes: number | null;
+    diskUsedPercent: number | null;
+    dbPercentOfDisk: number | null;
+    updatedAt: string | null;
+}
+
 interface TimelineStore {
   mode: 'live' | 'playback';
+  playbackKind: 'historical' | 'track' | null;
   currentTime: Date;
+  replaySeekVersion: number;
+  replayHydrating: boolean;
   speedMultiplier: number;
   isPlaying: boolean;
   showTrajectories: boolean;
@@ -207,6 +219,7 @@ interface TimelineStore {
   selectedEntityId: string | null;
   selectedEntityData: any | null;
   streamMetrics: Record<string, StreamMetric>;
+  storageStatus: StorageStatus;
   // Per-subtype visibility (e.g. "aviation:airliner", "satellite:military").
   // Default = visible. Layer hooks honour these flags when rendering.
   subtypeVisibility: Record<string, boolean>;
@@ -234,7 +247,10 @@ interface TimelineStore {
   toggleClustering: () => void;
   setSatelliteRenderLimit: (limit: number | null) => void;
   setMode: (mode: 'live' | 'playback') => void;
+  setPlaybackKind: (kind: 'historical' | 'track' | null) => void;
   setCurrentTime: (time: Date) => void;
+  markReplaySeek: () => void;
+  setReplayHydrating: (hydrating: boolean) => void;
   setSpeedMultiplier: (speed: number) => void;
   setIsPlaying: (playing: boolean) => void;
   setShowTrajectories: (show: boolean) => void;
@@ -245,6 +261,7 @@ interface TimelineStore {
   toggleVisibility: (layer: keyof LayerFlags) => void;
   setSelectedEntityId: (id: string | null, data?: any) => void;
   setStreamMetric: (layer: string, data: Partial<StreamMetric>) => void;
+  setStorageStatus: (data: Partial<StorageStatus>) => void;
   toggleSubtype: (key: string) => void;
   toggleSourceVisibility: (key: string) => void;
   setSubtypeCounts: (layer: keyof LayerFlags, counts: Record<string, number>) => void;
@@ -292,7 +309,10 @@ function saveSettingsToServer(state: PersistedTimelineSettings) {
 
 export const useTimelineStore = create<TimelineStore>((set) => ({
   mode: 'live',
+  playbackKind: null,
   currentTime: new Date(),
+  replaySeekVersion: 0,
+  replayHydrating: false,
   speedMultiplier: 1,
   isPlaying: true,
   // Trajectories default OFF — the "Show Orbital/Flight Trajectories"
@@ -417,8 +437,19 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
       airspace: { label: 'Restricted Airspace', source: 'OpenAIP', type: 'REST paginated', count: 0, speed: '-', status: 'connecting', poll: '1h', upstream: 'weekly updates' },
       gfw: { label: 'AIS Signal Lost Events', source: 'Global Fishing Watch', type: 'REST Polling', count: 0, speed: '-', status: 'auth-missing', poll: '1h', upstream: 'event-driven' },
   },
+  storageStatus: {
+      dbBytes: null,
+      diskFreeBytes: null,
+      diskTotalBytes: null,
+      diskUsedPercent: null,
+      dbPercentOfDisk: null,
+      updatedAt: null,
+  },
   setMode: (mode) => set({ mode }),
+  setPlaybackKind: (playbackKind) => set({ playbackKind }),
   setCurrentTime: (time) => set({ currentTime: time }),
+  markReplaySeek: () => set((state) => ({ replaySeekVersion: state.replaySeekVersion + 1 })),
+  setReplayHydrating: (replayHydrating) => set({ replayHydrating }),
   setSpeedMultiplier: (speedMultiplier) => set({ speedMultiplier }),
   setIsPlaying: (isPlaying) => set({ isPlaying }),
   setShowTrajectories: (show) => set(state => {
@@ -448,6 +479,12 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
       streamMetrics: {
           ...state.streamMetrics,
           [layer]: { ...state.streamMetrics[layer], ...data }
+      }
+  })),
+  setStorageStatus: (data) => set(state => ({
+      storageStatus: {
+          ...state.storageStatus,
+          ...data,
       }
   })),
   toggleSubtype: (key) => set(state => {
@@ -524,3 +561,13 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
       return { activeIconSet: iconSet };
   }),
 }));
+
+declare global {
+  interface Window {
+    __openspyTimelineStore?: typeof useTimelineStore;
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.__openspyTimelineStore = useTimelineStore;
+}

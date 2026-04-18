@@ -131,6 +131,7 @@ export default function TrackReplay() {
             // will force currentTime = now and break the replay
             const store = useTimelineStore.getState();
             store.setMode('playback');
+            store.setPlaybackKind('track');
 
             // Set clock to the track's time range for scrubbing
             const startTime = Cesium.JulianDate.fromDate(new Date(data.startTime * 1000));
@@ -181,6 +182,7 @@ export default function TrackReplay() {
         // Return store to live mode so Globe.onTick resumes syncing to now
         const store = useTimelineStore.getState();
         store.setMode('live');
+        store.setPlaybackKind(null);
         store.setSpeedMultiplier(1);
         store.setIsPlaying(true);
         store.setCurrentTime(new Date());
