@@ -60,3 +60,7 @@ SOURCES.md
 
 # Marketing materials (not in repo)
 marketing/
+
+# Playwright/test artifacts
+test-results/
+frontend/test-results/
