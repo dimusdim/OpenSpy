@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import * as Cesium from 'cesium';
 import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
+import { useSecondaryLoadGate } from './useSecondaryLoadGate';
 import { API_URL } from '../lib/config';
 
 // Oil & gas pipelines from OSM Overpass, rendered as batched polylines.
@@ -62,6 +63,7 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
     const loadPromiseRef = useRef<Promise<void> | null>(null);
     const genRef = useRef(0);
     const subtypeVisibility = useTimelineStore((s) => s.subtypeVisibility);
+    const secondaryReleased = useSecondaryLoadGate();
     // Tracked ready-gate timers so cleanup cancels pending callbacks before
     // the primitive is removed from the scene.
     const pendingTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
@@ -91,7 +93,7 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
     // the first run exits early on cancelled without setting loadedRef,
     // and the layer wedges with no dependency change left to re-trigger.
     useEffect(() => {
-        if (!viewer || !isSourceOn || mode === 'playback') return;
+        if (!viewer || !isSourceOn || mode === 'playback' || !secondaryReleased) return;
         if (loadedRef.current) return;
         if (loadPromiseRef.current) return;
 
@@ -130,11 +132,6 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
                 const instances: Cesium.GeometryInstance[] = [];
                 const counts: Record<string, number> = { oil: 0, gas: 0 };
 
-                // Chunked build — thousands of Overpass pipeline records
-                // produce a matching number of PolylineGeometry objects,
-                // which stalls the main thread at boot. Yield every
-                // PIPELINES_CHUNK_SIZE records so input stays responsive.
-                const PIPELINES_CHUNK_SIZE = 500;
                 for (let ri = 0; ri < records.length; ri++) {
                     const rec = records[ri];
                     if (!rec.coordinates?.length || rec.coordinates.length < 2) continue;
@@ -185,15 +182,6 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
                     ids.push(logicalId);
                     pipelineSubtypeIds.set(substance, ids);
 
-                    // Yield every PIPELINES_CHUNK_SIZE records so the
-                    // browser can process pointer events during the
-                    // cold-load burst.
-                    if ((ri + 1) % PIPELINES_CHUNK_SIZE === 0 && ri + 1 < records.length) {
-                        await new Promise<void>((resolve) => setTimeout(resolve, 0));
-                        if (viewer.isDestroyed()) return;
-                        if (myGen !== genRef.current) return;
-                        if (!useTimelineStore.getState().sources.pipelines) return;
-                    }
                 }
 
                 if (instances.length === 0) {
@@ -267,7 +255,7 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
         return () => {
             abortController.abort();
         };
-    }, [viewer, isSourceOn, mode]);
+    }, [viewer, isSourceOn, mode, secondaryReleased]);
 
     // ---- Effect 2a: source-off scene clear ----
     useEffect(() => {

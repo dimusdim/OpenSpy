@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import * as Cesium from 'cesium';
 import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
+import { useSecondaryLoadGate } from './useSecondaryLoadGate';
 import { API_URL } from '../lib/config';
 import { WEBCAM_ICON } from '../icons/map-icons';
 
@@ -27,6 +28,7 @@ export function useWebcamsLayer(viewer: Cesium.Viewer | null) {
     const isVisible = useTimelineStore(s => s.visibility.webcams);
     const mode = useTimelineStore(s => s.mode);
     const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
+    const secondaryReleased = useSecondaryLoadGate();
     const collectionRef = useRef<Cesium.BillboardCollection | null>(null);
 
     // ---- Effect 1: scene lifetime ----
@@ -49,7 +51,7 @@ export function useWebcamsLayer(viewer: Cesium.Viewer | null) {
 
     // ---- Effect 2: fetch loop ----
     useEffect(() => {
-        if (!viewer || !isSourceOn || mode === 'playback') return;
+        if (!viewer || !isSourceOn || mode === 'playback' || !secondaryReleased) return;
         let active = true;
 
         async function fetchWebcams() {
@@ -62,10 +64,6 @@ export function useWebcamsLayer(viewer: Cesium.Viewer | null) {
                 billboards.removeAll();
                 webcamMetaMap.clear();
 
-                // Chunked — ~1000 webcams x billboard.add is lighter
-                // than fires/airspace but still contributes to cold-load
-                // input lag. Yield periodically.
-                const WEBCAMS_CHUNK_SIZE = 250;
                 const cams: any[] = res.data;
                 for (let ci = 0; ci < cams.length; ci++) {
                     const cam = cams[ci];
@@ -96,12 +94,6 @@ export function useWebcamsLayer(viewer: Cesium.Viewer | null) {
                         imageUrl: cam.imageUrl,
                     });
 
-                    if ((ci + 1) % WEBCAMS_CHUNK_SIZE === 0 && ci + 1 < cams.length) {
-                        await new Promise<void>((resolve) => setTimeout(resolve, 0));
-                        if (!active) return;
-                        if (collectionRef.current !== billboards) return;
-                        if (!useTimelineStore.getState().sources.webcams) return;
-                    }
                 }
 
                 useTimelineStore.getState().setStreamMetric('webcams', {
@@ -126,7 +118,7 @@ export function useWebcamsLayer(viewer: Cesium.Viewer | null) {
             clearInterval(interval);
             // Keep billboards — Effect 1 owns their lifetime.
         };
-    }, [viewer, isSourceOn, mode]);
+    }, [viewer, isSourceOn, mode, secondaryReleased]);
 
     // ---- Effect 3: layer visibility ----
     // Effective show = sources && visibility.

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import * as Cesium from 'cesium';
 import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
+import { useSecondaryLoadGate } from './useSecondaryLoadGate';
 import { API_URL } from '../lib/config';
 import { getDisasterIcon } from '../icons/map-icons';
 import { safeCartesianFromDegrees } from './position-utils';
@@ -12,6 +13,7 @@ export function useDisastersLayer(viewer: Cesium.Viewer | null) {
     const isDisasterSourceOn = useTimelineStore(s => s.sources.disasters);
     const isDisasterVisible = useTimelineStore(s => s.visibility.disasters);
     const mode = useTimelineStore(s => s.mode);
+    const secondaryReleased = useSecondaryLoadGate();
 
     const disastersDsRef = useRef<Cesium.CustomDataSource | null>(null);
     // Bumped each time fetchEvents() completes. Dependent effects (subtype
@@ -34,7 +36,7 @@ export function useDisastersLayer(viewer: Cesium.Viewer | null) {
 
     // ---- Effect 2: fetch loop ----
     useEffect(() => {
-        if (!viewer || !isDisasterSourceOn) return;
+        if (!viewer || !isDisasterSourceOn || !secondaryReleased) return;
 
         let active = true;
 
@@ -57,10 +59,6 @@ export function useDisastersLayer(viewer: Cesium.Viewer | null) {
                     }
                 }
 
-                // Chunked build — USGS weekly earthquake feed can
-                // contribute 1k+ events. Yield every DISASTER_CHUNK_SIZE
-                // to keep input responsive during cold load.
-                const DISASTER_CHUNK_SIZE = 200;
                 const evList: any[] = events;
                 for (let evi = 0; evi < evList.length; evi++) {
                     const ev = evList[evi];
@@ -122,12 +120,6 @@ export function useDisastersLayer(viewer: Cesium.Viewer | null) {
                     } catch (e: any) {
                         console.warn('[Disasters] malformed event skipped:', e?.message || e);
                     }
-
-                    if ((evi + 1) % DISASTER_CHUNK_SIZE === 0 && evi + 1 < evList.length) {
-                        await new Promise<void>((resolve) => setTimeout(resolve, 0));
-                        if (!active) return;
-                        if (!useTimelineStore.getState().sources.disasters) return;
-                    }
                 }
 
                 // Signal to dependent effects that entities changed.
@@ -147,7 +139,7 @@ export function useDisastersLayer(viewer: Cesium.Viewer | null) {
             clearInterval(pollInterval);
             // Keep entities — Effect 1 owns the datasource lifetime.
         };
-    }, [viewer, isDisasterSourceOn]);
+    }, [viewer, isDisasterSourceOn, secondaryReleased]);
 
     // ---- Effect 3: layer visibility ----
     // Effective show = sources && visibility.

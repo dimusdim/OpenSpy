@@ -204,6 +204,28 @@ export interface StorageStatus {
     updatedAt: string | null;
 }
 
+export type CurrentTimeUpdateReason =
+    | 'user-seek'
+    | 'mode-change'
+    | 'layers-change'
+    | 'driver-tick'
+    | 'live-tick'
+    | 'track-replay'
+    | 'track-clear'
+    | 'playback-clamp'
+    | 'external';
+
+export interface CurrentTimeUpdateOptions {
+    silent?: boolean;
+    reason?: CurrentTimeUpdateReason;
+}
+
+export interface CurrentTimeUpdateMeta {
+    seq: number;
+    silent: boolean;
+    reason: CurrentTimeUpdateReason;
+}
+
 interface TimelineStore {
   mode: 'live' | 'playback';
   playbackKind: 'historical' | 'track' | null;
@@ -212,6 +234,14 @@ interface TimelineStore {
   replayHydrating: boolean;
   speedMultiplier: number;
   isPlaying: boolean;
+  // Gate для вторичных слоёв. При холодном открытии primary слои
+  // (aircraft/vessels/cables/webcams/labels) уходят в сеть сразу,
+  // тяжёлые secondary (fires/pipelines/airspace/conflicts/gfw/
+  // satellites/outages/disasters/jamming) ждут этого флага. Снимается
+  // через фиксированный таймер в Globe.tsx после маунта, чтобы дать
+  // live-bootstrap эксклюзивный event-loop на первые секунды.
+  secondaryLoadReleased: boolean;
+  releaseSecondaryLoad: () => void;
   showTrajectories: boolean;
   // New split model (sources = load, visibility = show). See `LayerFlags` comment.
   sources: LayerFlags;
@@ -248,7 +278,8 @@ interface TimelineStore {
   setSatelliteRenderLimit: (limit: number | null) => void;
   setMode: (mode: 'live' | 'playback') => void;
   setPlaybackKind: (kind: 'historical' | 'track' | null) => void;
-  setCurrentTime: (time: Date) => void;
+  setCurrentTime: (time: Date, options?: CurrentTimeUpdateOptions) => void;
+  currentTimeUpdate: CurrentTimeUpdateMeta;
   markReplaySeek: () => void;
   setReplayHydrating: (hydrating: boolean) => void;
   setSpeedMultiplier: (speed: number) => void;
@@ -445,13 +476,27 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
       dbPercentOfDisk: null,
       updatedAt: null,
   },
+  currentTimeUpdate: {
+      seq: 0,
+      silent: false,
+      reason: 'external',
+  },
   setMode: (mode) => set({ mode }),
   setPlaybackKind: (playbackKind) => set({ playbackKind }),
-  setCurrentTime: (time) => set({ currentTime: time }),
+  setCurrentTime: (time, options) => set((state) => ({
+      currentTime: time,
+      currentTimeUpdate: {
+          seq: state.currentTimeUpdate.seq + 1,
+          silent: options?.silent ?? false,
+          reason: options?.reason ?? 'external',
+      },
+  })),
   markReplaySeek: () => set((state) => ({ replaySeekVersion: state.replaySeekVersion + 1 })),
   setReplayHydrating: (replayHydrating) => set({ replayHydrating }),
   setSpeedMultiplier: (speedMultiplier) => set({ speedMultiplier }),
   setIsPlaying: (isPlaying) => set({ isPlaying }),
+  secondaryLoadReleased: false,
+  releaseSecondaryLoad: () => set({ secondaryLoadReleased: true }),
   setShowTrajectories: (show) => set(state => {
       const next = { ...state, showTrajectories: show };
       saveSettingsToServer(next);

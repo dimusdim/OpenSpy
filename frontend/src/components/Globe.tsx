@@ -23,6 +23,7 @@ import { replayMetaMap, useReplayOverlay } from '../cesium/useReplayOverlay';
 
 if (typeof window !== 'undefined') {
     (window as any).CESIUM_BASE_URL = '/cesium';
+    (window as any).__openspyCesiumVersion = (Cesium as unknown as { VERSION?: string }).VERSION ?? null;
 }
 
 export default function Globe() {
@@ -117,7 +118,10 @@ export default function Globe() {
             v.clock.currentTime = Cesium.JulianDate.fromDate(targetDate);
             if (syncStore) {
                 suppressPlaybackCurrentTimeReaction = true;
-                useTimelineStore.getState().setCurrentTime(targetDate);
+                useTimelineStore.getState().setCurrentTime(targetDate, {
+                    silent: true,
+                    reason: 'driver-tick',
+                });
                 suppressPlaybackCurrentTimeReaction = false;
                 historicalLastStoreSyncAt = performance.now();
             }
@@ -266,9 +270,9 @@ export default function Globe() {
             if (typeof pickedObject.id === 'string') {
                 const replayMeta = replayMetaMap.get(pickedObject.id);
                 if (replayMeta) {
-                    useTimelineStore.getState().setSelectedEntityId(pickedObject.id, {
+                    useTimelineStore.getState().setSelectedEntityId(replayMeta.id, {
                         name: replayMeta.name,
-                        id: pickedObject.id,
+                        id: replayMeta.id,
                         type: replayMeta.layer,
                     });
                     return;
@@ -533,7 +537,10 @@ export default function Globe() {
              const currentDate = Cesium.JulianDate.toDate(clock.currentTime);
              const storeTime = state.currentTime;
              if (Math.abs(storeTime.getTime() - currentDate.getTime()) > syncThresholdMs) {
-                 state.setCurrentTime(currentDate);
+                 state.setCurrentTime(currentDate, {
+                     silent: true,
+                     reason: 'live-tick',
+                 });
              }
         });
 
@@ -555,8 +562,10 @@ export default function Globe() {
                 if (detail.action === 'speed') v.clock.multiplier = detail.value;
             }
             if (detail.action === 'seek' && detail.time) {
-                v.clock.currentTime = Cesium.JulianDate.fromIso8601(detail.time);
                 historicalLastStoreSyncAt = performance.now();
+                if (!playbackHistorical) {
+                    v.clock.currentTime = Cesium.JulianDate.fromIso8601(detail.time);
+                }
             }
         };
         document.addEventListener('timeline-ctrl', handleTimelineCtrl);
@@ -587,6 +596,17 @@ export default function Globe() {
             }
             setViewer(null);
         };
+    }, []);
+
+    // Staggered load: primary-слои уходят в сеть сразу, вторичные —
+    // через 2 с после mount. Это даёт live-bootstrap эксклюзивный
+    // event-loop backend'а на первые секунды (иначе 14 одновременных
+    // heavy handler'ов конкурируют за CPU и каждый страдает).
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            useTimelineStore.getState().releaseSecondaryLoad();
+        }, 2000);
+        return () => clearTimeout(timer);
     }, []);
 
     // --- NASA GIBS Cloud Fraction as a transparent shell at ~8km ---
@@ -933,6 +953,23 @@ export default function Globe() {
             lastPublishAt = now;
         };
 
+        const resetStats = () => {
+            frameTimes.length = 0;
+            renderCycleTimes.length = 0;
+            sceneRenderTimes.length = 0;
+            lastRenderAt = 0;
+            lastPreRenderAt = 0;
+            maxFrameMs = 0;
+            maxRenderCycleMs = 0;
+            maxSceneRenderMs = 0;
+            totalFrames = 0;
+            longFrames16 = 0;
+            longFrames33 = 0;
+            longFrames50 = 0;
+            lastPublishAt = 0;
+            delete (window as any).__openspyRenderStats;
+        };
+
         const handlePreRender = () => {
             lastPreRenderAt = performance.now();
         };
@@ -966,12 +1003,14 @@ export default function Globe() {
 
         viewer.scene.preRender.addEventListener(handlePreRender);
         viewer.scene.postRender.addEventListener(handlePostRender);
+        (window as any).__openspyResetRenderStats = resetStats;
         return () => {
             if (!viewer.isDestroyed()) {
                 viewer.scene.preRender.removeEventListener(handlePreRender);
                 viewer.scene.postRender.removeEventListener(handlePostRender);
             }
             delete (window as any).__openspyRenderStats;
+            delete (window as any).__openspyResetRenderStats;
         };
     }, [viewer]);
 

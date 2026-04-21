@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import * as Cesium from 'cesium';
 import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
+import { useSecondaryLoadGate } from './useSecondaryLoadGate';
 import { API_URL } from '../lib/config';
 
 // Restricted airspace from OpenAIP, rendered as two batched Primitives:
@@ -103,6 +104,7 @@ export function useAirspaceLayer(viewer: Cesium.Viewer | null) {
     const mode = useTimelineStore(s => s.mode);
     const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
     const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
+    const secondaryReleased = useSecondaryLoadGate();
     const fillPrimitiveRef = useRef<Cesium.Primitive | null>(null);
     const outlinePrimitiveRef = useRef<Cesium.Primitive | null>(null);
     // Load state. `hasLoadedRef` is reset on source-off so the next
@@ -167,13 +169,6 @@ export function useAirspaceLayer(viewer: Cesium.Viewer | null) {
                 const outlineInstances: Cesium.GeometryInstance[] = [];
                 const counts: Record<string, number> = {};
 
-                // Chunked build — 10k+ airspace zones in a single sync
-                // pass constructs ~20k PolygonGeometry objects on the
-                // main thread, which stalls input for seconds at boot.
-                // Yielding every AIRSPACE_CHUNK_SIZE zones keeps the
-                // browser processing clicks / drag / wheel while the
-                // rest of the zones stream in.
-                const AIRSPACE_CHUNK_SIZE = 300;
                 for (let zi = 0; zi < zones.length; zi++) {
                     const zone = zones[zi];
                     if (!zone.geometry || zone.geometry.length === 0) continue;
@@ -277,14 +272,6 @@ export function useAirspaceLayer(viewer: Cesium.Viewer | null) {
                     airspacePartsBySubtype.set(subtype, subtypeParts);
                     counts[subtype] = (counts[subtype] || 0) + 1;
 
-                    // Yield once per chunk so pointer events aren't
-                    // starved by the polygon geometry construction.
-                    if ((zi + 1) % AIRSPACE_CHUNK_SIZE === 0 && zi + 1 < zones.length) {
-                        await new Promise<void>((resolve) => setTimeout(resolve, 0));
-                        if (!activeRef.current || viewer!.isDestroyed()) return;
-                        if (myGen !== genRef.current) return;
-                        if (!useTimelineStore.getState().sources.airspace) return;
-                    }
                 }
 
                 if (fillInstances.length === 0) {
@@ -413,7 +400,7 @@ export function useAirspaceLayer(viewer: Cesium.Viewer | null) {
     // keep an hourly interval alive while the source stays on. Source-off
     // clears the interval but leaves the already-rendered zones in place.
     useEffect(() => {
-        if (!viewer || !isSourceOn || mode === 'playback') return;
+        if (!viewer || !isSourceOn || mode === 'playback' || !secondaryReleased) return;
         if (!fetchAirspaceRef.current) return;
 
         if (!hasLoadedRef.current) {
@@ -427,7 +414,7 @@ export function useAirspaceLayer(viewer: Cesium.Viewer | null) {
             clearInterval(interval);
             activeFetchAbortRef.current?.abort();
         };
-    }, [viewer, isSourceOn, mode]);
+    }, [viewer, isSourceOn, mode, secondaryReleased]);
 
     // ---- Effect 3: visibility toggle ----
     // Effective show = sources && visibility. If no data exists yet,

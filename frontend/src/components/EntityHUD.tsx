@@ -347,22 +347,25 @@ export default function EntityHUD() {
                 return;
             }
 
-            // Satellite billboard — current live position is updated in
-            // satelliteMetaMap from the worker positions stream.
+            // Satellite billboard — current live Cartesian position is updated
+            // in satelliteMetaMap from the worker positions stream.
             const satMeta = satelliteMetaMap.get(selectedEntityId);
-            if (
-                satMeta &&
-                Number.isFinite(satMeta.lat) &&
-                Number.isFinite(satMeta.lng) &&
-                Number.isFinite(satMeta.alt)
-            ) {
-                const pos = Cesium.Cartesian3.fromDegrees(satMeta.lng!, satMeta.lat!, satMeta.alt!);
+            if (satMeta?.position) {
+                const pos = satMeta.position;
                 const canvasPos = Cesium.SceneTransforms.worldToWindowCoordinates(cesViewer.scene, pos);
+                const carto = Cesium.Cartographic.fromCartesian(pos);
+                if (!carto) {
+                    requestAnimationFrame(update);
+                    return;
+                }
+                const lat = Cesium.Math.toDegrees(carto.latitude);
+                const lng = Cesium.Math.toDegrees(carto.longitude);
+                const alt = carto.height;
                 setScreenPos(canvasPos ? { x: canvasPos.x, y: canvasPos.y } : null);
                 setLive({
-                    lat: satMeta.lat!,
-                    lng: satMeta.lng!,
-                    alt: satMeta.alt!,
+                    lat,
+                    lng,
+                    alt,
                     layer: 'Satellite',
                     subtype: satMeta.subtype,
                     extra: {

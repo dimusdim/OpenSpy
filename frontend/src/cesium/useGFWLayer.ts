@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import * as Cesium from 'cesium';
 import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
+import { useSecondaryLoadGate } from './useSecondaryLoadGate';
 import { API_URL } from '../lib/config';
 import { GFW_ICON } from '../icons/map-icons';
 import { safeCartesianFromDegrees } from './position-utils';
@@ -10,6 +11,7 @@ export function useGFWLayer(viewer: Cesium.Viewer | null) {
     const isSourceOn = useTimelineStore(s => s.sources.gfw);
     const isVisible = useTimelineStore(s => s.visibility.gfw);
     const mode = useTimelineStore(s => s.mode);
+    const secondaryReleased = useSecondaryLoadGate();
     const dsRef = useRef<Cesium.CustomDataSource | null>(null);
 
     // ---- Effect 1: scene lifetime ----
@@ -28,7 +30,7 @@ export function useGFWLayer(viewer: Cesium.Viewer | null) {
 
     // ---- Effect 2: fetch loop ----
     useEffect(() => {
-        if (!viewer || !isSourceOn) return;
+        if (!viewer || !isSourceOn || !secondaryReleased) return;
         let active = true;
 
         async function fetchGFWEvents() {
@@ -100,7 +102,7 @@ export function useGFWLayer(viewer: Cesium.Viewer | null) {
             clearInterval(interval);
             // Keep datasource — Effect 1 owns its lifetime.
         };
-    }, [viewer, isSourceOn]);
+    }, [viewer, isSourceOn, secondaryReleased]);
 
     // ---- Effect 3: layer visibility ----
     // Effective show = sources && visibility.

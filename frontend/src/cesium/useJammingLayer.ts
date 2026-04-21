@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import * as Cesium from 'cesium';
 import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
+import { useSecondaryLoadGate } from './useSecondaryLoadGate';
 import { API_URL } from '../lib/config';
 
 // GPSJam.org H3 hex data — real GNSS interference detected from ADS-B NIC values.
@@ -35,6 +36,7 @@ export function useJammingLayer(viewer: Cesium.Viewer | null) {
     const isVisible = useTimelineStore(s => s.visibility.jamming);
     const mode = useTimelineStore(s => s.mode);
     const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
+    const secondaryReleased = useSecondaryLoadGate();
     const dsRef = useRef<Cesium.CustomDataSource | null>(null);
 
     // ---- Effect 1: scene lifetime ----
@@ -53,7 +55,7 @@ export function useJammingLayer(viewer: Cesium.Viewer | null) {
 
     // ---- Effect 2: fetch loop ----
     useEffect(() => {
-        if (!viewer || !isSourceOn) return;
+        if (!viewer || !isSourceOn || !secondaryReleased) return;
         let active = true;
 
         const fetchJamming = async () => {
@@ -79,11 +81,6 @@ export function useJammingLayer(viewer: Cesium.Viewer | null) {
                     return;
                 }
 
-                // Chunked build — GPSJam typically returns ~1000 extruded
-                // H3 polygon zones; building them all synchronously is a
-                // noticeable cold-load hitch. Yield every JAMMING_CHUNK_SIZE
-                // entities so input stays responsive.
-                const JAMMING_CHUNK_SIZE = 150;
                 for (let zi = 0; zi < zones.length; zi++) {
                     const z = zones[zi];
                     counts[z.intensity] = (counts[z.intensity] || 0) + 1;
@@ -122,11 +119,6 @@ export function useJammingLayer(viewer: Cesium.Viewer | null) {
                         },
                     });
 
-                    if ((zi + 1) % JAMMING_CHUNK_SIZE === 0 && zi + 1 < zones.length) {
-                        await new Promise<void>((resolve) => setTimeout(resolve, 0));
-                        if (!active) return;
-                        if (!useTimelineStore.getState().sources.jamming) return;
-                    }
                 }
 
                 useTimelineStore.getState().setSubtypeCounts('jamming', counts);
@@ -159,7 +151,7 @@ export function useJammingLayer(viewer: Cesium.Viewer | null) {
             clearInterval(interval);
             // Keep datasource — Effect 1 owns its lifetime.
         };
-    }, [viewer, isSourceOn]);
+    }, [viewer, isSourceOn, secondaryReleased]);
 
     // ---- Effect 3: layer visibility ----
     // Effective show = sources && visibility.

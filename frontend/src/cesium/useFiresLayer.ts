@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import * as Cesium from 'cesium';
 import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
+import { useSecondaryLoadGate } from './useSecondaryLoadGate';
 import { API_URL } from '../lib/config';
 import { getViewerAltitudeMeters } from './position-utils';
 
@@ -65,7 +66,6 @@ function getClusterGridDegrees(altitudeMeters: number | null): number | null {
 }
 
 const CAMERA_CULL_DEBOUNCE_MS = 150;
-const FIRES_CHUNK_SIZE = 1000;
 
 export function useFiresLayer(viewer: Cesium.Viewer | null) {
     const isSourceOn = useTimelineStore(s => s.sources.fires);
@@ -73,6 +73,7 @@ export function useFiresLayer(viewer: Cesium.Viewer | null) {
     const mode = useTimelineStore(s => s.mode);
     const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
     const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
+    const secondaryReleased = useSecondaryLoadGate();
 
     const rawCollectionRef = useRef<Cesium.PointPrimitiveCollection | null>(null);
     const clusterCollectionRef = useRef<Cesium.PointPrimitiveCollection | null>(null);
@@ -200,12 +201,6 @@ export function useFiresLayer(viewer: Cesium.Viewer | null) {
                     id: fire.id,
                 });
                 fireMetaMap.set(fire.id, fire);
-
-                if ((i + 1) % FIRES_CHUNK_SIZE === 0 && i + 1 < records.length) {
-                    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-                    if (!viewer || viewer.isDestroyed()) return;
-                    if (rawCollectionRef.current !== rawCollection) return;
-                }
             }
             rawBuiltVersionRef.current = dataVersionRef.current;
         };
@@ -281,7 +276,7 @@ export function useFiresLayer(viewer: Cesium.Viewer | null) {
     }, [viewer]);
 
     useEffect(() => {
-        if (!viewer || !isSourceOn || mode === 'playback') return;
+        if (!viewer || !isSourceOn || mode === 'playback' || !secondaryReleased) return;
 
         let active = true;
         const abortController = new AbortController();
@@ -375,7 +370,7 @@ export function useFiresLayer(viewer: Cesium.Viewer | null) {
             clearInterval(interval);
             abortController.abort();
         };
-    }, [viewer, isSourceOn, mode]);
+    }, [viewer, isSourceOn, mode, secondaryReleased]);
 
     useEffect(() => {
         updateCollectionVisibilityRef.current?.();

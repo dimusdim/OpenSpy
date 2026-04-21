@@ -157,11 +157,7 @@ export function useCablesLayer(viewer: Cesium.Viewer | null) {
 
                 // Build GeometryInstance[] in one pass so we can feed the
                 // whole batch to a single GroundPolylinePrimitive.
-                // Chunked with yields so the ~500 cable features (each
-                // possibly a MultiLineString with many parts) don't
-                // stall the main thread during cold boot.
                 const instances: Cesium.GeometryInstance[] = [];
-                const CABLES_CHUNK_SIZE = 100;
                 const features: any[] = geojson.features;
                 for (let fi = 0; fi < features.length; fi++) {
                     const feature = features[fi];
@@ -231,14 +227,6 @@ export function useCablesLayer(viewer: Cesium.Viewer | null) {
                         }));
                     });
 
-                    // Yield every chunk so the browser can process
-                    // pointer events during cold load.
-                    if ((fi + 1) % CABLES_CHUNK_SIZE === 0 && fi + 1 < features.length) {
-                        await new Promise<void>((resolve) => setTimeout(resolve, 0));
-                        if (viewer.isDestroyed()) return;
-                        if (myGen !== genRef.current) return;
-                        if (!useTimelineStore.getState().sources.cables) return;
-                    }
                 }
 
                 if (instances.length === 0) {

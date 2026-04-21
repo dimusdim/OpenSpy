@@ -3,6 +3,7 @@ import * as Cesium from 'cesium';
 import { io, Socket } from 'socket.io-client';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
+import { perfLog } from '../lib/perf-log';
 import { getAviIcon, getShipIcon, DARK_VESSEL_ICON } from '../icons/map-icons';
 import { safeCartesianFromDegrees } from './position-utils';
 
@@ -188,7 +189,11 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
         viewer.dataSources.add(darkVesselDs);
         darkVesselDsRef.current = darkVesselDs;
 
-        const socket = io(API_URL);
+        // websocket-only: under COEP: credentialless the polling fallback can
+        // get stuck silently (handshake succeeds, no events delivered).
+        // WebSocket handshake works because backend emits CORP on the
+        // upgrade response (see io.engine 'headers' listener in backend).
+        const socket = io(API_URL, { transports: ['websocket'] });
         socketRef.current = socket;
 
         // Surface socket connection state into stream metrics so LayerManager
@@ -293,21 +298,17 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
             }
         }, 30_000);
 
-        // How many aircraft / vessels to process synchronously before
-        // yielding to the browser. Each live-update message carries
-        // the full ~11k aircraft world snapshot; processing that in a
-        // single sync loop is a 100-300ms main-thread spike that makes
-        // the globe feel laggy on every tick. Chunked with yields keeps
-        // pointer events responsive even during a fresh world update.
-        const AVI_CHUNK_SIZE = 400;
-        const MARITIME_CHUNK_SIZE = 250;
-
         let processingLiveUpdate = false;
         let queuedLiveUpdate: any | null = null;
         let lastUpdateReceivedAt: string | null = null;
         let lastProcessStartedAt: string | null = null;
         let lastProcessFinishedAt: string | null = null;
         let lastProcessMs = 0;
+
+        // Expose for diagnostic scripts to sample positions of specific
+        // billboards across time (e.g. checking whether playback advances).
+        (window as any).__openspyAircraftBillboards = billboardMap;
+        (window as any).__openspyVesselBillboards = vesselBillboardMap;
 
         const publishLiveStats = () => {
             window.__openspyLiveStats = {
@@ -364,8 +365,6 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
 
                     let bb = billboardMap.get(ac.id);
                     if (!bb) {
-                        // Apply subtype visibility filter to new billboards so
-                        // late-arriving aircraft respect the current LayerManager toggles.
                         const show = currentSubtypeVisibility[`aviation:${ac.type}`] !== false;
                         bb = aviBillboards.add({
                             position: pos,
@@ -397,16 +396,6 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                         onGround: ac.onGround === true,
                         lastContact: ac.lastContact || null,
                     });
-
-                    // Yield every AVI_CHUNK_SIZE aircraft so input events
-                    // (drag / zoom / click) get a chance between chunks.
-                    if ((ai + 1) % AVI_CHUNK_SIZE === 0 && ai + 1 < aircrafts.length) {
-                        requestSceneRender();
-                        await new Promise<void>((resolve) => setTimeout(resolve, 0));
-                        if (!refreshState()) return;
-                        // Source may have flipped off during the yield.
-                        if (!currentSources.aviation) break;
-                    }
                 }
             }
 
@@ -483,13 +472,6 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                     beam: v.beam ?? null,
                     cog: v.cog ?? null,
                 });
-
-                if ((vi + 1) % MARITIME_CHUNK_SIZE === 0 && vi + 1 < vessels.length) {
-                    requestSceneRender();
-                    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-                    if (!refreshState()) return;
-                    if (!currentSources.maritime) return;
-                }
             }
 
             if (data.meta && currentSources.maritime) {
@@ -572,7 +554,12 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                     const next = queuedLiveUpdate;
                     queuedLiveUpdate = null;
                     publishLiveStats();
+                    const t0 = performance.now();
                     await processLiveUpdate(next);
+                    const took = performance.now() - t0;
+                    if (took > 30) {
+                        perfLog('live.update_applied', { ms: Math.round(took), aircrafts: next.aircrafts?.length ?? 0, vessels: next.vessels?.length ?? 0 });
+                    }
                 }
             } finally {
                 processingLiveUpdate = false;
@@ -588,8 +575,65 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
             void drainLiveUpdates();
         });
 
+        // Bootstrap snapshot via REST: socket can't reliably carry the full
+        // 5–10 MB initial payload (browser drops frames over ~1 MB or under
+        // burst). Periodic incremental updates still come via socket.
+        //
+        // Codex round-11 fix (2026-04-21): on page load in playback mode,
+        // the `/api/live/snapshot` fetch overlaps the replay cold seek and
+        // its `await res.json()` (with a multi-MB graph of aircraft+vessel
+        // entities) blocks the main thread for 1.3–6 s — exactly the window
+        // in which replay's `setTimeout(300)` budget got starved and the
+        // 73 MB bundle POST competed with snapshot delivery on the same
+        // single-threaded Node server. Skip the bootstrap entirely while
+        // in playback and wire an abort signal so an in-flight snapshot
+        // can be cancelled when the user seeks into replay mid-load.
+        const snapshotAbort = new AbortController();
+        const currentMode = useTimelineStore.getState().mode;
+        // Codex round-11: debug flag to validate the live-snapshot-blocks-replay
+        // hypothesis by short-circuiting the snapshot entirely.
+        const OPENSPY_DISABLE_LIVE_BOOTSTRAP = typeof window !== 'undefined'
+            && (window as any).__OPENSPY_DISABLE_LIVE_BOOTSTRAP === true;
+        const shouldSkipBootstrap = currentMode === 'playback' || OPENSPY_DISABLE_LIVE_BOOTSTRAP;
+        const unsubscribeModeAbort = useTimelineStore.subscribe((state, prev) => {
+            if (state.mode === 'playback' && prev.mode !== 'playback') {
+                snapshotAbort.abort();
+            }
+        });
+        if (shouldSkipBootstrap) {
+            perfLog('live.snapshot_skipped', { reason: 'playback-at-mount' });
+        } else {
+            void (async () => {
+                const t0 = performance.now();
+                try {
+                    const res = await fetch(`${API_URL}/api/live/snapshot`, { signal: snapshotAbort.signal });
+                    if (!res.ok) throw new Error(`snapshot ${res.status}`);
+                    const data = await res.json();
+                    const tFetch = performance.now() - t0;
+                    perfLog('live.snapshot_fetched', { ms: Math.round(tFetch), aircrafts: data.aircrafts?.length || 0, vessels: data.vessels?.length || 0 });
+                    if (!active) return;
+                    if (useTimelineStore.getState().mode === 'playback') {
+                        perfLog('live.snapshot_discarded', { reason: 'playback-after-fetch' });
+                        return;
+                    }
+                    lastUpdateReceivedAt = new Date().toISOString();
+                    queuedLiveUpdate = data;
+                    publishLiveStats();
+                    void drainLiveUpdates();
+                } catch (err: any) {
+                    if (err?.name === 'AbortError') {
+                        perfLog('live.snapshot_aborted', { ms: Math.round(performance.now() - t0) });
+                        return;
+                    }
+                    console.error('[Live] bootstrap snapshot fetch failed:', err);
+                }
+            })();
+        }
+
         return () => {
             active = false;
+            snapshotAbort.abort();
+            unsubscribeModeAbort();
             clearInterval(speedInterval);
             clearInterval(staleCleanup);
             socket.disconnect();

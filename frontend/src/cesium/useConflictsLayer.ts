@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import * as Cesium from 'cesium';
 import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
+import { useSecondaryLoadGate } from './useSecondaryLoadGate';
 import { API_URL } from '../lib/config';
 import { getConflictIcon } from '../icons/map-icons';
 import { safeCartesianFromDegrees } from './position-utils';
@@ -35,6 +36,7 @@ export function useConflictsLayer(viewer: Cesium.Viewer | null) {
     const isVisible = useTimelineStore(s => s.visibility.conflicts);
     const mode = useTimelineStore(s => s.mode);
     const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
+    const secondaryReleased = useSecondaryLoadGate();
     const dsRef = useRef<Cesium.CustomDataSource | null>(null);
 
     // ---- Effect 1: scene lifetime ----
@@ -55,7 +57,7 @@ export function useConflictsLayer(viewer: Cesium.Viewer | null) {
 
     // ---- Effect 2: fetch loop ----
     useEffect(() => {
-        if (!viewer || !isSourceOn) return;
+        if (!viewer || !isSourceOn || !secondaryReleased) return;
         let active = true;
 
         async function fetchConflicts() {
@@ -160,7 +162,7 @@ export function useConflictsLayer(viewer: Cesium.Viewer | null) {
             // Do NOT remove the datasource — Effect 1 owns its lifetime so
             // already-loaded conflict events stay visible on source-off.
         };
-    }, [viewer, isSourceOn]);
+    }, [viewer, isSourceOn, secondaryReleased]);
 
     // ---- Effect 3: visibility toggle ----
     // Effective show = sources && visibility.

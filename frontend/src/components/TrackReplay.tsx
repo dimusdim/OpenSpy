@@ -148,7 +148,9 @@ export default function TrackReplay() {
             // deep-history checks in useDynamicLayers, and speed HUD stay in sync.
             store.setSpeedMultiplier(60);
             store.setIsPlaying(true);
-            store.setCurrentTime(new Date(data.startTime * 1000));
+            store.setCurrentTime(new Date(data.startTime * 1000), {
+                reason: 'track-replay',
+            });
 
             // Fly camera to the first waypoint
             const firstWp = data.path[0];
@@ -185,7 +187,10 @@ export default function TrackReplay() {
         store.setPlaybackKind(null);
         store.setSpeedMultiplier(1);
         store.setIsPlaying(true);
-        store.setCurrentTime(new Date());
+        store.setCurrentTime(new Date(), {
+            silent: true,
+            reason: 'track-clear',
+        });
         setActiveTrack(null);
         setError(null);
     };

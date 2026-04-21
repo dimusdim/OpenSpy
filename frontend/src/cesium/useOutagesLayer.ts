@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import * as Cesium from 'cesium';
 import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
+import { useSecondaryLoadGate } from './useSecondaryLoadGate';
 import { API_URL } from '../lib/config';
 import { OUTAGE_ICON_CRITICAL, OUTAGE_ICON_WARNING } from '../icons/map-icons';
 import { safeCartesianFromDegrees } from './position-utils';
@@ -33,6 +34,7 @@ const COUNTRY_CENTROIDS_MINI: Record<string, [number, number]> = {
 
 export function useOutagesLayer(viewer: Cesium.Viewer | null) {
     const isSourceOn = useTimelineStore(s => s.sources.outages);
+    const secondaryReleased = useSecondaryLoadGate();
     const isVisible = useTimelineStore(s => s.visibility.outages);
     const mode = useTimelineStore(s => s.mode);
     const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
@@ -54,7 +56,7 @@ export function useOutagesLayer(viewer: Cesium.Viewer | null) {
 
     // ---- Effect 2: fetch loop ----
     useEffect(() => {
-        if (!viewer || !isSourceOn) return;
+        if (!viewer || !isSourceOn || !secondaryReleased) return;
         let active = true;
 
         async function fetchOutages() {
@@ -211,7 +213,7 @@ export function useOutagesLayer(viewer: Cesium.Viewer | null) {
             clearInterval(interval);
             // Keep datasource — Effect 1 owns its lifetime.
         };
-    }, [viewer, isSourceOn]);
+    }, [viewer, isSourceOn, secondaryReleased]);
 
     // ---- Effect 3: layer visibility ----
     // Effective show = sources && visibility.

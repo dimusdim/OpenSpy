@@ -72,7 +72,10 @@ export default function TimelinePlayer() {
         if (isLive) return;
         if (currentTime.getTime() < rangeEndTimeMs) return;
         if (currentTime.getTime() !== rangeEndTimeMs) {
-            setCurrentTime(new Date(rangeEndTimeMs));
+            setCurrentTime(new Date(rangeEndTimeMs), {
+                silent: true,
+                reason: 'playback-clamp',
+            });
         }
         if (isPlaying) {
             setIsPlaying(false);
@@ -99,7 +102,7 @@ export default function TimelinePlayer() {
         const targetTime = new Date(replayStart + val * rangeMs);
 
         markReplaySeek();
-        setCurrentTime(targetTime);
+        setCurrentTime(targetTime, { reason: 'user-seek' });
         document.dispatchEvent(new CustomEvent('timeline-ctrl', { detail: { action: 'seek', time: targetTime.toISOString() }}));
     }, [markReplaySeek, rangeMs, setCurrentTime]);
 
@@ -186,7 +189,10 @@ export default function TimelinePlayer() {
             setPlaybackKind(null);
             setSpeedMultiplier(1);
             setIsPlaying(true);
-            setCurrentTime(new Date());
+            setCurrentTime(new Date(), {
+                silent: true,
+                reason: 'mode-change',
+            });
             document.dispatchEvent(new CustomEvent('timeline-ctrl', { detail: { action: 'speed', value: 1.0 }}));
             document.dispatchEvent(new CustomEvent('timeline-ctrl', { detail: { action: 'play' }}));
         }

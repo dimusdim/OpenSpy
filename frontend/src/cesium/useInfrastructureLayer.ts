@@ -3,6 +3,7 @@ import * as Cesium from 'cesium';
 import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
+import { perfLog } from '../lib/perf-log';
 import { INFRA_ICONS } from '../icons/map-icons';
 import { getViewerAltitudeMeters } from './position-utils';
 
@@ -462,25 +463,20 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
       // south,west,north,east bbox; the power endpoint expects
       // west,south,east,north (historic Tile convention the backend
       // kept for itself).
+      const tMain0 = performance.now();
+      const tPower0 = performance.now();
       const mainReq = mainAlreadyLoaded
         ? Promise.resolve<any>(null)
         : axios.get(
             `${API_URL}/api/infrastructure?bbox=${south},${west},${north},${east}`,
             { timeout: INFRA_FETCH_TIMEOUT_MS }
-          );
+          ).then((r) => { perfLog('infra.main_fetch', { ms: Math.round(performance.now() - tMain0), records: (r.data?.data || r.data || []).length, timedOut: r.data?.overpassTimedOut === true, bbox: [south, west, north, east] }); return r; });
       const powerReq = powerAlreadyLoaded
         ? Promise.resolve<any>(null)
         : axios.get(
             `${API_URL}/api/power-infra?bbox=${west},${south},${east},${north}`,
             { timeout: INFRA_FETCH_TIMEOUT_MS }
-          );
-
-      // Chunk size for the per-tile record loops. Each fetchTile call
-      // handles ~100-500 records; with 4 parallel workers the combined
-      // main-thread cost per second is material at cold load. Yielding
-      // every INFRA_TILE_CHUNK_SIZE records lets pointer events drain
-      // between chunks even while tiles are streaming in.
-      const INFRA_TILE_CHUNK_SIZE = 100;
+          ).then((r) => { perfLog('infra.power_fetch', { ms: Math.round(performance.now() - tPower0), records: (r.data?.data || r.data || []).length, timedOut: r.data?.overpassTimedOut === true, bbox: [south, west, north, east] }); return r; });
 
       // --- Source 1: /api/infrastructure (plants/refineries/military) ----
       const mainResult = await Promise.allSettled([mainReq]).then((results) => results[0]);
@@ -523,13 +519,6 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
                   verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
                 });
 
-                if ((ri + 1) % INFRA_TILE_CHUNK_SIZE === 0 && ri + 1 < records.length) {
-                  await new Promise<void>((resolve) => setTimeout(resolve, 0));
-                  if (shouldAbort()) {
-                    inFlightCellsRef.current.delete(key);
-                    return;
-                  }
-                }
               }
               collection.show = (useTimelineStore.getState().sources.infrastructure && useTimelineStore.getState().visibility.infrastructure);
               v.scene.primitives.add(collection);
@@ -630,13 +619,6 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
                 });
               }
 
-              if ((pri + 1) % INFRA_TILE_CHUNK_SIZE === 0 && pri + 1 < powerRecords.length) {
-                await new Promise<void>((resolve) => setTimeout(resolve, 0));
-                if (shouldAbort()) {
-                  inFlightCellsRef.current.delete(key);
-                  return;
-                }
-              }
             }
 
             if (powerBillboardCollection.length > 0) {
