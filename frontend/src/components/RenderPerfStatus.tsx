@@ -20,6 +20,10 @@ type RenderStats = {
     currentTimeIso?: string;
 };
 
+type ReplayStats = {
+    error?: string | null;
+};
+
 function formatNumber(value: number | null | undefined, digits = 1): string {
     if (value == null || !Number.isFinite(value)) return '—';
     return value.toFixed(digits);
@@ -27,11 +31,14 @@ function formatNumber(value: number | null | undefined, digits = 1): string {
 
 export default function RenderPerfStatus() {
     const [stats, setStats] = useState<RenderStats | null>(null);
+    const [replayStats, setReplayStats] = useState<ReplayStats | null>(null);
 
     useEffect(() => {
         const publish = () => {
             const stats = (window as any).__openspyRenderStats;
+            const replayStats = (window as any).__openspyReplayStats;
             setStats(stats ? { ...stats } : null);
+            setReplayStats(replayStats ? { ...replayStats } : null);
         };
         publish();
         const timer = window.setInterval(publish, 500);
@@ -76,6 +83,11 @@ export default function RenderPerfStatus() {
             <div className="leading-5">
                 <span className="text-zinc-500">Long &gt;33ms</span> {summary.longFrames33 ?? '—'}
             </div>
+            {replayStats?.error ? (
+                <div className="mt-1 max-w-[28rem] leading-5 text-red-300">
+                    <span className="text-red-400">Replay Error</span> {replayStats.error}
+                </div>
+            ) : null}
         </div>
     );
 }
