@@ -11,7 +11,8 @@
     "db:init": "bash ./scripts/db-init.sh",
     "db:start": "bash ./scripts/db-start.sh",
     "db:stop": "bash ./scripts/db-stop.sh",
-    "db:status": "bash ./scripts/db-status.sh"
+    "db:status": "bash ./scripts/db-status.sh",
+    "replay:rebuild-tiles": "ts-node src/scripts/rebuild-replay-tiles.ts"
   },
   "keywords": [],
   "author": "",
@@ -28,6 +29,7 @@
     "@opentelemetry/semantic-conventions": "^1.40.0",
     "@types/compression": "^1.8.1",
     "axios": "^1.15.0",
+    "@msgpack/msgpack": "^3.1.2",
     "compression": "^1.8.1",
     "cors": "^2.8.6",
     "dotenv": "^17.4.1",

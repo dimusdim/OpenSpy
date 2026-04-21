@@ -26,6 +26,25 @@ const rateLimitRejectedTotal = meter.createCounter('openspy.rate_limit.rejected_
     description: 'Rate-limited HTTP requests',
 });
 
+const infraFetchDurationMs = meter.createHistogram('openspy.infra.fetch.duration_ms', {
+    description: 'Infrastructure source fetch duration (Overture DuckDB or Overpass HTTP)',
+    unit: 'ms',
+});
+
+const infraFetchRecords = meter.createHistogram('openspy.infra.fetch.records', {
+    description: 'Records returned by infrastructure source fetch',
+});
+
+const replayTileBundleDurationMs = meter.createHistogram('openspy.replay.tile_bundle.duration_ms', {
+    description: 'Replay tile-bundle endpoint duration',
+    unit: 'ms',
+});
+
+const replayTileBundleBytes = meter.createHistogram('openspy.replay.tile_bundle.bytes', {
+    description: 'Replay tile-bundle response size',
+    unit: 'By',
+});
+
 export function telemetryEnabled(): boolean {
     return isTelemetryEnabled();
 }
@@ -98,6 +117,37 @@ export function recordRateLimitReject(bucketName: string, reqPath: string) {
         'http.route': reqPath,
         'rate_limit.bucket': bucketName,
     });
+}
+
+export function recordInfraFetch(
+    endpoint: 'infrastructure' | 'power-infra',
+    source: 'overture' | 'overpass',
+    durationMs: number,
+    recordCount: number,
+    timedOut: boolean,
+) {
+    if (!telemetryEnabled()) return;
+    const attrs = {
+        'infra.endpoint': endpoint,
+        'infra.source': source,
+        'infra.timed_out': timedOut,
+    };
+    infraFetchDurationMs.record(durationMs, attrs);
+    infraFetchRecords.record(recordCount, attrs);
+}
+
+export function recordReplayTileBundle(tileCount: number, bytes: number, durationMs: number) {
+    if (!telemetryEnabled()) return;
+    replayTileBundleDurationMs.record(durationMs, { 'replay.tile_count_bin': tileBin(tileCount) });
+    replayTileBundleBytes.record(bytes, { 'replay.tile_count_bin': tileBin(tileCount) });
+}
+
+function tileBin(n: number): string {
+    if (n <= 5) return '<=5';
+    if (n <= 20) return '<=20';
+    if (n <= 100) return '<=100';
+    if (n <= 500) return '<=500';
+    return '>500';
 }
 
 function summarizeSql(sqlText: string) {

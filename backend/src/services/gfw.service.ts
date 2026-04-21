@@ -59,19 +59,38 @@ export class GFWService {
             const startDate = start.toISOString().slice(0, 10);
             const endDate = end.toISOString().slice(0, 10);
 
-            const url = `https://gateway.api.globalfishingwatch.org/v3/events?datasets[0]=public-global-gaps-events:latest&limit=100&offset=0&start-date=${startDate}&end-date=${endDate}&sort=-start`;
-
-            const res = await axios.get(url, {
-                timeout: 30000,
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                },
-            });
-
-            const entries = res.data?.entries || res.data;
-            if (!Array.isArray(entries)) {
-                console.warn('[GFW] Unexpected response shape');
-                return;
+            // Paginate through all pages. The v3 API caps a single call
+            // at 100 events — without pagination we only see the most
+            // recent slice and older events silently drop off.
+            const pageSize = 100;
+            const maxPages = 50;
+            const entries: any[] = [];
+            const rawPages: unknown[] = [];
+            let hitPageLimit = false;
+            let malformedPage = false;
+            for (let page = 0; page < maxPages; page += 1) {
+                const offset = page * pageSize;
+                const url = `https://gateway.api.globalfishingwatch.org/v3/events?datasets[0]=public-global-gaps-events:latest&limit=${pageSize}&offset=${offset}&start-date=${startDate}&end-date=${endDate}&sort=-start`;
+                const res = await axios.get(url, {
+                    timeout: 30000,
+                    headers: { 'Authorization': `Bearer ${token}` },
+                });
+                rawPages.push(res.data);
+                const pageEntries = res.data?.entries || res.data;
+                if (!Array.isArray(pageEntries)) {
+                    console.warn(`[GFW] Malformed response on page ${page} (offset=${offset}); aborting pagination`);
+                    malformedPage = true;
+                    break;
+                }
+                if (pageEntries.length === 0) break;
+                entries.push(...pageEntries);
+                if (pageEntries.length < pageSize) break;
+                if (page === maxPages - 1) hitPageLimit = true;
+            }
+            if (hitPageLimit) {
+                console.warn(
+                    `[GFW] hit pagination cap (${maxPages} × ${pageSize} = ${maxPages * pageSize} events); older AIS gap events may be truncated — consider narrowing the 30-day window or raising maxPages`,
+                );
             }
 
             const records: GFWEvent[] = [];
@@ -107,10 +126,10 @@ export class GFWService {
             }
 
             this.events = records;
-            this.health = 'streaming';
-            this.lastError = null;
-            await this.persistence?.persistGfwEvents(records, { rawPayload: res.data });
-            console.log(`[GFW] ${records.length} AIS gap events loaded`);
+            this.health = malformedPage ? 'error' : 'streaming';
+            this.lastError = malformedPage ? 'Malformed page in GFW pagination' : null;
+            await this.persistence?.persistGfwEvents(records, { rawPayload: rawPages });
+            console.log(`[GFW] ${records.length} AIS gap events loaded (${entries.length} raw across ${rawPages.length} pages)`);
         } catch (err: any) {
             const body = err.response?.data;
             const detail = body ? JSON.stringify(body) : err.message;

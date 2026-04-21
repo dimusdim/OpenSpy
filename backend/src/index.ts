@@ -6,7 +6,10 @@ import { Server } from 'socket.io';
 import cors from 'cors';
 import compression from 'compression';
 import axios from 'axios';
-import { recordRateLimitReject, recordReplayRequest, withSpan } from './telemetry/observability';
+import path from 'path';
+import fs from 'fs';
+import { recordRateLimitReject, recordReplayRequest, recordInfraFetch, recordReplayTileBundle, withSpan } from './telemetry/observability';
+import { logPerfEvent, logPerfEventFromClient } from './telemetry/perf-log';
 
 // Global process-level safety nets. Without these, a single upstream HTTP
 // client throwing during a response-parsing phase will bring the whole
@@ -53,6 +56,7 @@ import { EntityQueryService } from './services/entity-query.service';
 import { AssetQueryService } from './services/asset-query.service';
 import { LiveProjectionService } from './services/live-projection.service';
 import { ReplayQueryService } from './services/replay-query.service';
+import { ReplayTileBuilderService } from './services/replay-tile-builder.service';
 
 // CORS origin whitelist — comma-separated list in ALLOWED_ORIGINS env var.
 // Defaults to localhost dev ports if unset.
@@ -72,11 +76,35 @@ const corsOptions: cors.CorsOptions = {
 
 const app = express();
 app.use(cors(corsOptions));
+// Required because frontend runs under COEP: credentialless. Without CORP,
+// cross-origin fetches and Socket.IO upgrades from 3737 to 3055 are blocked
+// silently (Network tab only, no console error).
+app.use((_req, res, next) => {
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    next();
+});
 app.use(compression({
     threshold: 1024,
     level: 6,
+    // Skip compression for already-binary tile-bundle and static replay tiles:
+    // msgpack barely compresses (1-2%) but gzip on a 30+ MB payload blocks
+    // the event loop for ~30s and serialises subsequent requests.
+    filter: (req, res) => {
+        if (req.path === '/api/replay/tile-bundle') return false;
+        if (req.path.startsWith('/static/replay-tiles/')) return false;
+        return compression.filter(req, res);
+    },
 }));
 app.use(express.json({ limit: '50mb' }));
+app.use('/static/replay-tiles', express.static(path.resolve(__dirname, '../var/replay-tiles'), {
+    immutable: true,
+    maxAge: '365d',
+    setHeaders: (res) => {
+        res.setHeader('Content-Type', 'application/msgpack');
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    },
+}));
 
 type StorageStatusPayload = {
     db_bytes: number | null;
@@ -149,8 +177,6 @@ async function collectStorageStatus(): Promise<StorageStatusPayload> {
 // ---------------------------------------------------------------------------
 // User settings persistence (JSON file on disk)
 // ---------------------------------------------------------------------------
-import path from 'path';
-import fs from 'fs';
 const viewStateRepository = new ViewStateRepository(databaseService);
 const selectionRepository = new SelectionRepository(databaseService);
 const catalogBootstrapService = new CatalogBootstrapService(databaseService);
@@ -162,7 +188,31 @@ const entityQueryService = new EntityQueryService(databaseService);
 const assetQueryService = new AssetQueryService(databaseService);
 const liveProjectionService = new LiveProjectionService(databaseService);
 const replayQueryService = new ReplayQueryService(databaseService);
+const replayTileBuilderService = new ReplayTileBuilderService(databaseService, replayQueryService);
 const liveIngestEnabled = process.env.DISABLE_LIVE_INGEST !== 'true';
+const REPLAY_TILE_REFRESH_LAYERS = ['aircraft', 'vessel', 'disasters', 'fire', 'jamming', 'outage', 'conflict', 'gfw', 'cable', 'pipeline', 'airspace'];
+let replayTileRefreshInFlight = false;
+
+async function refreshReplayTilesWindow(): Promise<void> {
+    if (replayTileRefreshInFlight || !databaseService.isReady()) return;
+    replayTileRefreshInFlight = true;
+    try {
+        const to = new Date();
+        const from = new Date(to.getTime() - 24 * 60 * 60 * 1000);
+        const manifest = await replayTileBuilderService.buildTiles({
+            from: from.toISOString(),
+            to: to.toISOString(),
+            layers: REPLAY_TILE_REFRESH_LAYERS,
+            z: 0,
+        });
+        const tileCount = Object.values(manifest.layers).reduce((sum, layer) => sum + layer.tiles.length, 0);
+        console.log(`[ReplayTiles] Refreshed ${tileCount} tiles for last 24h @ z0`);
+    } catch (error) {
+        console.error('[ReplayTiles] Refresh failed:', error);
+    } finally {
+        replayTileRefreshInFlight = false;
+    }
+}
 
 async function handleGetViewState(_req: express.Request, res: express.Response) {
     try {
@@ -667,7 +717,22 @@ const io = new Server(server, {
   cors: {
     origin: allowedOrigins,
     methods: ['GET', 'POST']
-  }
+  },
+  // Live snapshot is large (7k aircraft + 23k vessels = 9 MB JSON).
+  // Without compression and a raised buffer the browser silently drops
+  // the WS frame. perMessageDeflate compresses ~5–8x, gets payload to 1–2 MB.
+  maxHttpBufferSize: 50 * 1024 * 1024,
+  perMessageDeflate: { threshold: 1024 },
+  httpCompression: { threshold: 1024 },
+});
+// Socket.IO bypasses Express middleware, so the global CORP header is not set
+// on /socket.io/ responses. Without it the browser's COEP: credentialless
+// silently blocks WebSocket upgrade and polling, leaving live data invisible.
+io.engine.on('initial_headers', (headers: Record<string, string>) => {
+    headers['Cross-Origin-Resource-Policy'] = 'cross-origin';
+});
+io.engine.on('headers', (headers: Record<string, string>) => {
+    headers['Cross-Origin-Resource-Policy'] = 'cross-origin';
 });
 
 // Spectator Earth sensor catalog fetched at boot and merged into
@@ -809,7 +874,239 @@ app.get('/api/replay/events', async (req, res) => {
     }
 });
 
+// Bootstrap snapshot for live mode. Socket.IO drops large WS frames silently
+// in-browser, so initial state must come over plain HTTP. Frontend fetches
+// once on mount; periodic deltas still arrive via socket broadcast.
+app.get('/api/live/snapshot', async (_req, res) => {
+    try {
+        const payload = await liveStreamService.getFullSnapshot();
+        res.json(payload);
+    } catch (err: any) {
+        console.error('[api/live/snapshot] failed:', err?.message || err);
+        res.status(500).json({ error: 'snapshot-failed' });
+    }
+});
+
+app.get('/api/replay/manifest', async (req, res) => {
+    if (!replayQueryService.isReady()) {
+        res.status(503).json({ error: 'Replay database is not ready' });
+        return;
+    }
+
+    const from = parseIsoDateOrNull(req.query.from as string | undefined);
+    const to = parseIsoDateOrNull(req.query.to as string | undefined);
+    if (!from || !to) {
+        res.status(400).json({ error: 'Missing or invalid from/to timestamp' });
+        return;
+    }
+
+    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    if (req.query.bbox && !bbox) {
+        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        return;
+    }
+
+    const zRaw = req.query.z as string | undefined;
+    const z = zRaw == null ? 0 : Number(zRaw);
+    if (zRaw != null && (!Number.isInteger(z) || z < 0 || z > 6)) {
+        res.status(400).json({ error: 'Invalid z (expected integer 0..6)' });
+        return;
+    }
+
+    const layers = parseLayerScopeList(req.query.layers as string | undefined);
+    if (layers.length === 0) {
+        res.status(400).json({ error: 'Manifest requires at least one layer' });
+        return;
+    }
+
+    try {
+        const manifest = await replayTileBuilderService.buildManifest({
+            from,
+            to,
+            layers,
+            z,
+            bbox: bbox || undefined,
+        });
+        res.json(manifest);
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/replay/tile/:layer/:z/:x/:y/:tBucketIso', async (req, res) => {
+    if (!replayQueryService.isReady()) {
+        res.status(503).json({ error: 'Replay database is not ready' });
+        return;
+    }
+
+    const layerId = normalizeLayerId(req.params.layer);
+    const z = Number(req.params.z);
+    const x = Number(req.params.x);
+    const y = Number(req.params.y);
+    const tBucket = parseIsoDateOrNull(req.params.tBucketIso);
+    if (!layerId || !Number.isInteger(z) || !Number.isInteger(x) || !Number.isInteger(y) || !tBucket) {
+        res.status(400).json({ error: 'Invalid tile coordinates or tBucket' });
+        return;
+    }
+
+    try {
+        const tile = await replayTileBuilderService.readTileBuffer({
+            layerId,
+            z,
+            x,
+            y,
+            tBucket,
+        });
+        if (!tile) {
+            res.status(404).json({ error: 'Replay tile not found' });
+            return;
+        }
+        res.setHeader('Content-Type', 'application/msgpack');
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        res.setHeader('ETag', tile.entry.contentHash);
+        res.send(tile.buffer);
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/perf-event', (req, res) => {
+    const body = req.body;
+    if (Array.isArray(body)) {
+        for (const ev of body) logPerfEventFromClient(ev);
+    } else {
+        logPerfEventFromClient(body);
+    }
+    res.status(204).end();
+});
+
+app.post('/api/replay/tile-bundle', async (req, res) => {
+    const urls: string[] = Array.isArray(req.body?.urls) ? req.body.urls : [];
+    if (urls.length === 0) {
+        res.status(400).json({ error: 'urls[] required' });
+        return;
+    }
+    if (urls.length > 2000) {
+        res.status(400).json({ error: 'urls[] too large (max 2000)' });
+        return;
+    }
+    const tileRoot = path.resolve(__dirname, '../var/replay-tiles');
+    try {
+        const t0 = Date.now();
+        const buffers = await Promise.all(urls.map(async (url) => {
+            // url формат: /static/replay-tiles/{layer}/{z}/{x}/{y}/{filename}
+            if (typeof url !== 'string' || !url.startsWith('/static/replay-tiles/')) return null;
+            const rel = url.slice('/static/replay-tiles/'.length);
+            if (rel.includes('..')) return null;
+            const filePath = path.join(tileRoot, rel);
+            try {
+                return await fs.promises.readFile(filePath);
+            } catch {
+                return null;
+            }
+        }));
+        const urlBufs = urls.map((u) => Buffer.from(u, 'utf8'));
+        const totalSize = 4 + buffers.reduce((acc, b, i) => acc + 4 + urlBufs[i].length + 4 + (b?.length || 0), 0);
+        const out = Buffer.allocUnsafe(totalSize);
+        let off = 0;
+        out.writeUInt32LE(buffers.length, off); off += 4;
+        for (let i = 0; i < buffers.length; i += 1) {
+            const kb = urlBufs[i];
+            out.writeUInt32LE(kb.length, off); off += 4;
+            kb.copy(out, off); off += kb.length;
+            const pb = buffers[i];
+            const plen = pb?.length || 0;
+            out.writeUInt32LE(plen, off); off += 4;
+            if (pb && plen > 0) { pb.copy(out, off); off += plen; }
+        }
+        const took = Date.now() - t0;
+        recordReplayTileBundle(urls.length, out.length, took);
+        const layerSet = new Set<string>();
+        for (const u of urls) {
+            if (typeof u !== 'string') continue;
+            const parts = u.split('/');
+            if (parts[3]) layerSet.add(parts[3]);
+        }
+        logPerfEvent('replay.tile_bundle', { source: 'backend', tileCount: urls.length, bytes: out.length, ms: took, layers: Array.from(layerSet) });
+        if (urls.length > 50 || took > 200) {
+            console.log(`[tile-bundle] ${urls.length} tiles, ${out.length} bytes, ${took}ms`);
+        }
+        res.setHeader('Content-Type', 'application/octet-stream');
+        res.setHeader('Cache-Control', 'no-store');
+        res.send(out);
+    } catch (err: any) {
+        console.error('[api/replay/tile-bundle] failed:', err?.message || err);
+        res.status(500).json({ error: err?.message || 'tile-bundle-failed' });
+    }
+});
+
+// Cache satellite-TLE responses for ~5 min: TLE elements barely change in
+// that window, but the underlying query returns ~19MB of data and dominates
+// the seek path. Bucket by 5-minute slots so different seek times share the
+// same response.
+const SATELLITE_TLE_CACHE_TTL_MS = 5 * 60 * 1000;
+const satelliteTleCache = new Map<string, { json: string; expiresAt: number }>();
+
+app.get('/api/replay/satellite-tle', async (req, res) => {
+    if (!replayQueryService.isReady()) {
+        res.status(503).json({ error: 'Replay database is not ready' });
+        return;
+    }
+
+    const at = parseIsoDateOrNull(req.query.at as string | undefined);
+    if (!at) {
+        res.status(400).json({ error: 'Missing or invalid at timestamp' });
+        return;
+    }
+
+    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    if (req.query.bbox && !bbox) {
+        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        return;
+    }
+
+    const limit = parseOptionalPositiveLimit(req.query.limit as string | undefined);
+    const now = Date.now();
+    const slot = Math.floor(new Date(at).getTime() / SATELLITE_TLE_CACHE_TTL_MS);
+    const cacheKey = `${slot}|${limit ?? ''}|${bbox ? bbox.join(',') : ''}`;
+    const cached = satelliteTleCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('X-OpenSpy-Cache', 'hit');
+        res.send(cached.json);
+        return;
+    }
+    try {
+        const items = await replayQueryService.listSatelliteTleAt({
+            at,
+            layerId: 'satellite',
+            bbox: bbox || undefined,
+            limit,
+        });
+        const json = JSON.stringify({
+            mode: 'historical-replay',
+            replay_kind: 'satellite-tle',
+            at,
+            count: items.length,
+            items,
+        });
+        satelliteTleCache.set(cacheKey, { json, expiresAt: now + SATELLITE_TLE_CACHE_TTL_MS });
+        // Periodic cleanup
+        if (satelliteTleCache.size > 64) {
+            for (const [k, v] of satelliteTleCache.entries()) {
+                if (v.expiresAt <= now) satelliteTleCache.delete(k);
+            }
+        }
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('X-OpenSpy-Cache', 'miss');
+        res.send(json);
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.get('/api/replay/state', async (req, res) => {
+    console.warn('[deprecated] /api/replay/state called');
     if (!replayQueryService.isReady()) {
         res.status(503).json({ error: 'Replay database is not ready' });
         return;
@@ -916,135 +1213,6 @@ app.get('/api/replay/state', async (req, res) => {
                 entities,
                 events,
                 assets,
-            });
-        });
-    } catch (err: any) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.get('/api/replay/window', async (req, res) => {
-    if (!replayQueryService.isReady()) {
-        res.status(503).json({ error: 'Replay database is not ready' });
-        return;
-    }
-
-    const from = parseIsoDateOrNull(req.query.from as string | undefined);
-    const to = parseIsoDateOrNull(req.query.to as string | undefined);
-    if (!from || !to) {
-        res.status(400).json({ error: 'Missing or invalid from/to timestamp' });
-        return;
-    }
-
-    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
-    if (req.query.bbox && !bbox) {
-        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
-        return;
-    }
-
-    const stepSecondsRaw = req.query.stepSeconds as string | undefined;
-    const stepSeconds = stepSecondsRaw ? Number(stepSecondsRaw) : undefined;
-    if (stepSecondsRaw && (!Number.isFinite(stepSeconds) || stepSeconds! <= 0)) {
-        res.status(400).json({ error: 'Invalid stepSeconds (expected positive integer)' });
-        return;
-    }
-
-    const replayLimit = parseOptionalPositiveLimit(req.query.limit as string | undefined);
-    if ((req.query.limit as string | undefined) && replayLimit === undefined && req.query.limit !== 'all') {
-        res.status(400).json({ error: 'Invalid limit (expected positive integer or "all")' });
-        return;
-    }
-
-    const layerIds = parseLayerScopeList(req.query.layers as string | undefined);
-    const layerLimitMap = parseLayerLimitMap(req.query.layerLimits as string | undefined);
-    const layerId = normalizeLayerId((req.query.layerId as string | undefined) || (req.query.layer as string | undefined));
-    const sourceId = req.query.sourceId as string | undefined;
-    const entityId = req.query.entityId as string | undefined;
-    const eventId = req.query.eventId as string | undefined;
-    const assetId = req.query.assetId as string | undefined;
-
-    if (layerIds.length === 0 && !layerId && !sourceId && !entityId && !eventId && !assetId) {
-        res.status(400).json({ error: 'Replay window requires at least one scope selector (layerId, sourceId, entityId, eventId, assetId)' });
-        return;
-    }
-
-    try {
-        const routeStartedAt = performance.now();
-        const filters = {
-            from,
-            to,
-            layerId,
-            sourceId,
-            entityId,
-            entityKind: req.query.entityKind as string | undefined,
-            eventId,
-            eventKind: req.query.eventKind as string | undefined,
-            assetId,
-            assetKind: req.query.assetKind as string | undefined,
-            subtype: req.query.subtype as string | undefined,
-            bbox: bbox || undefined,
-            limit: replayLimit,
-            stepSeconds: stepSeconds || undefined,
-        };
-
-        await withSpan('replay.window', {
-            'replay.layers.count': layerIds.length,
-            'replay.has_bbox': Boolean(bbox),
-            'replay.step_seconds': stepSeconds || 0,
-        }, async () => {
-            const items = layerIds.length > 0
-                ? (await Promise.all(layerIds.map((scopedLayerId) => replayQueryService.listWindow({
-                    ...filters,
-                    layerId: scopedLayerId,
-                    limit: layerLimitMap[scopedLayerId] ?? replayLimit,
-                })))).flat()
-                    .sort((left, right) => {
-                        const dt = new Date(left.at).getTime() - new Date(right.at).getTime();
-                        if (dt !== 0) return dt;
-                        return left.target_id.localeCompare(right.target_id);
-                    })
-                    .slice(0, replayLimit ?? Number.MAX_SAFE_INTEGER)
-                : await replayQueryService.listWindow(filters);
-            const counts = items.reduce(
-                (acc, item) => {
-                    acc.total += 1;
-                    if (item.op === 'upsert') acc.upserts += 1;
-                    else acc.removes += 1;
-                    if (item.family === 'entity') acc.entities += 1;
-                    else if (item.family === 'event') acc.events += 1;
-                    else acc.assets += 1;
-                    return acc;
-                },
-                { total: 0, upserts: 0, removes: 0, entities: 0, events: 0, assets: 0 },
-            );
-
-            recordReplayRequest(
-                'window',
-                performance.now() - routeStartedAt,
-                counts.total,
-                layerIds.length > 0 ? layerIds.join(',') : filters.layerId || filters.sourceId || 'scoped',
-            );
-
-            res.json({
-                mode: 'historical-replay',
-                replay_kind: 'window',
-                time_basis: 'observed',
-                from,
-                to,
-                filters: {
-                    ...filters,
-                    ...(layerIds.length > 0 ? { layers: layerIds } : {}),
-                },
-                semantics: {
-                    seek: 'use replay/state for point-in-time frame reconstruction',
-                    play: 'use replay/window to apply ordered upsert/remove operations over a bounded interval',
-                    moving_entities: 'position fixes inside the window plus synthetic remove events when remove_after_sec expires before the next fix',
-                    events: 'event snapshots inside the window plus synthetic remove events when valid_to expires before the next snapshot',
-                    assets: 'asset snapshots inside the window; no synthetic remove is emitted unless retirement semantics are modeled explicitly',
-                    satellites: 'propagated positions sampled across the requested window using historical TLE snapshots and stepSeconds',
-                },
-                counts,
-                items,
             });
         });
     } catch (err: any) {
@@ -1469,16 +1637,14 @@ app.get('/api/infrastructure', async (req, res) => {
         return;
     }
     try {
-        // Overture is local DuckDB — instant. Overpass is external HTTP — slow.
-        // Don't block response on Overpass: return Overture immediately,
-        // merge Overpass only if it finishes within a tight timeout.
+        const tOv0 = Date.now();
         const overtureRecords = await overtureService.getInfrastructureInBbox(south, west, north, east);
+        const tOv = Date.now() - tOv0;
 
-        // Fire Overpass with a 5s timeout — if it responds fast, merge;
-        // otherwise return Overture-only (better than waiting 60s).
         const OVERPASS_FAST_TIMEOUT = 5000;
         let overpassRecords: any[] = [];
         let overpassTimedOut = false;
+        const tOp0 = Date.now();
         try {
             overpassRecords = await Promise.race([
                 infrastructureService.getInfrastructure(south, west, north, east),
@@ -1487,9 +1653,9 @@ app.get('/api/infrastructure', async (req, res) => {
                 ),
             ]);
         } catch {
-            // Overpass slow or failed — proceed with Overture only
             overpassTimedOut = true;
         }
+        const tOp = Date.now() - tOp0;
 
         const deduped = dedupAgainstOverture(overpassRecords, overtureRecords);
         const merged = [
@@ -1502,6 +1668,10 @@ app.get('/api/infrastructure', async (req, res) => {
             })),
             ...deduped,
         ];
+        recordInfraFetch('infrastructure', 'overture', tOv, overtureRecords.length, false);
+        recordInfraFetch('infrastructure', 'overpass', tOp, overpassRecords.length, overpassTimedOut);
+        logPerfEvent('infra.fetch', { source: 'backend', endpoint: 'infrastructure', overtureMs: tOv, overtureRecords: overtureRecords.length, overpassMs: tOp, overpassRecords: overpassRecords.length, overpassTimedOut, mergedRecords: merged.length, bboxAreaSq: Number(area.toFixed(2)) });
+        console.log(`[Infra] /api/infrastructure overture=${tOv}ms(${overtureRecords.length}) overpass=${tOp}ms(${overpassRecords.length}${overpassTimedOut ? ',timeout' : ''}) merged=${merged.length} bbox=${area.toFixed(1)}sq`);
         res.json({ data: merged, overpassTimedOut });
     } catch (err: any) {
         console.error('[Infrastructure] endpoint error:', err.message);
@@ -1530,16 +1700,14 @@ app.get('/api/power-infra', async (req, res) => {
         return;
     }
     try {
-        // Overture is local DuckDB — instant. Overpass is external HTTP — slow.
-        // Same race pattern as /api/infrastructure: return Overture immediately,
-        // merge Overpass only if it finishes within a tight timeout.
+        const tOv0 = Date.now();
         const overtureRecords = await overtureService.getPowerInfraInBbox(south, west, north, east);
+        const tOv = Date.now() - tOv0;
 
-        // Fire Overpass with a 5s timeout — if it responds fast, merge;
-        // otherwise return Overture-only (better than waiting 60s).
         const OVERPASS_FAST_TIMEOUT = 5000;
         let overpassRecords: any[] = [];
         let overpassTimedOut = false;
+        const tOp0 = Date.now();
         try {
             overpassRecords = await Promise.race([
                 infrastructureService.getPowerInfra(bbox),
@@ -1548,9 +1716,13 @@ app.get('/api/power-infra', async (req, res) => {
                 ),
             ]);
         } catch {
-            // Overpass slow or failed — proceed with Overture only
             overpassTimedOut = true;
         }
+        const tOp = Date.now() - tOp0;
+        recordInfraFetch('power-infra', 'overture', tOv, overtureRecords.length, false);
+        recordInfraFetch('power-infra', 'overpass', tOp, overpassRecords.length, overpassTimedOut);
+        logPerfEvent('infra.fetch', { source: 'backend', endpoint: 'power-infra', overtureMs: tOv, overtureRecords: overtureRecords.length, overpassMs: tOp, overpassRecords: overpassRecords.length, overpassTimedOut });
+        console.log(`[Infra] /api/power-infra overture=${tOv}ms(${overtureRecords.length}) overpass=${tOp}ms(${overpassRecords.length}${overpassTimedOut ? ',timeout' : ''})`);
 
         const deduped = dedupAgainstOverture(overpassRecords, overtureRecords);
         const merged = [
@@ -1966,6 +2138,10 @@ async function bootstrap() {
     server.listen(PORT, () => {
         console.log(`Backend server running on port ${PORT}`);
     });
+    void refreshReplayTilesWindow();
+    setInterval(() => {
+        void refreshReplayTilesWindow();
+    }, 10 * 60 * 1000);
 }
 
 bootstrap();

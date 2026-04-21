@@ -234,8 +234,15 @@ export class LiveStreamService {
             this.aircraftsDirty = false;
         }
 
+        // Не awaitим flushPendingVesselPositions: он под нагрузкой AISStream
+        // может зависнуть в DB-insert и тогда broadcastInFlight навсегда
+        // остаётся true — клиенты перестают получать live-update. Persistence
+        // сам себя планирует (scheduleVesselFlush), broadcast от ETL не
+        // зависит.
         if (this.persistence) {
-            await this.persistence.flushPendingVesselPositions();
+            void this.persistence.flushPendingVesselPositions().catch((err) => {
+                console.warn('[LiveSocket] vessel flush failed:', err?.message || err);
+            });
         }
         if (
             force ||
@@ -261,7 +268,8 @@ export class LiveStreamService {
             const darkVesselsArr = Array.from(this.darkVessels.values());
             for (const socket of this.io.sockets.sockets.values()) {
                 const includeAircraft = shouldIncludeAircraft || socket.data?.needsInitialLiveSnapshot === true;
-                socket.emit('live-update', this.buildLivePayload(darkVesselsArr, includeAircraft));
+                const payload = this.buildLivePayload(darkVesselsArr, includeAircraft);
+                socket.emit('live-update', payload);
                 if (includeAircraft) {
                     socket.data.needsInitialLiveSnapshot = false;
                 }
@@ -300,14 +308,23 @@ export class LiveStreamService {
     }
 
     private async emitInitialSnapshot(socket: Socket): Promise<void> {
-        try {
-            await this.refreshLiveCaches(true);
-            const darkVesselsArr = Array.from(this.darkVessels.values());
-            socket.emit('live-update', this.buildLivePayload(darkVesselsArr, true));
-            socket.data.needsInitialLiveSnapshot = false;
-        } catch (err: any) {
-            console.warn('[LiveSocket] failed to send initial DB-backed snapshot:', err?.message || err);
-        }
+        // No-op: bootstrap snapshot is now fetched via REST GET /api/live/snapshot
+        // because Socket.IO drops large WebSocket frames silently in-browser.
+        // Socket only carries small incremental updates from broadcastLiveSnapshot.
+        socket.data.needsInitialLiveSnapshot = false;
+        void this.refreshLiveCaches(true).catch((err) => {
+            console.warn('[LiveSocket] background refresh after connect failed:', err?.message || err);
+        });
+    }
+
+    public async getFullSnapshot(): Promise<any> {
+        // Read straight from in-memory caches. Do NOT trigger refresh here:
+        // a cold force=true refresh blocks 20-30s and the snapshot endpoint
+        // becomes the slowest thing on initial load. Caches warm via the
+        // 2s broadcast timer and the OpenSky/AIS streams; first hit may
+        // return small counts, but it returns fast.
+        const darkVesselsArr = Array.from(this.darkVessels.values());
+        return this.buildLivePayload(darkVesselsArr, true);
     }
 
     private loadVesselTypesCache() {

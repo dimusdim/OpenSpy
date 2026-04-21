@@ -102,6 +102,24 @@ type ReplaySatelliteRow = {
     orbital_properties: any;
 };
 
+export type ReplaySatelliteTleRow = {
+    entity_id: string;
+    layer_id: string;
+    source_id: string | null;
+    entity_kind: string;
+    subtype: string | null;
+    display_name: string | null;
+    first_observed_at: string | null;
+    last_observed_at: string | null;
+    updated_at: string;
+    entity_observed_at: string | null;
+    entity_properties: any;
+    orbital_observed_at: string | null;
+    tle_line1: string | null;
+    tle_line2: string | null;
+    orbital_properties: any;
+};
+
 type ReplayTrackRow = {
     position_fix_id: string;
     entity_id: string;
@@ -749,6 +767,44 @@ export class ReplayQueryService {
     }
 
     private async listSatelliteStateAt(filters: ReplayStateFilters): Promise<ReplayEntityRow[]> {
+        const rows = await this.listSatelliteTleAt(filters);
+        const items: ReplayEntityRow[] = [];
+        for (const row of rows) {
+            if (!row.tle_line1 || !row.tle_line2) continue;
+            const position = this.propagateSatellitePosition(row.tle_line1, row.tle_line2, filters.at);
+            if (!position) continue;
+            if (filters.bbox && !this.bboxContains(filters.bbox, position.lat, position.lng)) continue;
+            items.push({
+                entity_id: row.entity_id,
+                layer_id: row.layer_id,
+                source_id: row.source_id,
+                entity_kind: row.entity_kind,
+                subtype: row.subtype,
+                display_name: row.display_name,
+                first_observed_at: row.first_observed_at,
+                last_observed_at: row.last_observed_at,
+                updated_at: row.updated_at,
+                entity_observed_at: row.entity_observed_at,
+                entity_properties: row.entity_properties,
+                position_observed_at: filters.at,
+                geometry: null,
+                display_lat: position.lat,
+                display_lng: position.lng,
+                altitude_m: position.altitudeM,
+                heading_deg: null,
+                speed_mps: null,
+                position_properties: {
+                    replay_basis: 'propagated_from_tle',
+                    orbital_observed_at: row.orbital_observed_at,
+                    ...(row.orbital_properties || {}),
+                },
+            });
+        }
+
+        return items;
+    }
+
+    async listSatelliteTleAt(filters: ReplayStateFilters): Promise<ReplaySatelliteTleRow[]> {
         const params: unknown[] = [filters.at];
         const orbitalClauses = ['oe.layer_id = $2', 'oe.observed_at <= $1::timestamptz'];
         const outerClauses: string[] = [];
@@ -828,41 +884,7 @@ export class ReplayQueryService {
         const limitedRows = normalizedLimit
             ? selectedRows.slice(0, normalizedLimit)
             : selectedRows;
-
-        const items: ReplayEntityRow[] = [];
-        for (const row of limitedRows) {
-            if (!row.tle_line1 || !row.tle_line2) continue;
-            const position = this.propagateSatellitePosition(row.tle_line1, row.tle_line2, filters.at);
-            if (!position) continue;
-            if (filters.bbox && !this.bboxContains(filters.bbox, position.lat, position.lng)) continue;
-            items.push({
-                entity_id: row.entity_id,
-                layer_id: row.layer_id,
-                source_id: row.source_id,
-                entity_kind: row.entity_kind,
-                subtype: row.subtype,
-                display_name: row.display_name,
-                first_observed_at: row.first_observed_at,
-                last_observed_at: row.last_observed_at,
-                updated_at: row.updated_at,
-                entity_observed_at: row.entity_observed_at,
-                entity_properties: row.entity_properties,
-                position_observed_at: filters.at,
-                geometry: null,
-                display_lat: position.lat,
-                display_lng: position.lng,
-                altitude_m: position.altitudeM,
-                heading_deg: null,
-                speed_mps: null,
-                position_properties: {
-                    replay_basis: 'propagated_from_tle',
-                    orbital_observed_at: row.orbital_observed_at,
-                    ...(row.orbital_properties || {}),
-                },
-            });
-        }
-
-        return items;
+        return limitedRows;
     }
 
     async listSatelliteTrack(filters: SatelliteTrackFilters): Promise<ReplayTrackRow[]> {
