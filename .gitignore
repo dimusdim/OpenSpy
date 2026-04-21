@@ -19,6 +19,7 @@ backend/satellites_cache.json
 backend/vessel_types_cache.json
 backend/spectator_cache.json
 backend/data/
+backend/var/
 
 # OS files
 .DS_Store
@@ -64,3 +65,9 @@ marketing/
 # Playwright/test artifacts
 test-results/
 frontend/test-results/
+
+# Agent session runtime state
+.remember/
+
+# Working design specs (not for repo)
+ops/specs/
