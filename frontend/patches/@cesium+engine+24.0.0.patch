@@ -1,0 +1,24 @@
+diff --git a/node_modules/@cesium/engine/Source/Scene/BillboardTexture.js b/node_modules/@cesium/engine/Source/Scene/BillboardTexture.js
+index e5a842a..2cceb33 100644
+--- a/node_modules/@cesium/engine/Source/Scene/BillboardTexture.js
++++ b/node_modules/@cesium/engine/Source/Scene/BillboardTexture.js
+@@ -238,6 +238,19 @@ BillboardTexture.prototype.loadImage = async function (
+   billboardTexture._loadState = BillboardLoadState.LOADED;
+ 
+   const rectangle = atlas.rectangles[index];
++  // openspy patch: atlas.rectangles[index] can be undefined when the atlas
++  // has been destroyed / reshaped between addImage kickoff and its promise
++  // resolve. Guard against the crash that otherwise cascades through every
++  // BillboardCollection.add call on the page and halts scene rendering.
++  if (!defined(rectangle)) {
++    billboardTexture._loadState = BillboardLoadState.FAILED;
++    billboardTexture._index = -1;
++    if (this._id === id) {
++      this._loadState = BillboardLoadState.FAILED;
++      this._index = -1;
++    }
++    return;
++  }
+   billboardTexture._width = rectangle.width;
+   billboardTexture._height = rectangle.height;
+ 
