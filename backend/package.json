@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "bash ./scripts/dev-with-db.sh",
     "dev:raw": "ts-node src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
     "test": "node ../tests/smoke-api.mjs",
     "db:migrate": "bash ./scripts/db-migrate.sh",
     "db:init": "bash ./scripts/db-init.sh",

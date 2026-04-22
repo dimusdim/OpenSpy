@@ -308,16 +308,30 @@ export class SourcePersistenceService {
     }
 
     private async runTrackedIngest<T>(input: IngestRunInput, operation: (ingestRunId: string | null) => Promise<T>): Promise<T> {
+        // beginIngestRun runs OUTSIDE the transaction so even a rolled-back
+        // canonical pass leaves a visible run record. Otherwise a failed ingest
+        // would disappear entirely and the operator would have no trail.
         const ingestRunId = await this.beginIngestRun(input);
 
         try {
-            await this.persistRawPayloads(ingestRunId, input.layer_id, input.raw_payloads || []);
-            const result = await operation(ingestRunId);
+            // Wrap raw-payload persistence + the actual multi-table canonical
+            // operation (entities, snapshots, aliases, live_state, position_fixes,
+            // events, assets) in a single transaction. Partial failures no
+            // longer leave canonical head rows without their corresponding
+            // snapshot history. Scar-tissue dedup reads (loadLatestAssetHashes,
+            // loadLatestOrbitalHashes) still execute inside the same txn so
+            // their REPEATABLE-READ-adjacent guarantees survive.
+            const result = await this.database.withTransaction(async () => {
+                await this.persistRawPayloads(ingestRunId, input.layer_id, input.raw_payloads || []);
+                return operation(ingestRunId);
+            });
             await this.completeIngestRun(ingestRunId, 'completed', input.record_count, {
                 rawPayloadCount: input.raw_payloads?.length || 0,
             });
             return result;
         } catch (error: any) {
+            // completeIngestRun runs outside the transaction (which already
+            // rolled back) so the failed marker is recorded.
             await this.completeIngestRun(
                 ingestRunId,
                 'failed',

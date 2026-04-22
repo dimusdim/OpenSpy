@@ -13,6 +13,7 @@ frontend/.env.local
 frontend/.next/
 frontend/out/
 frontend/public/cesium/
+backend/dist/
 
 # Cache files
 backend/satellites_cache.json

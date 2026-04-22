@@ -1,6 +1,13 @@
-import { Pool, type QueryResult, type QueryResultRow } from 'pg';
+import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from 'pg';
+import { AsyncLocalStorage } from 'async_hooks';
 import { runMigrations } from './migrator';
 import { recordDbQuery, withSpan } from '../telemetry/observability';
+
+// Current transactional client for the running async context. withTransaction
+// sets this before invoking the callback so nested this.database.query() calls
+// route to the txn client instead of the pool. Without this pattern each query
+// checks out a fresh connection and the BEGIN/COMMIT discipline is lost.
+const txStorage = new AsyncLocalStorage<PoolClient>();
 
 type DatabaseHealthStatus = 'disabled' | 'streaming' | 'error';
 
@@ -80,9 +87,12 @@ export class DatabaseService {
     ): Promise<QueryResult<T> | null> {
         if (!this.pool || !this.ready) return null;
         const startedAt = performance.now();
+        const txClient = txStorage.getStore();
         return withSpan('db.query', { 'db.query.params': params.length }, async () => {
             try {
-                const result = await this.pool!.query<T>(text, params);
+                const result = txClient
+                    ? await txClient.query<T>(text, params)
+                    : await this.pool!.query<T>(text, params);
                 recordDbQuery(text, performance.now() - startedAt, true, result.rowCount);
                 return result;
             } catch (error) {
@@ -90,6 +100,32 @@ export class DatabaseService {
                 throw error;
             }
         });
+    }
+
+    // Run `fn` inside a single database transaction. Any this.database.query()
+    // called from inside `fn` (at any async depth) reuses the same pg connection
+    // and participates in the BEGIN/COMMIT. On throw the transaction is rolled
+    // back and the original error is re-raised.
+    //
+    // Nested calls reuse the outer transaction (no savepoints) so scar-tissue
+    // retry logic like loadLatestAssetHashes -> persist still sees a consistent
+    // snapshot. If the DB is disabled or not ready, `fn` runs without a txn so
+    // dev-mode bootstraps that skip Postgres still work.
+    async withTransaction<T>(fn: () => Promise<T>): Promise<T> {
+        if (!this.pool || !this.ready) return fn();
+        if (txStorage.getStore()) return fn();
+        const client = await this.pool.connect();
+        try {
+            await client.query('BEGIN');
+            const result = await txStorage.run(client, fn);
+            await client.query('COMMIT');
+            return result;
+        } catch (error) {
+            try { await client.query('ROLLBACK'); } catch { /* swallow secondary failure */ }
+            throw error;
+        } finally {
+            client.release();
+        }
     }
 }
 

@@ -74,6 +74,21 @@ const corsOptions: cors.CorsOptions = {
     methods: ['GET', 'POST', 'DELETE'],
 };
 
+// In production, raw err.message can leak Postgres column names, filesystem
+// paths, and upstream API bodies. sendError returns only a requestId to the
+// client and logs the full error server-side. In dev the message flows through
+// so local debugging keeps working. Used from ~44 handler catch blocks.
+function sendError(res: express.Response, err: any): void {
+    if (res.headersSent) return;
+    const requestId = Math.random().toString(36).slice(2, 10);
+    const isProd = process.env.NODE_ENV === 'production';
+    console.error(`[error ${requestId}]`, err);
+    const body = isProd
+        ? { error: 'Internal error', requestId }
+        : { error: err?.message ?? 'unknown error', requestId };
+    res.status(500).json(body);
+}
+
 const app = express();
 app.use(cors(corsOptions));
 // Required because frontend runs under COEP: credentialless. Without CORP,
@@ -229,7 +244,7 @@ async function handleSaveViewState(req: express.Request, res: express.Response) 
         await viewStateRepository.saveDefaultViewState(req.body ?? {});
         res.json({ ok: true });
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 }
 
@@ -242,7 +257,7 @@ app.get('/api/catalog/sources', async (_req, res) => {
     try {
         res.json(await catalogReadService.listSources());
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -255,7 +270,7 @@ app.get('/api/catalog/sources/:sourceId', async (req, res) => {
         }
         res.json(source);
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -263,7 +278,7 @@ app.get('/api/catalog/layers', async (_req, res) => {
     try {
         res.json(await catalogReadService.listLayers());
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -276,7 +291,7 @@ app.get('/api/catalog/layers/:layerId', async (req, res) => {
         }
         res.json(layer);
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -284,7 +299,7 @@ app.get('/api/catalog/ui-taxonomy', async (_req, res) => {
     try {
         res.json(await catalogReadService.getUiTaxonomy());
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -302,7 +317,7 @@ app.get('/api/catalog/ui-taxonomy/node', async (req, res) => {
         }
         res.json(node);
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -315,7 +330,7 @@ app.get('/api/catalog/ui-taxonomy/:nodeId', async (req, res) => {
         }
         res.json(node);
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -323,7 +338,7 @@ app.get('/api/legend/tree', async (_req, res) => {
     try {
         res.json(await catalogReadService.getUiTaxonomy());
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -341,7 +356,7 @@ app.get('/api/legend/node', async (req, res) => {
         }
         res.json(node);
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -357,7 +372,7 @@ app.post('/api/view-state/patch', async (req, res) => {
         const state = await viewControlService.patchState(patch);
         res.json({ updated: true, state });
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -377,7 +392,7 @@ app.post('/api/view-state/legend-node-state', async (req, res) => {
             res.status(404).json({ error: err.message });
             return;
         }
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -399,7 +414,7 @@ app.post('/api/selections', async (req, res) => {
             metadata: selection.metadata,
         });
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -418,7 +433,7 @@ app.get('/api/selections/:selectionId', async (req, res) => {
             metadata: selection.metadata,
         });
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -449,7 +464,7 @@ app.post('/api/selections/:selectionId/patch', async (req, res) => {
             metadata: selection.metadata,
         });
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -465,7 +480,7 @@ app.post('/api/map/apply-selection', async (req, res) => {
         const state = await viewControlService.applySelection(layer, selectionId, mode);
         res.json({ applied: true, layer, selection_id: selectionId, mode, state });
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -479,7 +494,7 @@ app.post('/api/map/clear-selection', async (req, res) => {
         const state = await viewControlService.clearSelection(layer);
         res.json({ cleared: true, layer, state });
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -553,7 +568,7 @@ app.post('/api/keys', (req, res) => {
         fs.writeFileSync(ENV_FILE, envContent);
         res.json({ ok: true, message: 'Keys updated. Some services may need reconnection.' });
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -788,7 +803,7 @@ app.get('/api/satellites', async (_req, res) => {
         }
         res.json(await liveProjectionService.getSatellites(limit));
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -812,7 +827,7 @@ app.get('/api/satellites/recon', async (req, res) => {
         }
         res.json(await liveProjectionService.getReconSatellites(limit));
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -824,7 +839,7 @@ app.get('/api/disasters', async (_req, res) => {
     try {
         res.json(await liveProjectionService.getDisasterEvents());
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -870,7 +885,7 @@ app.get('/api/replay/events', async (req, res) => {
             items,
         });
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -929,7 +944,7 @@ app.get('/api/replay/manifest', async (req, res) => {
         });
         res.json(manifest);
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -966,7 +981,7 @@ app.get('/api/replay/tile/:layer/:z/:x/:y/:tBucketIso', async (req, res) => {
         res.setHeader('ETag', tile.entry.contentHash);
         res.send(tile.buffer);
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -1101,7 +1116,7 @@ app.get('/api/replay/satellite-tle', async (req, res) => {
         res.setHeader('X-OpenSpy-Cache', 'miss');
         res.send(json);
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -1216,7 +1231,7 @@ app.get('/api/replay/state', async (req, res) => {
             });
         });
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -1279,7 +1294,7 @@ app.get('/api/replay/track/:entityId', async (req, res) => {
             items,
         });
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -1301,7 +1316,7 @@ app.get('/api/replay/events/:eventId/snapshots', async (req, res) => {
             items,
         });
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -1483,7 +1498,7 @@ app.get('/api/query/events/latest', async (req, res) => {
             items,
         });
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -1526,7 +1541,7 @@ app.get('/api/query/entities/latest', async (req, res) => {
             items,
         });
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -1561,7 +1576,7 @@ app.get('/api/query/entities/:entityId/track', async (req, res) => {
             items,
         });
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -1604,7 +1619,7 @@ app.get('/api/query/assets/latest', async (req, res) => {
             items,
         });
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -1647,7 +1662,7 @@ app.get('/api/replay/assets', async (req, res) => {
             items,
         });
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -1669,7 +1684,7 @@ app.get('/api/replay/assets/:assetId/snapshots', async (req, res) => {
             items,
         });
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -1681,7 +1696,7 @@ app.get('/api/cables', async (_req, res) => {
     try {
         res.json(await liveProjectionService.getCables());
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -1706,7 +1721,7 @@ app.get('/api/fires', async (req, res) => {
             gridDegrees,
         }));
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -1718,7 +1733,7 @@ app.get('/api/jamming', async (_req, res) => {
     try {
         res.json(await liveProjectionService.getJammingZones());
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -1734,7 +1749,7 @@ app.get('/api/outages', async (_req, res) => {
     try {
         res.json(await liveProjectionService.getIodaOutages());
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -1899,7 +1914,7 @@ app.get('/api/pipelines', async (_req, res) => {
         res.json(rows);
     } catch (err: any) {
         console.error('[Pipelines] endpoint error:', err.message);
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -2027,7 +2042,7 @@ app.get('/api/conflicts', async (_req, res) => {
     try {
         res.json(await liveProjectionService.getAcledConflicts());
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -2040,7 +2055,7 @@ app.get('/api/gdelt-conflicts', async (_req, res) => {
     try {
         res.json(await liveProjectionService.getGdeltConflicts());
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -2053,7 +2068,7 @@ app.get('/api/airspace', async (_req, res) => {
     try {
         res.json(await liveProjectionService.getAirspaceZones());
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -2066,7 +2081,7 @@ app.get('/api/gfw-events', async (_req, res) => {
     try {
         res.json(await liveProjectionService.getGfwEvents());
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -2079,7 +2094,7 @@ app.get('/api/cloudflare-outages', async (_req, res) => {
     try {
         res.json(await liveProjectionService.getCloudflareOutages());
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -2234,6 +2249,22 @@ app.get('/api/overture-status', (_req, res) => {
         return;
     }
     res.json(overtureService.getStatus());
+});
+
+// Global error safety net for routes that do not catch their own errors
+// (Express 5 forwards async rejections here). In production only a short
+// requestId is returned to clients so Postgres error text, filesystem paths,
+// and upstream API bodies do not leak. Full err is always logged server-side.
+// Disclosed through /cso 2026-04-22 as err.message disclosure at 44 call sites.
+app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    if (res.headersSent) return;
+    const requestId = Math.random().toString(36).slice(2, 10);
+    const isProd = process.env.NODE_ENV === 'production';
+    console.error(`[error ${requestId}] ${req.method} ${req.path}:`, err);
+    const body = isProd
+        ? { error: 'Internal error', requestId }
+        : { error: err?.message ?? 'unknown error', requestId };
+    res.status(500).json(body);
 });
 
 async function bootstrap() {
