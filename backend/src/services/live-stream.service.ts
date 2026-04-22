@@ -122,7 +122,7 @@ export interface DisasterEvent {
     radiusKm?: number;
     lat: number;
     lng: number;
-    startTime: string;
+    startTime: string | null;
     endTime: string;
     description: string;
     geometry?: {
@@ -946,7 +946,7 @@ export class LiveStreamService {
                 alertLevel: 'Orange', // EONET doesn't grade; default mid-tier
                 lat,
                 lng,
-                startTime: lastGeom.date || new Date().toISOString(),
+                startTime: lastGeom.date || null,
                 endTime: new Date(Date.now() + 7 * 86400_000).toISOString(),
                 description: ev.title,
                 geometry: lastGeom || null,

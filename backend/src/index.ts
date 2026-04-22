@@ -1305,6 +1305,145 @@ app.get('/api/replay/events/:eventId/snapshots', async (req, res) => {
     }
 });
 
+app.post('/api/trajectories', async (req, res) => {
+    if (!databaseService.isReady()) {
+        res.status(503).json({ error: 'Database is not ready' });
+        return;
+    }
+
+    const body = req.body || {};
+    const layerId = typeof body.layerId === 'string' ? body.layerId : undefined;
+    const entityIds = Array.isArray(body.entityIds) ? body.entityIds as unknown[] : undefined;
+    const bbox = Array.isArray(body.bbox) ? body.bbox as unknown[] : undefined;
+    const startTimeRaw = body.startTime as string | undefined;
+    const endTimeRaw = body.endTime as string | undefined;
+    const maxPointsRaw = body.maxPointsPerEntity;
+
+    if (!layerId) {
+        res.status(400).json({ error: 'layerId required' });
+        return;
+    }
+
+    const hasIds = Array.isArray(entityIds) && entityIds.length > 0
+        && entityIds.every((id): id is string => typeof id === 'string' && id.length > 0);
+    const hasBbox = Array.isArray(bbox) && bbox.length === 4
+        && bbox.every((n) => typeof n === 'number' && Number.isFinite(n));
+
+    if (!hasIds && !hasBbox) {
+        res.status(400).json({ error: 'entityIds or bbox required' });
+        return;
+    }
+
+    const start = startTimeRaw ? new Date(startTimeRaw) : null;
+    const end = endTimeRaw ? new Date(endTimeRaw) : null;
+    if (!start || !end || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start >= end) {
+        res.status(400).json({ error: 'startTime must be a valid ISO8601 earlier than endTime' });
+        return;
+    }
+
+    const maxPoints = Math.min(
+        Math.max(Math.trunc(Number(maxPointsRaw) || 200), 1),
+        2000,
+    );
+
+    const normalizedLayerId = normalizeLayerId(layerId) ?? layerId;
+    const normalizedIds = hasIds
+        ? (entityIds as string[]).map((id) => (id.includes(':') ? id : `${normalizedLayerId}:${id}`))
+        : [];
+
+    const now = Date.now();
+    const oldestEdgeMs = Math.min(start.getTime(), end.getTime());
+    const ageSec = (now - oldestEdgeMs) / 1000;
+    const windowSec = (end.getTime() - start.getTime()) / 1000;
+    const useCagg = ageSec < 180 * 86400 && windowSec > 2 * 3600 && ageSec > 30 * 86400;
+
+    // CAGG path: widen bucket predicate to cover edge-case rows inside the
+    // start/end buckets (chunk exclusion), then filter precisely on
+    // last_observed_at (the real sample time).
+    const sourceFragment = useCagg
+        ? `FROM app.ca_position_fixes_5min
+           WHERE layer_id = $1
+             AND bucket >= time_bucket('5 minutes', $2::timestamptz)
+             AND bucket <= $3::timestamptz
+             AND last_observed_at BETWEEN $2 AND $3`
+        : 'FROM core.position_fixes WHERE layer_id = $1 AND observed_at BETWEEN $2 AND $3';
+
+    const timeCol = useCagg ? 'last_observed_at' : 'observed_at';
+    const timeOrderCol = useCagg ? 'last_observed_at' : 'observed_at';
+    const geomCol = useCagg ? 'last_geom' : 'geom';
+    const altCol = useCagg ? 'last_alt' : 'altitude_m';
+    const hdgCol = useCagg ? 'last_heading' : 'heading_deg';
+    const spdCol = useCagg ? 'last_speed' : 'speed_mps';
+
+    const whereFrags: string[] = [];
+    const params: any[] = [normalizedLayerId, start.toISOString(), end.toISOString()];
+
+    if (hasIds) {
+        params.push(normalizedIds);
+        whereFrags.push(`entity_id = ANY($${params.length}::text[])`);
+    }
+
+    if (hasBbox) {
+        const [south, west, north, east] = bbox as [number, number, number, number];
+        params.push(west, south, east, north);
+        const base = params.length - 3;
+        whereFrags.push(
+            `${geomCol} && ST_MakeEnvelope($${base}, $${base + 1}, $${base + 2}, $${base + 3}, 4326)`,
+        );
+    }
+
+    params.push(maxPoints);
+    const pMax = params.length;
+
+    const whereClause = whereFrags.length > 0 ? ` AND ${whereFrags.join(' AND ')}` : '';
+
+    // Stride-based decimation: ceil(total_count/maxPoints) guarantees
+    // <= maxPoints rows per entity without a separate cap.
+    const sql = `
+        WITH base AS (
+            SELECT entity_id,
+                   ${timeCol} AS observed_at,
+                   ${geomCol} AS geom,
+                   ${altCol} AS altitude_m,
+                   ${hdgCol} AS heading_deg,
+                   ${spdCol} AS speed_mps,
+                   row_number() OVER (PARTITION BY entity_id ORDER BY ${timeOrderCol}) AS rn,
+                   count(*)     OVER (PARTITION BY entity_id) AS total_count
+            ${sourceFragment}${whereClause}
+        )
+        SELECT entity_id, observed_at,
+               ST_X(geom) AS lon, ST_Y(geom) AS lat,
+               altitude_m, heading_deg, speed_mps
+        FROM base
+        WHERE MOD(rn - 1, GREATEST(CEIL(total_count::numeric / $${pMax})::int, 1)) = 0
+        ORDER BY entity_id, observed_at
+    `;
+
+    try {
+        const result = await databaseService.query<{
+            entity_id: string;
+            observed_at: string | Date;
+            lon: number;
+            lat: number;
+            altitude_m: number | null;
+            heading_deg: number | null;
+            speed_mps: number | null;
+        }>(sql, params);
+
+        const entities: Record<string, { positions: Array<[number, number, number | null, number]> }> = {};
+        for (const row of result?.rows || []) {
+            const bucket = entities[row.entity_id] ?? (entities[row.entity_id] = { positions: [] });
+            const tSec = Math.floor(new Date(row.observed_at).getTime() / 1000);
+            bucket.positions.push([row.lon, row.lat, row.altitude_m, tSec]);
+        }
+
+        res.json({ entities });
+    } catch (err: any) {
+        console.error('[api] /api/trajectories failed', err);
+        res.status(500).json({ error: err?.message || 'trajectories query failed' });
+    }
+});
+
 app.get('/api/query/events/latest', async (req, res) => {
     if (!eventQueryService.isReady()) {
         res.status(503).json({ error: 'Query database is not ready' });

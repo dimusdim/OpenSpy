@@ -332,6 +332,8 @@ export class SourcePersistenceService {
     private async persistAssetBatch(rows: AssetUpsertRow[], ingestRunId: string | null = null): Promise<void> {
         if (!this.database.isReady() || rows.length === 0) return;
 
+        const latestAssetHashes = await this.loadLatestAssetHashes(rows.map((row) => row.asset_id));
+
         await this.database.query(
             `
                 WITH incoming AS (
@@ -443,6 +445,21 @@ export class SourcePersistenceService {
             [JSON.stringify(rows), ingestRunId],
         );
 
+        const snapshotRows = rows.filter((row) => {
+            const stateHash = typeof row.properties?._state_hash === 'string'
+                ? row.properties._state_hash as string
+                : '';
+            if (!stateHash) return true;
+            return latestAssetHashes.get(row.asset_id) !== stateHash;
+        });
+
+        if (snapshotRows.length === 0) return;
+
+        const snapshotRowsWithFallback = snapshotRows.map((row) => ({
+            ...row,
+            observed_at: row.observed_at || new Date().toISOString(),
+        }));
+
         await this.database.query(
             `
                 WITH incoming AS (
@@ -491,10 +508,10 @@ export class SourcePersistenceService {
                     properties,
                     now()
                 FROM incoming
-                ON CONFLICT (asset_snapshot_id)
+                ON CONFLICT (asset_snapshot_id, observed_at)
                 DO NOTHING
             `,
-            [JSON.stringify(rows), ingestRunId],
+            [JSON.stringify(snapshotRowsWithFallback), ingestRunId],
         );
     }
 
@@ -683,6 +700,57 @@ export class SourcePersistenceService {
         return hashes;
     }
 
+    private async loadLatestAssetHashes(assetIds: string[]): Promise<Map<string, string>> {
+        const uniqueAssetIds = [...new Set(assetIds)];
+        const hashes = new Map<string, string>();
+        if (!this.database.isReady() || uniqueAssetIds.length === 0) return hashes;
+
+        // Read from asset_snapshots so a partial failure (base upsert ok,
+        // snapshot insert failing) doesn't cause the next retry to skip the
+        // missing snapshot.
+        const result = await this.database.query<{ asset_id: string; state_hash: string | null }>(
+            `
+                SELECT DISTINCT ON (asset_id)
+                    asset_id,
+                    properties->>'_state_hash' AS state_hash
+                FROM core.asset_snapshots
+                WHERE asset_id = ANY($1::text[])
+                ORDER BY asset_id, observed_at DESC, created_at DESC
+            `,
+            [uniqueAssetIds],
+        );
+
+        for (const row of result?.rows || []) {
+            hashes.set(row.asset_id, row.state_hash || '');
+        }
+
+        return hashes;
+    }
+
+    private async loadLatestOrbitalHashes(entityIds: string[]): Promise<Map<string, string>> {
+        const uniqueEntityIds = [...new Set(entityIds)];
+        const hashes = new Map<string, string>();
+        if (!this.database.isReady() || uniqueEntityIds.length === 0) return hashes;
+
+        const result = await this.database.query<{ entity_id: string; state_hash: string | null }>(
+            `
+                SELECT DISTINCT ON (entity_id)
+                    entity_id,
+                    properties->>'_state_hash' AS state_hash
+                FROM core.orbital_elements
+                WHERE entity_id = ANY($1::text[])
+                ORDER BY entity_id, observed_at DESC, created_at DESC
+            `,
+            [uniqueEntityIds],
+        );
+
+        for (const row of result?.rows || []) {
+            hashes.set(row.entity_id, row.state_hash || '');
+        }
+
+        return hashes;
+    }
+
     private async insertEntitySnapshots(rows: EntitySnapshotUpsertRow[], ingestRunId: string | null = null): Promise<void> {
         if (!this.database.isReady() || rows.length === 0) return;
 
@@ -728,7 +796,7 @@ export class SourcePersistenceService {
                     properties,
                     now()
                 FROM incoming
-                ON CONFLICT (entity_snapshot_id)
+                ON CONFLICT (entity_snapshot_id, observed_at)
                 DO NOTHING
             `,
             [JSON.stringify(rows), ingestRunId],
@@ -782,7 +850,7 @@ export class SourcePersistenceService {
                     properties,
                     now()
                 FROM incoming
-                ON CONFLICT (position_fix_id)
+                ON CONFLICT (position_fix_id, observed_at)
                 DO NOTHING
             `,
             [JSON.stringify(rows)],
@@ -855,6 +923,18 @@ export class SourcePersistenceService {
     private async insertOrbitalElements(rows: OrbitalElementUpsertRow[]): Promise<void> {
         if (!this.database.isReady() || rows.length === 0) return;
 
+        const latestOrbitalHashes = await this.loadLatestOrbitalHashes(rows.map((row) => row.entity_id));
+
+        const filtered = rows.filter((row) => {
+            const stateHash = typeof row.properties?._state_hash === 'string'
+                ? row.properties._state_hash as string
+                : '';
+            if (!stateHash) return true;
+            return latestOrbitalHashes.get(row.entity_id) !== stateHash;
+        });
+
+        if (filtered.length === 0) return;
+
         await this.database.query(
             `
                 WITH incoming AS (
@@ -895,15 +975,31 @@ export class SourcePersistenceService {
                     properties,
                     now()
                 FROM incoming
-                ON CONFLICT (orbital_element_id)
+                ON CONFLICT (orbital_element_id, observed_at)
                 DO NOTHING
             `,
-            [JSON.stringify(rows)],
+            [JSON.stringify(filtered)],
         );
     }
 
     private async persistEventBatch(rows: EventUpsertRow[], ingestRunId: string | null = null): Promise<void> {
         if (!this.database.isReady() || rows.length === 0) return;
+
+        const effectiveRows: EventUpsertRow[] = [];
+        for (const row of rows) {
+            const effective = row.observed_at || row.valid_from || null;
+            if (!effective) {
+                console.warn('[source-persistence] dropping event without observable time', {
+                    event_id: row.event_id,
+                    source_id: row.source_id,
+                    layer_id: row.layer_id,
+                });
+                continue;
+            }
+            effectiveRows.push({ ...row, observed_at: effective });
+        }
+
+        if (effectiveRows.length === 0) return;
 
         await this.database.query(
             `
@@ -1070,10 +1166,10 @@ export class SourcePersistenceService {
                     properties,
                     now()
                 FROM incoming
-                ON CONFLICT (event_snapshot_id)
+                ON CONFLICT (event_snapshot_id, observed_at)
                 DO NOTHING
             `,
-            [JSON.stringify(rows), ingestRunId],
+            [JSON.stringify(effectiveRows), ingestRunId],
         );
     }
 
@@ -2191,7 +2287,10 @@ export class SourcePersistenceService {
 
         for (const event of events) {
             const normalizedSourceId = this.normalizeDisasterSourceId(event.source);
-            const observedAt = event.startTime || new Date().toISOString();
+            // Keep source-derived time only; persistEventBatch will skip rows
+            // with no observable time. Do NOT fall back to wall-clock — it
+            // poisons composite-PK idempotency.
+            const observedAt = event.startTime || null;
             const lat = Number(event.lat);
             const lng = Number(event.lng);
             const geometryJson = event.geometry && typeof event.geometry.type === 'string'
@@ -2202,10 +2301,12 @@ export class SourcePersistenceService {
                     source: normalizedSourceId,
                     nativeId: event.id,
                 })}`,
+                // Snapshot ID must be content-derived, NOT time-derived, so
+                // repeated polls of the same event state yield the same ID
+                // and hit the composite ON CONFLICT guard.
                 event_snapshot_id: `disaster:${stableHash({
                     source: normalizedSourceId,
                     nativeId: event.id,
-                    observedAt,
                     geometry: geometryJson || { type: 'Point', coordinates: [lng, lat] },
                     subtype: event.eventType || 'unknown',
                 })}`,
