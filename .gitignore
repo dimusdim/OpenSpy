@@ -68,7 +68,3 @@ frontend/test-results/
 
 # Agent session runtime state
 .remember/
-
-# Working design specs (not for repo)
-ops/specs/
-ops/migration/
