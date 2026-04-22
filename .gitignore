@@ -71,3 +71,4 @@ frontend/test-results/
 
 # Working design specs (not for repo)
 ops/specs/
+ops/migration/
