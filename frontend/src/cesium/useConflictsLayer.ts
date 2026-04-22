@@ -8,17 +8,6 @@ import { getConflictIcon } from '../icons/map-icons';
 import { safeCartesianFromDegrees } from './position-utils';
 import { getLayerSourceVisibilityKey, normalizeLayerSourceId } from '../lib/source-visibility';
 
-function getConflictColor(eventType: string): Cesium.Color {
-    if (eventType.includes('Explosions') || eventType.includes('Remote violence')) return Cesium.Color.RED;
-    if (eventType === 'Battles' || eventType === 'Fight') return Cesium.Color.ORANGE;
-    if (eventType === 'Assault' || eventType === 'Mass Violence') return Cesium.Color.RED;
-    if (eventType === 'Protest') return Cesium.Color.YELLOW;
-    if (eventType === 'Threaten') return Cesium.Color.fromCssColorString('#f59e0b'); // amber
-    if (eventType === 'Force posture') return Cesium.Color.fromCssColorString('#a855f7'); // purple
-    if (eventType === 'Coerce') return Cesium.Color.fromCssColorString('#f97316'); // deep orange
-    return Cesium.Color.YELLOW;
-}
-
 function getSubtypeKey(eventType: string): string {
     if (eventType.includes('Explosions') || eventType.includes('Remote violence')) return 'explosions';
     if (eventType === 'Battles' || eventType === 'Fight') return 'battles';
@@ -104,7 +93,6 @@ export function useConflictsLayer(viewer: Cesium.Viewer | null) {
                     if (ev.lat == null || ev.lng == null || isNaN(ev.lat) || isNaN(ev.lng)) continue;
                     const position = safeCartesianFromDegrees(ev.lng, ev.lat, 50);
                     if (!position) continue;
-                    const color = getConflictColor(ev.event_type);
                     const subtypeKey = getSubtypeKey(ev.event_type);
 
                     ds.entities.add({
@@ -128,15 +116,12 @@ export function useConflictsLayer(viewer: Cesium.Viewer | null) {
                             image: getConflictIcon(ev.event_type),
                             scale: ev.fatalities > 10 ? 1.4 : ev.fatalities > 0 ? 1.1 : 0.9,
                         },
-                        ellipse: {
-                            semiMinorAxis: ev.fatalities > 10 ? 30_000 : 15_000,
-                            semiMajorAxis: ev.fatalities > 10 ? 30_000 : 15_000,
-                            material: new Cesium.ColorMaterialProperty(color.withAlpha(0.08)),
-                            height: 0,
-                            outline: true,
-                            outlineColor: color.withAlpha(0.3),
-                            outlineWidth: 1,
-                        },
+                        // Per-event ellipse removed 2026-04-22 — 5000
+                        // conflict entities × 1 ellipse each dominated the
+                        // BillboardVisualizer / typed-array hot path. The
+                        // 15-30 km circle barely rendered at global zoom.
+                        // Bring it back via a dedicated PrimitiveCollection
+                        // +EllipseGeometry if close-zoom context needs it.
                     });
                 }
 

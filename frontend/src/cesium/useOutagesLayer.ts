@@ -83,7 +83,15 @@ export function useOutagesLayer(viewer: Cesium.Viewer | null) {
                 ds.entities.removeAll();
 
                 // --- IODA outages (country-level, have lat/lng) ---
+                // Dedupe by countryCode: IODA occasionally returns 2 records
+                // for the same country (different datasources) which both
+                // map to the same `outage-${countryCode}` id. Without this
+                // the second entities.add throws "An entity with id X
+                // already exists" and bails out of the whole render pass.
+                const seenIodaCountries = new Set<string>();
                 for (const o of outages) {
+                    if (seenIodaCountries.has(o.countryCode)) continue;
+                    seenIodaCountries.add(o.countryCode);
                     const position = safeCartesianFromDegrees(o.lng, o.lat, 50);
                     if (!position) continue;
                     const isCritical = o.level === 'critical';

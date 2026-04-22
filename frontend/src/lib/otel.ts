@@ -13,14 +13,13 @@ import { context, trace, SpanStatusCode, type Span, type Tracer } from '@opentel
 import { metrics, type Histogram, type Counter } from '@opentelemetry/api';
 import { resourceFromAttributes } from '@opentelemetry/resources';
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from '@opentelemetry/semantic-conventions';
-import { WebTracerProvider } from '@opentelemetry/sdk-trace-web';
+import { WebTracerProvider, StackContextManager } from '@opentelemetry/sdk-trace-web';
 import { BatchSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { MeterProvider, PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-http';
-import { ZoneContextManager } from '@opentelemetry/context-zone';
 
-import { OTEL_ENABLED, OTEL_ENDPOINT } from './config';
+import { OTEL_ENABLED, OTEL_ENDPOINT, API_URL } from './config';
 
 const SERVICE_NAME = 'openspy-frontend';
 const SERVICE_VERSION = '1.0.0';
@@ -73,7 +72,7 @@ function safeInit(): void {
             ],
         });
         tracerProvider.register({
-            contextManager: new ZoneContextManager(),
+            contextManager: new StackContextManager(),
         });
 
         const metricExporter = new OTLPMetricExporter({
@@ -159,6 +158,75 @@ function safeInit(): void {
 }
 
 if (typeof window !== 'undefined') {
+    // Global safety net for unhandled promise rejections. Added 2026-04-22
+    // after a `Promise.reject(undefined)` somewhere in the render path
+    // hit zone.js's rejection reporter on every requestAnimationFrame,
+    // producing reentrant CesiumWidget.render crashes and frozen scenes.
+    //
+    // We register in the capture phase so zone.js' own listener sees a
+    // pre-handled event and stops the reentrant loop. When the reason
+    // is something truthy we still emit a loud console.error with a
+    // stable prefix so the real source shows up in browser-monitor logs.
+    // Best-effort ship of error events to /api/perf-event so the backend
+    // writes them to var/perf-events.jsonl — lets the agent read what the
+    // user's browser saw without keeping a headful monitor alive.
+    const shipUiError = (kind: string, data: Record<string, any>) => {
+        try {
+            const body = JSON.stringify({
+                event: kind,
+                source: 'frontend',
+                ts: new Date().toISOString(),
+                ...data,
+            });
+            // sendBeacon never blocks, never throws, never races a page unload.
+            if (navigator.sendBeacon) {
+                const blob = new Blob([body], { type: 'application/json' });
+                navigator.sendBeacon(`${API_URL}/api/perf-event`, blob);
+                return;
+            }
+            void fetch(`${API_URL}/api/perf-event`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body,
+                keepalive: true,
+            }).catch(() => undefined);
+        } catch { /* never let telemetry break rendering */ }
+    };
+
+    window.addEventListener('unhandledrejection', (event) => {
+        const reason = (event as PromiseRejectionEvent).reason;
+        if (reason === undefined || reason === null) {
+            // Silent swallow for the pathological throw-undefined case.
+            // Also suppresses the zone.js reentrant path that was producing
+            // per-frame CesiumWidget.render crashes (2026-04-22 regression).
+            shipUiError('ui.unhandled_rejection', {
+                reason: String(reason),
+                swallowed: true,
+            });
+            event.preventDefault();
+            return;
+        }
+        const msg = reason?.message ?? String(reason);
+        const stack = reason?.stack ?? '(no stack)';
+        console.error('[unhandled-rejection]', msg, '\n', stack);
+        shipUiError('ui.unhandled_rejection', {
+            message: String(msg).slice(0, 500),
+            stack: String(stack).slice(0, 2000),
+        });
+        event.preventDefault();
+    }, true);
+
+    window.addEventListener('error', (event) => {
+        const err = event.error;
+        shipUiError('ui.error', {
+            message: event.message?.slice(0, 500),
+            filename: event.filename,
+            lineno: event.lineno,
+            colno: event.colno,
+            stack: err?.stack?.slice(0, 2000),
+        });
+    }, true);
+
     safeInit();
 }
 

@@ -77,15 +77,14 @@ export function useGFWLayer(viewer: Cesium.Viewer | null) {
                             image: GFW_ICON,
                             scale: 1.0,
                         },
-                        ellipse: {
-                            semiMinorAxis: 40_000,
-                            semiMajorAxis: 40_000,
-                            material: new Cesium.ColorMaterialProperty(Cesium.Color.PURPLE.withAlpha(0.06)),
-                            height: 0,
-                            outline: true,
-                            outlineColor: Cesium.Color.PURPLE.withAlpha(0.25),
-                            outlineWidth: 1,
-                        },
+                        // 40km ellipse removed 2026-04-22 as part of the
+                        // perf experiment: with ~5000 GFW entities the
+                        // Entity-attached ellipse was one of the main
+                        // drivers behind Cesium typed-array allocations
+                        // and per-frame BillboardVisualizer.update work.
+                        // The circle is a few pixels at global zoom. Re-
+                        // introduce via PrimitiveCollection+EllipseGeometry
+                        // if close-zoom context ever needs it.
                     });
                 }
             } catch (err: any) {
