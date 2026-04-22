@@ -6,6 +6,7 @@ import { API_URL } from '../lib/config';
 import { perfLog } from '../lib/perf-log';
 import { getAviIcon, getShipIcon, DARK_VESSEL_ICON } from '../icons/map-icons';
 import { safeCartesianFromDegrees } from './position-utils';
+import { TrailBatcher } from './TrailBatcher';
 
 declare global {
     interface Window {
@@ -189,6 +190,19 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
         viewer.dataSources.add(darkVesselDs);
         darkVesselDsRef.current = darkVesselDs;
 
+        // --- Live trails: dedicated TrailBatcher (AD-3) ---
+        // satellite-live shard is intentionally omitted from this iteration:
+        // satellite positions are computed client-side in useSatellitesLayer
+        // from TLEs and don't flow through this socket handler. Adding a
+        // satellite-live shard here without a producer would create dead
+        // state. Left for a follow-up that plumbs TLE-derived positions
+        // into TrailBatcher from useSatellitesLayer.
+        const liveBatcher = new TrailBatcher(viewer, {
+            shardKeys: ['aircraft-live', 'vessel-live'],
+            maxSamplesPerTrail: 200,
+            trailLengthSeconds: 1800,
+        });
+
         // websocket-only: under COEP: credentialless the polling fallback can
         // get stuck silently (handshake succeeds, no events delivered).
         // WebSocket handshake works because backend emits CORP on the
@@ -259,6 +273,7 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
         const staleCleanup = setInterval(() => {
             if (useTimelineStore.getState().mode === 'playback') return;
             const now = Date.now();
+            liveBatcher.tickClock(now / 1000);
             const sources = useTimelineStore.getState().sources;
 
             // Aviation eviction — only runs when the source is actively
@@ -276,6 +291,7 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                         }
                         aircraftMetaMap.delete(id);
                         aviLastSeen.delete(id);
+                        liveBatcher.removeTrail(id, 'aircraft-live');
                     }
                 });
             }
@@ -293,6 +309,7 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                         }
                         vesselMetaMap.delete(id);
                         marLastSeen.delete(id);
+                        liveBatcher.removeTrail(id, 'vessel-live');
                     }
                 });
             }
@@ -330,6 +347,7 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
             lastProcessStartedAt = new Date().toISOString();
             publishLiveStats();
             const now = Date.now();
+            liveBatcher.tickClock(now / 1000);
             const initialState = useTimelineStore.getState();
             if (initialState.mode === 'playback') return;
             // Sources + subtype filters are re-read from the store on
@@ -378,6 +396,21 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                     } else {
                         bb.position = pos;
                         bb.rotation = rotation;
+                    }
+
+                    // Append live trail sample (aircraft altitude in feet → meters).
+                    // Gated on `showTrajectories` — at 7K aircraft + 22K vessels
+                    // per broadcast the PolylineCollection-backed MVP TrailBatcher
+                    // drops ~20% FPS without this guard. Custom-Primitive follow-up
+                    // will lift the cap.
+                    if (useTimelineStore.getState().showTrajectories
+                        && Number.isFinite(ac.lng) && Number.isFinite(ac.lat)) {
+                        liveBatcher.upsertTrail('aircraft-live', ac.id, [[
+                            ac.lng,
+                            ac.lat,
+                            Number.isFinite(ac.alt) ? ac.alt * 0.3048 : null,
+                            Math.floor(now / 1000),
+                        ]]);
                     }
 
                     aircraftMetaMap.set(ac.id, {
@@ -451,6 +484,16 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                         bb.image = getShipSVG(v.type);
                     }
                     bb.show = showVessel;
+                }
+
+                if (useTimelineStore.getState().showTrajectories
+                    && Number.isFinite(v.lng) && Number.isFinite(v.lat)) {
+                    liveBatcher.upsertTrail('vessel-live', v.id, [[
+                        v.lng,
+                        v.lat,
+                        null,
+                        Math.floor(now / 1000),
+                    ]]);
                 }
 
                 vesselMetaMap.set(v.id, {
@@ -598,6 +641,13 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
         const unsubscribeModeAbort = useTimelineStore.subscribe((state, prev) => {
             if (state.mode === 'playback' && prev.mode !== 'playback') {
                 snapshotAbort.abort();
+                // Hide live-mode trail shards during historical playback so
+                // only the replay TrailBatcher paints its own shard.
+                liveBatcher.setShardVisible('aircraft-live', false);
+                liveBatcher.setShardVisible('vessel-live', false);
+            } else if (state.mode !== 'playback' && prev.mode === 'playback') {
+                liveBatcher.setShardVisible('aircraft-live', true);
+                liveBatcher.setShardVisible('vessel-live', true);
             }
         });
         if (shouldSkipBootstrap) {
@@ -644,6 +694,7 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                 viewer.scene.primitives.remove(maritimeBillboards);
                 viewer.dataSources.remove(darkVesselDs);
             }
+            liveBatcher.dispose();
             aviBillboardsRef.current = null;
             maritimeBillboardsRef.current = null;
             maritimeBillboardMap.current.clear();

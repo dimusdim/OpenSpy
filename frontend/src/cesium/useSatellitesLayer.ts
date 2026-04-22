@@ -4,7 +4,7 @@ import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { useSecondaryLoadGate } from './useSecondaryLoadGate';
 import { API_URL } from '../lib/config';
-import { getSatIcon } from '../icons/map-icons';
+import { getSatBillboardImage } from '../icons/map-icons';
 import { isFiniteCartesian } from './position-utils';
 import { createSatellitePositionsSAB, type SatellitePositionsSAB } from './satellitePositionsSAB';
 import {
@@ -212,9 +212,11 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                     satelliteMetaMap.set(entityId, meta);
 
                     // Create billboard (initially at 0,0,0 — Worker will set real position)
+                    const icon = await getSatBillboardImage(sat.type, isRecon);
+                    if (!active) return;
                     const bb = bc.add({
                         position: Cesium.Cartesian3.ZERO,
-                        image: getSatIcon(sat.type, isRecon),
+                        image: icon,
                         scale: isRecon ? 1.8 : 1.4,
                         show: false, // hidden until first Worker tick
                         id: entityId,

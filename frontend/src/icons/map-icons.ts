@@ -356,6 +356,46 @@ export function getSatIcon(type: string, isRecon?: boolean): string {
   return SAT_ICONS[type] || SAT_ICONS.civilian;
 }
 
+const SAT_BILLBOARD_ICON_SIZE = 32;
+const satBillboardImageCache = new Map<string, Promise<HTMLImageElement>>();
+
+function loadSatelliteBillboardImage(uri: string): Promise<HTMLImageElement> {
+  if (typeof Image === 'undefined') {
+    return Promise.reject(new Error('Satellite billboard images require a browser Image implementation.'));
+  }
+
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.decoding = 'async';
+    image.onload = () => {
+      image.width = image.naturalWidth || SAT_BILLBOARD_ICON_SIZE;
+      image.height = image.naturalHeight || SAT_BILLBOARD_ICON_SIZE;
+      resolve(image);
+    };
+    image.onerror = () => {
+      reject(new Error('Failed to decode satellite billboard icon.'));
+    };
+    image.src = uri;
+  });
+}
+
+/**
+ * Resolve satellites to a fully loaded image so Cesium skips its string-URL
+ * fetch/decode path and always receives explicit pixel dimensions.
+ */
+export function getSatBillboardImage(type: string, isRecon?: boolean): Promise<HTMLImageElement> {
+  const uri = getSatIcon(type, isRecon);
+  const cached = satBillboardImageCache.get(uri);
+  if (cached) return cached;
+
+  const pending = loadSatelliteBillboardImage(uri).catch((error) => {
+    satBillboardImageCache.delete(uri);
+    throw error;
+  });
+  satBillboardImageCache.set(uri, pending);
+  return pending;
+}
+
 // ==================== Infrastructure icons ==================================
 // 32×32 output, 24×24 viewBox — uses fill="none" stroke variant
 
