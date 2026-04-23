@@ -1419,6 +1419,8 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                     slots: replaySatelliteApplySlotsRef.current,
                     epochMs: replaySatelliteLastEpochMsRef.current,
                 }),
+                applyVisibility: true,
+                applyMeta: true,
             });
         }
         requestSceneRender();
@@ -1613,12 +1615,21 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
         const state = rebuildStateFromTilePayloads(atIso, payloads);
         const tBuild = performance.now();
         const itemCount = payloads.reduce((acc, p) => acc + (p.items?.length || 0), 0);
+        const snapshotEntities = payloads.reduce((acc, p) => acc + (p.snapshot?.entities?.length || 0), 0);
+        const snapshotEvents = payloads.reduce((acc, p) => acc + (p.snapshot?.events?.length || 0), 0);
+        const snapshotAssets = payloads.reduce((acc, p) => acc + (p.snapshot?.assets?.length || 0), 0);
         perfLog('replay.layer.sub_stages', {
             layer: layerId,
             tilesMs: Math.round(tNetEnd - tNet),
             rebuildMs: Math.round(tBuild - tNetEnd),
             tileCount: payloads.length,
             items: itemCount,
+            snapshotEntities,
+            snapshotEvents,
+            snapshotAssets,
+            rebuiltEntities: state.entities.length,
+            rebuiltEvents: state.events.length,
+            rebuiltAssets: state.assets.length,
         });
         return state;
     };
@@ -2262,7 +2273,28 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
     }, [mode, playbackKind, subtypeVisibility, sourceVisibility, isolatedEntityId]);
 
     useEffect(() => {
-        if (!viewer || mode !== 'playback' || playbackKind !== 'historical') return;
+        perfLog('replay.effect.enter', {
+            hasViewer: Boolean(viewer),
+            mode,
+            playbackKind,
+            replaySeekVersion,
+            lastAppliedSeekVersion: lastAppliedSeekVersionRef.current,
+            activeReplayLayersCount: activeReplayLayers.length,
+            activeReplayLayers: activeReplayLayers.slice(0, 15),
+            layersKey: layersKey.slice(0, 120),
+            layersKeyRef: layersKeyRef.current.slice(0, 120),
+            lastAppliedTime: lastAppliedTimeRef.current,
+            replayBusy: replayBusyRef.current,
+        });
+        if (!viewer || mode !== 'playback' || playbackKind !== 'historical') {
+            perfLog('replay.effect.exit', {
+                reason: 'gate-failed',
+                hasViewer: Boolean(viewer),
+                mode,
+                playbackKind,
+            });
+            return;
+        }
         const stateCurrentTime = useTimelineStore.getState().currentTime;
         const layersChanged = layersKeyRef.current !== layersKey;
         if (!seekRequestRef.current && layersChanged && lastAppliedTimeRef.current) {
@@ -2273,6 +2305,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
         }
         const explicitSeekRequest = seekRequestRef.current;
         if (activeReplayLayers.length === 0) {
+            perfLog('replay.effect.exit', { reason: 'no-active-layers' });
             clearReplay();
             lastAppliedTimeRef.current = null;
             lastAppliedSeekVersionRef.current = replaySeekVersion;
@@ -2289,6 +2322,13 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
         const manualSeekRequested = replaySeekVersion !== lastAppliedSeekVersionRef.current || Boolean(explicitSeekRequest);
         const hasHistoricalFrame = Boolean(previousIso);
         if (!hasHistoricalFrame && !manualSeekRequested) {
+            perfLog('replay.effect.exit', {
+                reason: 'no-seek-no-frame',
+                replaySeekVersion,
+                lastAppliedSeekVersion: lastAppliedSeekVersionRef.current,
+                hasHistoricalFrame,
+                previousIso,
+            });
             return;
         }
         if (replayBusyRef.current) {
@@ -2338,6 +2378,15 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
         const isCancelled = () => cancelVersion !== replayCancelVersionRef.current;
 
         const fetchReplay = async () => {
+            const tFetchReplayStart = performance.now();
+            perfLog('replay.fetch.start', {
+                currentIso,
+                interactiveCount: interactiveReplayLayers.length,
+                interactive: interactiveReplayLayers.slice(0, 4),
+                sortedCount: sortedReplayLayers.length,
+                cancelVersion,
+                currentCancelVersion: replayCancelVersionRef.current,
+            });
             setReplayError(null);
             if (typeof performance !== 'undefined') {
                 performance.mark('replay-seek-manifest:start');
@@ -2355,14 +2404,25 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
             const primaryManifestPromise = getWindowManifest(interactiveReplayLayers, currentIso, 0);
             const fullManifestPromise = getWindowManifest(sortedReplayLayers, currentIso);
             const primaryManifest = await primaryManifestPromise;
+            perfLog('replay.fetch.primary_manifest_done', {
+                ms: Math.round(performance.now() - tFetchReplayStart),
+                layerKeys: Object.keys(primaryManifest.layers).slice(0, 8),
+                cancelled: isCancelled(),
+            });
             if (typeof performance !== 'undefined') {
                 performance.mark('replay-seek-manifest:end');
                 performance.measure('replay-seek-manifest', 'replay-seek-manifest:start', 'replay-seek-manifest:end');
             }
             if (isCancelled()) return;
             const manifest = await fullManifestPromise;
+            perfLog('replay.fetch.full_manifest_done', {
+                ms: Math.round(performance.now() - tFetchReplayStart),
+                layerKeys: Object.keys(manifest.layers).slice(0, 8),
+                cancelled: isCancelled(),
+            });
             if (isCancelled()) return;
             scheduleManifestPrefetch(sortedReplayLayers, currentIso);
+            perfLog('replay.fetch.after_prefetch_schedule', { shouldSeek, interactiveCount: interactiveReplayLayers.length });
             const fetchLayerState = async (layerId: string, options?: { renderChunks?: boolean; usePrimaryManifest?: boolean }) => {
                 if (typeof performance !== 'undefined') {
                     performance.mark(`replay-seek-sync:${layerId}:start`);
@@ -2534,28 +2594,65 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                     if (isCancelled() || eagerResults.some((r) => !r)) return;
                     perfLog('replay.eager_done', { ms: Math.round(performance.now() - eagerStart) });
                     const bgStart = performance.now();
-                    // Codex round-7 fix (2026-04-21): serialize background
-                    // layer hydration small-first instead of Promise.all.
-                    // Parallel hydration of cable+pipeline+airspace was
-                    // causing competing main-thread work (frame_render
-                    // spikes 1.2-3.6 s, longtasks 4.2-6.8 s during deferred
-                    // window). small-first amortizes Cesium primitive build
-                    // across frames so the user sees layers populate
-                    // progressively rather than freeze-then-pop.
-                    // Sort by manifest bytes — smallest tile total first.
+                    // 2026-04-23 hybrid: fetch+decode bg layers in PARALLEL
+                    // (network/worker bound — no contention), then apply
+                    // small-first SEQUENTIAL (main thread polygon rebuild
+                    // contends). Removes serial HTTP wait while keeping
+                    // Cesium primitive build isolated so airspace/pipeline
+                    // don't dog-pile each other with 5s longtasks.
                     const bgLayersBySize = [...backgroundDeferredReplayLayers].sort((a, b) => {
                         const aBytes = (manifest.layers[a]?.tiles ?? []).reduce((s, t) => s + (t.bytes || 0), 0);
                         const bBytes = (manifest.layers[b]?.tiles ?? []).reduce((s, t) => s + (t.bytes || 0), 0);
                         return aBytes - bBytes;
                     });
+                    const bgFetchT0 = performance.now();
+                    // Kick off all fetches in parallel — as each resolves its
+                    // state is held awaiting sequential apply.
+                    const fetchPromises = new Map<string, Promise<{ kind: 'satellite'; items: ReplaySatelliteTleItem[] } | { kind: 'tile'; state: ReplayStateResponse } | null>>();
+                    for (const layerId of bgLayersBySize) {
+                        if (layerId === 'satellite') {
+                            fetchPromises.set(layerId, (async () => {
+                                const t0 = performance.now();
+                                try {
+                                    const tle = await loadSatelliteTleState(currentIso);
+                                    perfLog('replay.bg_fetch', { layer: layerId, ms: Math.round(performance.now() - t0), items: tle.items?.length ?? 0 });
+                                    return { kind: 'satellite' as const, items: tle.items || [] };
+                                } catch { return null; }
+                            })());
+                        } else {
+                            fetchPromises.set(layerId, (async () => {
+                                const t0 = performance.now();
+                                try {
+                                    const state = await loadLayerStateFromTiles(layerId, currentIso, manifest);
+                                    perfLog('replay.bg_fetch', { layer: layerId, ms: Math.round(performance.now() - t0), entities: state.entities.length, events: state.events.length, assets: state.assets.length });
+                                    return { kind: 'tile' as const, state };
+                                } catch { return null; }
+                            })());
+                        }
+                    }
+                    perfLog('replay.bg_fetch_parallel_kickoff', { layers: bgLayersBySize, kickoffMs: Math.round(performance.now() - bgFetchT0) });
+
                     const bgResults: boolean[] = [];
                     for (const layerId of bgLayersBySize) {
-                        if (isCancelled()) {
-                            bgResults.push(false);
-                            break;
-                        }
+                        if (isCancelled()) { bgResults.push(false); break; }
                         const t0 = performance.now();
-                        const ok = await fetchLayerState(layerId, { renderChunks: false });
+                        const fetched = await fetchPromises.get(layerId)!;
+                        if (!fetched) { bgResults.push(false); continue; }
+                        let ok = false;
+                        if (fetched.kind === 'satellite') {
+                            ok = await applySatelliteTleState(currentIso, fetched.items, isCancelled);
+                            if (ok) {
+                                lastAppliedLayerTimeRef.current.set(layerId, currentIso);
+                                lastBufferedLayerTimeRef.current.set(layerId, currentIso);
+                            }
+                        } else {
+                            ok = await applyLayerState(layerId, fetched.state, isCancelled, undefined, { renderChunks: false });
+                            if (ok && !isCancelled()) {
+                                lastAppliedLayerTimeRef.current.set(layerId, currentIso);
+                                lastBufferedLayerTimeRef.current.set(layerId, manifest.to);
+                                if (REPLAY_MOVING_LAYERS.has(layerId)) syncReplayMotionTracks(currentIso);
+                            }
+                        }
                         perfLog('replay.bg_layer', { layer: layerId, ms: Math.round(performance.now() - t0), ok });
                         bgResults.push(ok);
                     }

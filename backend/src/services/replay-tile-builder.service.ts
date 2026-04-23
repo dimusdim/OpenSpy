@@ -107,6 +107,8 @@ function parseBboxKey(bbox?: [number, number, number, number]): string | null {
 
 export class ReplayTileBuilderService {
     private readonly manifestBucketCache = new Map<string, ReplayManifestResponse>();
+    private readonly hotBucketRebuildInFlight = new Map<string, Promise<void>>();
+    private backgroundRebuildChain: Promise<void> = Promise.resolve();
 
     constructor(
         private readonly database: DatabaseService,
@@ -518,10 +520,25 @@ export class ReplayTileBuilderService {
                             indexed?.built_at || null,
                         );
                         if (!stale) continue;
-                        try {
-                            await this.ensureTile({ layerId, z, x: coord.x, y: coord.y, tBucket });
-                        } catch (error) {
-                            console.error('[ReplayTiles] stale-bucket ensure failed:', error);
+                        // Future-open bucket with no data yet: skip entirely.
+                        // Ensuring an empty tile wastes DB queries + msgpack
+                        // encode with zero payload; live writer populates the
+                        // bucket naturally once data arrives.
+                        const tBucketStartMs = new Date(tBucket).getTime();
+                        if (!indexed && Date.now() < tBucketStartMs) continue;
+                        if (!this.hotBucketRebuildInFlight.has(key)) {
+                            const rebuild = async () => {
+                                try {
+                                    await this.ensureTile({ layerId, z, x: coord.x, y: coord.y, tBucket });
+                                } catch (error) {
+                                    console.error('[ReplayTiles] background ensure failed:', error);
+                                } finally {
+                                    this.hotBucketRebuildInFlight.delete(key);
+                                }
+                            };
+                            const promise = this.backgroundRebuildChain.then(rebuild);
+                            this.backgroundRebuildChain = promise.catch(() => undefined);
+                            this.hotBucketRebuildInFlight.set(key, promise);
                         }
                     }
                 }

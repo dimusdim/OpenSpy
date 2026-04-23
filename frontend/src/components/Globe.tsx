@@ -20,6 +20,7 @@ import { useConflictsLayer } from '../cesium/useConflictsLayer';
 import { useAirspaceLayer, airspaceMetaMap, airspaceInstanceToLogical } from '../cesium/useAirspaceLayer';
 import { useGFWLayer } from '../cesium/useGFWLayer';
 import { replayMetaMap, useReplayOverlay } from '../cesium/useReplayOverlay';
+import { perfLog } from '../lib/perf-log';
 
 if (typeof window !== 'undefined') {
     (window as any).CESIUM_BASE_URL = '/cesium';
@@ -111,6 +112,7 @@ export default function Globe() {
             if (historicalDriverFrame) {
                 cancelAnimationFrame(historicalDriverFrame);
                 historicalDriverFrame = 0;
+                perfLog('replay.driver.stop', { reason: 'explicit' });
             }
         };
         const setHistoricalClock = (timeMs: number, syncStore: boolean) => {
@@ -131,18 +133,43 @@ export default function Globe() {
             historicalDriverAnchorWallMs = performance.now();
             historicalDriverAnchorSimMs = simMs;
             historicalDriverSpeed = speed;
+            perfLog('replay.driver.arm', {
+                simIso: new Date(simMs).toISOString(),
+                speed,
+                wallMs: historicalDriverAnchorWallMs,
+            });
         };
+        let historicalDriverTickCount = 0;
+        let historicalDriverLastLogMs = 0;
         const startHistoricalDriver = () => {
-            if (historicalDriverFrame) return;
+            if (historicalDriverFrame) {
+                perfLog('replay.driver.start', { result: 'already-running' });
+                return;
+            }
+            perfLog('replay.driver.start', {
+                result: 'new-frame',
+                anchorSimIso: new Date(historicalDriverAnchorSimMs).toISOString(),
+                speed: historicalDriverSpeed,
+            });
+            historicalDriverTickCount = 0;
+            historicalDriverLastLogMs = 0;
             const tick = () => {
                 if (v.isDestroyed()) {
                     historicalDriverFrame = 0;
+                    perfLog('replay.driver.exit', { reason: 'viewer-destroyed' });
                     return;
                 }
                 const state = useTimelineStore.getState();
                 const historicalPlaybackRunning = state.mode === 'playback' && state.playbackKind === 'historical' && state.isPlaying;
                 if (!historicalPlaybackRunning) {
                     historicalDriverFrame = 0;
+                    perfLog('replay.driver.exit', {
+                        reason: 'not-running',
+                        mode: state.mode,
+                        playbackKind: state.playbackKind,
+                        isPlaying: state.isPlaying,
+                        tickCount: historicalDriverTickCount,
+                    });
                     return;
                 }
                 const nowPerf = performance.now();
@@ -152,9 +179,26 @@ export default function Globe() {
                 const clampedMs = Math.min(targetMs, liveEdgeMs);
                 const shouldSyncStore = nowPerf - historicalLastStoreSyncAt >= 100;
                 setHistoricalClock(clampedMs, shouldSyncStore);
+                historicalDriverTickCount += 1;
+                if (nowPerf - historicalDriverLastLogMs >= 500) {
+                    historicalDriverLastLogMs = nowPerf;
+                    perfLog('replay.driver.tick', {
+                        tickCount: historicalDriverTickCount,
+                        elapsedWallMs: Math.round(elapsedMs),
+                        targetIso: new Date(targetMs).toISOString(),
+                        clampedIso: new Date(clampedMs).toISOString(),
+                        liveEdgeDeltaMs: Math.round(liveEdgeMs - targetMs),
+                        speed: historicalDriverSpeed,
+                        shouldSyncStore,
+                    });
+                }
                 if (targetMs >= liveEdgeMs) {
                     useTimelineStore.getState().setIsPlaying(false);
                     historicalDriverFrame = 0;
+                    perfLog('replay.driver.exit', {
+                        reason: 'reached-live-edge',
+                        tickCount: historicalDriverTickCount,
+                    });
                     return;
                 }
                 historicalDriverFrame = requestAnimationFrame(tick);
@@ -192,6 +236,12 @@ export default function Globe() {
                 v.clock.clockStep = Cesium.ClockStep.SYSTEM_CLOCK_MULTIPLIER;
                 v.clock.multiplier = 1.0;
                 v.clock.shouldAnimate = state.isPlaying;
+                perfLog('replay.driver.sync', {
+                    branch: 'not-historical',
+                    mode: state.mode,
+                    playbackKind: state.playbackKind,
+                    isPlaying: state.isPlaying,
+                });
                 return;
             }
 
@@ -200,9 +250,18 @@ export default function Globe() {
             v.clock.multiplier = state.speedMultiplier;
 
             if (state.isPlaying) {
+                perfLog('replay.driver.sync', {
+                    branch: 'arm-and-start',
+                    currentIso: state.currentTime.toISOString(),
+                    speed: state.speedMultiplier,
+                });
                 armHistoricalDriver(state.currentTime.getTime(), state.speedMultiplier);
                 startHistoricalDriver();
             } else {
+                perfLog('replay.driver.sync', {
+                    branch: 'paused-set-clock',
+                    currentIso: state.currentTime.toISOString(),
+                });
                 stopHistoricalDriver();
                 setHistoricalClock(state.currentTime.getTime(), false);
             }

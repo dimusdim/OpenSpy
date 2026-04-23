@@ -180,19 +180,10 @@ export default function TimelinePlayer() {
 
     const toggleMode = () => {
         if (mode === 'live') {
-            setMode('playback');
-            setPlaybackKind('historical');
-            setIsPlaying(false);
+            useTimelineStore.getState().enterHistoricalReplay();
             document.dispatchEvent(new CustomEvent('timeline-ctrl', { detail: { action: 'pause' }}));
         } else {
-            setMode('live');
-            setPlaybackKind(null);
-            setSpeedMultiplier(1);
-            setIsPlaying(true);
-            setCurrentTime(new Date(), {
-                silent: true,
-                reason: 'mode-change',
-            });
+            useTimelineStore.getState().exitToLive();
             document.dispatchEvent(new CustomEvent('timeline-ctrl', { detail: { action: 'speed', value: 1.0 }}));
             document.dispatchEvent(new CustomEvent('timeline-ctrl', { detail: { action: 'play' }}));
         }

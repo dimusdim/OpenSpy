@@ -281,6 +281,8 @@ interface TimelineStore {
   setCurrentTime: (time: Date, options?: CurrentTimeUpdateOptions) => void;
   currentTimeUpdate: CurrentTimeUpdateMeta;
   markReplaySeek: () => void;
+  enterHistoricalReplay: () => void;
+  exitToLive: () => void;
   setReplayHydrating: (hydrating: boolean) => void;
   setSpeedMultiplier: (speed: number) => void;
   setIsPlaying: (playing: boolean) => void;
@@ -492,6 +494,24 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
       },
   })),
   markReplaySeek: () => set((state) => ({ replaySeekVersion: state.replaySeekVersion + 1 })),
+  enterHistoricalReplay: () => set((state) => ({
+      isPlaying: false,
+      mode: 'playback',
+      playbackKind: 'historical',
+      replaySeekVersion: state.replaySeekVersion + 1,
+  })),
+  exitToLive: () => set((state) => ({
+      mode: 'live',
+      playbackKind: null,
+      speedMultiplier: 1,
+      isPlaying: true,
+      currentTime: new Date(),
+      currentTimeUpdate: {
+          seq: state.currentTimeUpdate.seq + 1,
+          silent: true,
+          reason: 'mode-change',
+      },
+  })),
   setReplayHydrating: (replayHydrating) => set({ replayHydrating }),
   setSpeedMultiplier: (speedMultiplier) => set({ speedMultiplier }),
   setIsPlaying: (isPlaying) => set({ isPlaying }),
