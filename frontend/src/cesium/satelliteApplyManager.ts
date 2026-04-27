@@ -18,6 +18,13 @@ export type SatelliteApplySlot = {
     targetId: string;
     billboard: Cesium.Billboard;
     scratch: Cesium.Cartesian3;
+    // Optional per-slot Cartographic scratch. When present, updateMeta should
+    // pass it as the 3rd arg to Cesium.Cartographic.fromCartesian to avoid
+    // allocating a fresh Cartographic per billboard per frame.
+    cartoScratch?: Cesium.Cartographic;
+    // Wall-clock timestamp of the last updateMeta invocation. Used by callers
+    // that throttle lat/lng recomputation (metadata doesn't need 60fps freshness).
+    lastMetaUpdateMs?: number;
     getVisible?: () => boolean;
     updateMeta?: (position: Cesium.Cartesian3) => void;
 };
@@ -53,7 +60,7 @@ type MutableBillboard = Cesium.Billboard & {
 // Cesium 1.140.0 private constant: typings omit it, but runtime exposes POSITION_INDEX for dirty updates.
 const BILLBOARD_POSITION_INDEX = (Cesium.Billboard as unknown as { POSITION_INDEX?: number }).POSITION_INDEX ?? 1;
 
-function applyFastBillboardPosition(slot: SatelliteApplySlot, x: number, y: number, z: number) {
+export function applyFastBillboardPosition(slot: SatelliteApplySlot, x: number, y: number, z: number) {
     const billboard = slot.billboard as MutableBillboard;
     const position = billboard._position;
     const actualPosition = billboard._actualPosition;
@@ -129,6 +136,14 @@ class SatelliteApplyManager {
 
         const view = sab.view;
         let appliedCount = 0;
+        const nowMs = performance.now();
+        // Throttle updateMeta to ~250 ms per slot. `updateMeta` recomputes
+        // lat/lng/alt for hover/details panels via Cesium.Cartographic.
+        // Before throttling, 5000 satellite slots (and 30k motion slots)
+        // paid that cost on every epoch update — a large main-thread cost
+        // even after the cartoScratch fix removed the per-slot allocation.
+        // Hover panels don't need 60 fps metadata freshness.
+        const META_THROTTLE_MS = 250;
         for (let slotIndex = 0; slotIndex < slots.length; slotIndex += 1) {
             const slot = slots[slotIndex];
             const offset = slot.index * 3;
@@ -138,7 +153,13 @@ class SatelliteApplyManager {
             if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
             applyFastBillboardPosition(slot, x, y, z);
             if (applyVisibility && slot.getVisible) slot.billboard.show = slot.getVisible();
-            if (applyMeta) slot.updateMeta?.(slot.scratch);
+            if (applyMeta && slot.updateMeta) {
+                const lastMeta = slot.lastMetaUpdateMs ?? 0;
+                if (nowMs - lastMeta >= META_THROTTLE_MS) {
+                    slot.updateMeta(slot.scratch);
+                    slot.lastMetaUpdateMs = nowMs;
+                }
+            }
             appliedCount += 1;
         }
 

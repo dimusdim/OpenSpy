@@ -6,7 +6,7 @@
 //   { type: 'init', satellites: SatInit[] }
 //     Parse TLE, build satrec cache. Reply: { type: 'ready', count }
 //
-//   { type: 'propagate', epochMs: number, windowMinutes: number, stepSeconds: number }
+//   { type: 'propagate', epochMs: number, windowMinutes: number, stepSeconds: number, noradIds?: number[] }
 //     Full orbit for trails. Reply: { type: 'orbits', data: OrbitResult[] }
 //     Positions as Float64Array (Transferable, zero-copy).
 //
@@ -31,13 +31,25 @@ interface SatCached {
     satrec: satelliteJs.SatRec;
 }
 
+// MotionTrack carries the full trajectory for one entity inside the current
+// replay window. Previously we stored only (previous, next) — a single pair
+// of samples around the initial atMs — which meant at high playback speeds
+// atMs would quickly overtake nextAtMs and the worker would freeze the
+// position on `next` until the next cadence refresh on the main thread.
+// That showed up as "aircraft don't move" at 30× playback because the
+// aircraft refresh cadence was 90 virtual seconds (~3 s real) while the
+// trajectory's next sample was typically only 20–60 s away.
+//
+// The array form lets motion-tick do a binary search for the surrounding
+// samples at any atMs in the window, so movement is smooth at any speed
+// and cadence only needs to fire when the window shifts.
 interface MotionTrack {
     index: number;
     targetId: string;
-    previousAtMs: number;
-    previous: [number, number, number];
-    nextAtMs: number | null;
-    next: [number, number, number] | null;
+    // Flat, ordered-ascending. sampleAtMs[i] corresponds to
+    // samplePositions[i*3 + {0,1,2}] = [x, y, z] in ECF metres.
+    sampleAtMs: Float64Array;
+    samplePositions: Float32Array;
 }
 
 let satellites: SatCached[] = [];
@@ -117,14 +129,20 @@ self.onmessage = (e: MessageEvent) => {
     }
 
     if (type === 'propagate') {
-        const { epochMs, windowMinutes, stepSeconds } = e.data;
+        const { epochMs, windowMinutes, stepSeconds, nonce } = e.data;
+        const requestedIds = Array.isArray(e.data.noradIds)
+            ? new Set<number>(e.data.noradIds.map((id: unknown) => Number(id)).filter((id: number) => Number.isFinite(id)))
+            : null;
         const startMs = epochMs - (windowMinutes / 2) * 60_000;
         const sampleCount = Math.ceil((windowMinutes * 60) / stepSeconds) + 1;
 
         const results: { noradId: number; positions: Float64Array; validSamples: number }[] = [];
         const transferables: ArrayBuffer[] = [];
 
-        for (const sat of satellites) {
+        const selected = requestedIds
+            ? satellites.filter((sat) => requestedIds.has(sat.noradId))
+            : satellites;
+        for (const sat of selected) {
             const buf = new Float64Array(sampleCount * 3);
             let valid = 0;
             for (let i = 0; i < sampleCount; i++) {
@@ -141,7 +159,7 @@ self.onmessage = (e: MessageEvent) => {
             transferables.push(buf.buffer);
         }
 
-        (self as any).postMessage({ type: 'orbits', results, sampleCount }, transferables);
+        (self as any).postMessage({ type: 'orbits', results, sampleCount, nonce }, transferables);
         return;
     }
 
@@ -167,22 +185,49 @@ self.onmessage = (e: MessageEvent) => {
             (self as any).postMessage({ type: 'motion-positions', epochMs: Date.now(), count: 0 });
             return;
         }
+        const scratch: [number, number, number] = [0, 0, 0];
         for (let i = 0; i < motionTracks.length; i += 1) {
             const track = motionTracks[i];
-            let value: [number, number, number] | null = null;
-            if (track.next && track.nextAtMs != null && track.nextAtMs > track.previousAtMs && atMs > track.previousAtMs && atMs < track.nextAtMs) {
-                const t = (atMs - track.previousAtMs) / (track.nextAtMs - track.previousAtMs);
-                value = [
-                    track.previous[0] + (track.next[0] - track.previous[0]) * t,
-                    track.previous[1] + (track.next[1] - track.previous[1]) * t,
-                    track.previous[2] + (track.next[2] - track.previous[2]) * t,
-                ];
-            } else if (track.next && track.nextAtMs != null && atMs >= track.nextAtMs) {
-                value = track.next;
-            } else {
-                value = track.previous;
+            const times = track.sampleAtMs;
+            const pos = track.samplePositions;
+            const n = times.length;
+            if (n === 0) {
+                writeMotionPosition(track.index, null);
+                continue;
             }
-            writeMotionPosition(track.index, value);
+            if (n === 1 || atMs <= times[0]) {
+                scratch[0] = pos[0];
+                scratch[1] = pos[1];
+                scratch[2] = pos[2];
+                writeMotionPosition(track.index, scratch);
+                continue;
+            }
+            if (atMs >= times[n - 1]) {
+                const o = (n - 1) * 3;
+                scratch[0] = pos[o];
+                scratch[1] = pos[o + 1];
+                scratch[2] = pos[o + 2];
+                writeMotionPosition(track.index, scratch);
+                continue;
+            }
+            // Binary search for the greatest index `lo` where times[lo] <= atMs.
+            let lo = 0;
+            let hi = n - 1;
+            while (lo + 1 < hi) {
+                const mid = (lo + hi) >>> 1;
+                if (times[mid] <= atMs) lo = mid;
+                else hi = mid;
+            }
+            const tPrev = times[lo];
+            const tNext = times[lo + 1];
+            const denom = tNext - tPrev;
+            const t = denom > 0 ? (atMs - tPrev) / denom : 0;
+            const oPrev = lo * 3;
+            const oNext = (lo + 1) * 3;
+            scratch[0] = pos[oPrev] + (pos[oNext] - pos[oPrev]) * t;
+            scratch[1] = pos[oPrev + 1] + (pos[oNext + 1] - pos[oPrev + 1]) * t;
+            scratch[2] = pos[oPrev + 2] + (pos[oNext + 2] - pos[oPrev + 2]) * t;
+            writeMotionPosition(track.index, scratch);
         }
         (self as any).postMessage({ type: 'motion-positions', epochMs: atMs, count: motionTracks.length });
     }

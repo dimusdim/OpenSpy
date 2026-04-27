@@ -70,6 +70,9 @@ interface FootprintConfig {
 // How often to post 'tick' to the Worker (ms). 2 seconds is smooth enough —
 // LEO satellites move ~15 km/s, so 2s = 30 km drift, sub-pixel at global zoom.
 const WORKER_TICK_INTERVAL = 2000;
+const LIVE_TRAIL_MAX_SATS = 900;
+const LIVE_TRAIL_WINDOW_MINUTES = 120;
+const LIVE_TRAIL_STEP_SECONDS = 180;
 
 function getSatelliteBillboardShow(
     state: ReturnType<typeof useTimelineStore.getState>,
@@ -104,8 +107,11 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
     // Bumped after Worker finishes initial orbit propagation
     const [satellitesLoadedTick, setSatellitesLoadedTick] = useState(0);
     const positionsSabRef = useRef<SatellitePositionsSAB | null>(null);
+    const positionsReadyRef = useRef(false);
     const positionScratchRef = useRef<Map<number, Cesium.Cartesian3>>(new Map());
     const applySlotsRef = useRef<SatelliteApplySlot[]>([]);
+    const trailRequestNonceRef = useRef(0);
+    const lastTrailKeyRef = useRef<string | null>(null);
 
     // Footprint state
     const footprintDsRef = useRef<Cesium.CustomDataSource | null>(null);
@@ -118,6 +124,82 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
     const requestSceneRender = () => {
         if (!viewer || viewer.isDestroyed()) return;
         viewer.scene.requestRender();
+    };
+
+    const removeTrailPrimitive = () => {
+        if (!viewer || viewer.isDestroyed() || !trailsPrimitiveRef.current) return;
+        viewer.scene.primitives.remove(trailsPrimitiveRef.current);
+        trailsPrimitiveRef.current = null;
+        lastTrailKeyRef.current = null;
+    };
+
+    const getViewportTrailNoradIds = (): number[] => {
+        const bc = billboardCollectionRef.current;
+        if (!viewer || viewer.isDestroyed() || !bc) return [];
+        const rect = viewer.camera.computeViewRectangle();
+        let south = -90;
+        let north = 90;
+        let west = -180;
+        let east = 180;
+        let hasRect = false;
+        if (rect) {
+            south = Cesium.Math.toDegrees(rect.south);
+            north = Cesium.Math.toDegrees(rect.north);
+            west = Cesium.Math.toDegrees(rect.west);
+            east = Cesium.Math.toDegrees(rect.east);
+            hasRect = Number.isFinite(south) && Number.isFinite(north) && Number.isFinite(west) && Number.isFinite(east);
+        }
+        const crossAM = hasRect && east < west;
+        const ids: number[] = [];
+        for (let i = 0; i < bc.length && ids.length < LIVE_TRAIL_MAX_SATS; i += 1) {
+            const bb = bc.get(i);
+            if (!bb || !bb.show) continue;
+            const meta = satelliteMetaMap.get(bb.id as string);
+            if (!meta || !Number.isFinite(meta.noradId)) continue;
+            if (hasRect) {
+                const carto = Cesium.Cartographic.fromCartesian(bb.position);
+                if (!carto) continue;
+                const lat = Cesium.Math.toDegrees(carto.latitude);
+                const lng = Cesium.Math.toDegrees(carto.longitude);
+                const inLat = lat >= south && lat <= north;
+                const inLng = crossAM ? lng >= west || lng <= east : lng >= west && lng <= east;
+                if (!inLat || !inLng) continue;
+            }
+            ids.push(meta.noradId);
+        }
+        if (ids.length > 0) return ids;
+        return satDataRef.current
+            .filter((sat) => Number.isFinite(Number(sat.noradId)))
+            .slice(0, LIVE_TRAIL_MAX_SATS)
+            .map((sat) => Number(sat.noradId));
+    };
+
+    const requestTrailRebuild = () => {
+        const worker = workerRef.current;
+        if (!worker) return;
+        const state = useTimelineStore.getState();
+        if (state.mode === 'playback' || !state.showTrajectories || !state.sources.satellites || !state.visibility.satellites) {
+            removeTrailPrimitive();
+            return;
+        }
+        const noradIds = getViewportTrailNoradIds();
+        if (noradIds.length === 0) {
+            removeTrailPrimitive();
+            return;
+        }
+        const trailKey = noradIds.join(',');
+        if (lastTrailKeyRef.current === trailKey && trailsPrimitiveRef.current) return;
+        lastTrailKeyRef.current = trailKey;
+        const nonce = trailRequestNonceRef.current + 1;
+        trailRequestNonceRef.current = nonce;
+        worker.postMessage({
+            type: 'propagate',
+            nonce,
+            noradIds,
+            epochMs: Date.now(),
+            windowMinutes: LIVE_TRAIL_WINDOW_MINUTES,
+            stepSeconds: LIVE_TRAIL_STEP_SECONDS,
+        });
     };
 
     // ---- Effect 1: BillboardCollection + trails primitive lifetime ----
@@ -166,6 +248,7 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
 
                 const sats = res.data as any[];
                 satDataRef.current = sats;
+                positionsReadyRef.current = false;
                 useTimelineStore.getState().setStreamMetric('satellites', {
                     count: sats.length,
                     status: 'streaming',
@@ -230,6 +313,7 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                         targetId: entityId,
                         billboard: bb,
                         scratch,
+                        getVisible: () => getSatelliteBillboardShow(useTimelineStore.getState(), entityId, subtype),
                     });
                 }
 
@@ -245,13 +329,11 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
 
                     if (msg.type === 'ready') {
                         console.log(`[Satellites] Worker ready, ${msg.count} satrecs initialized`);
-                        // Request full orbit propagation for trails
-                        worker.postMessage({
-                            type: 'propagate',
-                            epochMs: Date.now(),
-                            windowMinutes: 240,
-                            stepSeconds: 120,
-                        });
+                        // Codex 2026-04-24: trails build = 2.31M Cartesian3 + 19k
+                        // GeometryInstance с releaseGeometryInstances:false.
+                        // Раньше всегда запускалось — после снятия 5000 cap это
+                        // дало Chrome OOM 52 GB. Trails строим только когда
+                        // mode=live И пользователь их показывает (showTrajectories).
                         const sendLiveTick = () => {
                             if (useTimelineStore.getState().mode === 'playback') return;
                             worker.postMessage({ type: 'tick', currentTimeMs: Date.now() });
@@ -267,10 +349,18 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                         if (positionsSabRef.current) {
                             positionsSabRef.current.epochMs = Number(msg.epochMs) || Date.now();
                         }
+                        if (!positionsReadyRef.current) {
+                            positionsReadyRef.current = true;
+                            setSatellitesLoadedTick(t => t + 1);
+                        }
+                        if (!trailsPrimitiveRef.current && useTimelineStore.getState().showTrajectories) {
+                            requestTrailRebuild();
+                        }
                         requestSceneRender();
                     }
 
                     if (msg.type === 'orbits') {
+                        if (Number(msg.nonce) !== trailRequestNonceRef.current) return;
                         // Build batched trail primitive from Worker orbit data
                         if (!viewer || viewer.isDestroyed()) return;
                         const results: { noradId: number; positions: Float64Array; validSamples: number }[] = msg.results;
@@ -324,7 +414,14 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                             const trailsPrimitive = new Cesium.Primitive({
                                 geometryInstances: trailInstances,
                                 appearance: new Cesium.PolylineColorAppearance({ translucent: true }),
-                                releaseGeometryInstances: false,
+                                // Codex 2026-04-24: было false — Cesium держал
+                                // CPU-side geometry (19k PolylineGeometry +
+                                // 2.31M Cartesian3) после GPU upload → вклад
+                                // в OOM. Отпускаем после компиляции. setVisible
+                                // использует getGeometryInstanceAttributes(id) —
+                                // batch table остаётся после release, attrs работают.
+                                releaseGeometryInstances: true,
+                                asynchronous: true,
                             });
                             const freshState = useTimelineStore.getState();
                             trailsPrimitive.show =
@@ -333,7 +430,7 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                             trailsPrimitiveRef.current = trailsPrimitive;
                         }
 
-                        console.log(`[Satellites] ${trailInstances.length} orbital trails built from Worker data`);
+                        console.log(`[Satellites] ${trailInstances.length} orbital trails built from viewport subset`);
                         setSatellitesLoadedTick(t => t + 1);
                         requestSceneRender();
                     }
@@ -356,6 +453,7 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                 if (!viewer || viewer.isDestroyed()) return;
                 setSatelliteApplySource(viewer.scene, 'live', {
                     measureName: 'satellite-apply-main',
+                    applyVisibility: true,
                     isActive: () => useTimelineStore.getState().mode !== 'playback',
                     getState: () => ({
                         sab: positionsSabRef.current,
@@ -385,6 +483,7 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                 workerRef.current = null;
             }
             if (viewer && !viewer.isDestroyed()) clearSatelliteApplySource(viewer.scene, 'live');
+            positionsReadyRef.current = false;
         };
     }, [viewer, isSourceOn, satelliteRenderLimit, secondaryReleased]);
 
@@ -602,10 +701,34 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
             }
         }
         if (trailsPrimitiveRef.current) {
-            trailsPrimitiveRef.current.show = mode !== 'playback' && isSourceOn && isVisible && showTrajectories;
+            // Codex 2026-04-24: раньше при playback/OFF trails только скрывался
+            // (show=false), но Cesium Primitive + 19k GeometryInstance держали
+            // десятки GB. Теперь при любом "выключенном" состоянии —
+            // уничтожаем полностью, а при возврате в live+trajectories
+            // init-эффект пересоберёт (см. mount/propagate path).
+            const shouldShow = mode !== 'playback' && isSourceOn && isVisible && showTrajectories;
+            if (!shouldShow && viewer && !viewer.isDestroyed()) {
+                viewer.scene.primitives.remove(trailsPrimitiveRef.current);
+                trailsPrimitiveRef.current = null;
+            } else {
+                trailsPrimitiveRef.current.show = shouldShow;
+            }
+        } else if (mode !== 'playback' && isSourceOn && isVisible && showTrajectories) {
+            requestTrailRebuild();
         }
         requestSceneRender();
-    }, [isSourceOn, isVisible, showTrajectories, mode]);
+    }, [isSourceOn, isVisible, showTrajectories, mode, viewer]);
+
+    useEffect(() => {
+        if (!viewer) return;
+        const onMoveEnd = () => {
+            if (useTimelineStore.getState().showTrajectories) requestTrailRebuild();
+        };
+        const remove = viewer.camera.moveEnd.addEventListener(onMoveEnd);
+        return () => {
+            remove();
+        };
+    }, [viewer]);
 
     // ---- Effect 4a: source-off cleanup ----
     useEffect(() => {
@@ -627,6 +750,11 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
     }, [isSourceOn, viewer]);
 
     // ---- Effect 5: footprint overlay visibility ----
+    // Codex 2026-04-24: footprint data source живёт на live TLE + live onTick,
+    // не на replay motion-slots. Если не скрыть в playback — пользователь
+    // видит stale live-проекции поверх исторической сцены, причём раньше
+    // чем replay satellite billboards загрузятся. Отдельная replay-footprint
+    // логика — task #34.
     useEffect(() => {
         if (footprintDsRef.current) {
             footprintDsRef.current.show = mode !== 'playback' && isFootprintSourceOn && isFootprintVisible;
@@ -653,7 +781,6 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
         if (!bc || bc.length === 0) return;
         const counts: Record<string, number> = {};
         const trails = trailsPrimitiveRef.current;
-        const globalShow = isSourceOn && isVisible;
 
         // Iterate all billboards
         for (let i = 0; i < bc.length; i++) {
