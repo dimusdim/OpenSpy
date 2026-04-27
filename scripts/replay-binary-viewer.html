@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Replay Binary Prototype</title>
+  <style>
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      background: #0b0f14;
+      color: #d7dde8;
+      font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    body {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 360px;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      background: #101820;
+    }
+    aside {
+      overflow: auto;
+      border-left: 1px solid #26313f;
+      padding: 14px;
+      background: #111720;
+    }
+    h1 {
+      margin: 0 0 12px;
+      font-size: 14px;
+      font-weight: 700;
+      color: #f4f7fb;
+    }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .error {
+      color: #ffb4b4;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="gl"></canvas>
+  <aside>
+    <h1>Replay Binary Prototype</h1>
+    <pre id="stats">Loading manifest.json and layer.bin...</pre>
+  </aside>
+
+  <script>
+    const statsEl = document.getElementById('stats');
+    const canvas = document.getElementById('gl');
+
+    function setStats(value, isError = false) {
+      statsEl.className = isError ? 'error' : '';
+      statsEl.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+    }
+
+    function resize(gl) {
+      const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+      const width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+      const height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+      gl.viewport(0, 0, canvas.width, canvas.height);
+    }
+
+    function compile(gl, type, source) {
+      const shader = gl.createShader(type);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        throw new Error(gl.getShaderInfoLog(shader) || 'Shader compile failed');
+      }
+      return shader;
+    }
+
+    function createProgram(gl) {
+      const vertex = compile(gl, gl.VERTEX_SHADER, `#version 300 es
+        in vec2 a_pos;
+        uniform vec4 u_bounds;
+        uniform float u_pointSize;
+        void main() {
+          vec2 span = max(u_bounds.zw - u_bounds.xy, vec2(0.000001));
+          vec2 xy = ((a_pos - u_bounds.xy) / span) * 2.0 - 1.0;
+          gl_Position = vec4(xy.x, xy.y, 0.0, 1.0);
+          gl_PointSize = u_pointSize;
+        }
+      `);
+      const fragment = compile(gl, gl.FRAGMENT_SHADER, `#version 300 es
+        precision highp float;
+        uniform vec4 u_color;
+        out vec4 outColor;
+        void main() {
+          outColor = u_color;
+        }
+      `);
+      const program = gl.createProgram();
+      gl.attachShader(program, vertex);
+      gl.attachShader(program, fragment);
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        throw new Error(gl.getProgramInfoLog(program) || 'Program link failed');
+      }
+      return program;
+    }
+
+    function sectionView(buffer, manifest, name, Ctor) {
+      const section = manifest.sections[name];
+      if (!section || section.length === 0) return new Ctor(0);
+      return new Ctor(buffer, section.byteOffset, section.length);
+    }
+
+    function computeBounds(featureBboxes) {
+      if (!featureBboxes.length) return [-180, -85, 180, 85];
+      let west = Infinity;
+      let south = Infinity;
+      let east = -Infinity;
+      let north = -Infinity;
+      for (let i = 0; i < featureBboxes.length; i += 4) {
+        west = Math.min(west, featureBboxes[i]);
+        south = Math.min(south, featureBboxes[i + 1]);
+        east = Math.max(east, featureBboxes[i + 2]);
+        north = Math.max(north, featureBboxes[i + 3]);
+      }
+      if (!Number.isFinite(west)) return [-180, -85, 180, 85];
+      const padX = Math.max(0.25, (east - west) * 0.04);
+      const padY = Math.max(0.25, (north - south) * 0.04);
+      return [
+        Math.max(-180, west - padX),
+        Math.max(-90, south - padY),
+        Math.min(180, east + padX),
+        Math.min(90, north + padY),
+      ];
+    }
+
+    function makeArrayDraw(gl, program, positions) {
+      const vao = gl.createVertexArray();
+      const buffer = gl.createBuffer();
+      gl.bindVertexArray(vao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+      gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+      const loc = gl.getAttribLocation(program, 'a_pos');
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+      gl.bindVertexArray(null);
+      return { vao, count: positions.length / 2 };
+    }
+
+    function makeIndexedDraw(gl, program, positions, indices) {
+      const vao = gl.createVertexArray();
+      const vertexBuffer = gl.createBuffer();
+      const indexBuffer = gl.createBuffer();
+      gl.bindVertexArray(vao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+      const loc = gl.getAttribLocation(program, 'a_pos');
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+      gl.bindVertexArray(null);
+      return { vao, count: indices.length };
+    }
+
+    async function main() {
+      const t0 = performance.now();
+      const [manifest, binary] = await Promise.all([
+        fetch('manifest.json', { cache: 'no-store' }).then((res) => res.json()),
+        fetch('layer.bin', { cache: 'no-store' }).then((res) => res.arrayBuffer()),
+      ]);
+      const tFetch = performance.now();
+
+      const magic = new TextDecoder('ascii').decode(new Uint8Array(binary, 0, 8));
+      if (magic !== 'AWVBIN1\0') throw new Error(`Bad binary magic: ${JSON.stringify(magic)}`);
+
+      const gl = canvas.getContext('webgl2', { antialias: true, alpha: false });
+      if (!gl) throw new Error('WebGL2 is unavailable');
+      const program = createProgram(gl);
+      const boundsLoc = gl.getUniformLocation(program, 'u_bounds');
+      const colorLoc = gl.getUniformLocation(program, 'u_color');
+      const pointSizeLoc = gl.getUniformLocation(program, 'u_pointSize');
+      const tGl = performance.now();
+
+      const featureBboxes = sectionView(binary, manifest, 'featureBboxes', Float32Array);
+      const pointPositions = sectionView(binary, manifest, 'pointPositions', Float32Array);
+      const linePositions = sectionView(binary, manifest, 'linePositions', Float32Array);
+      const fillPositions = sectionView(binary, manifest, 'fillPositions', Float32Array);
+      const fillIndices = sectionView(binary, manifest, 'fillIndices', Uint32Array);
+
+      const tParse = performance.now();
+      const points = makeArrayDraw(gl, program, pointPositions);
+      const lines = makeArrayDraw(gl, program, linePositions);
+      const fill = makeIndexedDraw(gl, program, fillPositions, fillIndices);
+      const tUpload = performance.now();
+
+      const bounds = computeBounds(featureBboxes);
+
+      function draw() {
+        resize(gl);
+        gl.clearColor(0.06, 0.09, 0.12, 1.0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.useProgram(program);
+        gl.uniform4f(boundsLoc, bounds[0], bounds[1], bounds[2], bounds[3]);
+
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+        if (fill.count > 0) {
+          gl.uniform4f(colorLoc, 0.16, 0.55, 0.95, 0.20);
+          gl.uniform1f(pointSizeLoc, 1.0);
+          gl.bindVertexArray(fill.vao);
+          gl.drawElements(gl.TRIANGLES, fill.count, gl.UNSIGNED_INT, 0);
+        }
+
+        if (lines.count > 0) {
+          gl.uniform4f(colorLoc, 0.42, 0.83, 1.0, 0.70);
+          gl.uniform1f(pointSizeLoc, 1.0);
+          gl.bindVertexArray(lines.vao);
+          gl.drawArrays(gl.LINES, 0, lines.count);
+        }
+
+        if (points.count > 0) {
+          gl.uniform4f(colorLoc, 1.0, 0.72, 0.20, 0.95);
+          gl.uniform1f(pointSizeLoc, 3.0);
+          gl.bindVertexArray(points.vao);
+          gl.drawArrays(gl.POINTS, 0, points.count);
+        }
+
+        gl.bindVertexArray(null);
+      }
+
+      draw();
+      window.addEventListener('resize', draw);
+
+      setStats({
+        layerId: manifest.layerId,
+        sourceTile: manifest.sourceTile,
+        tBucket: manifest.tBucket,
+        counts: manifest.counts,
+        bytes: manifest.bytes,
+        buildTimingsMs: manifest.timingsMs,
+        browserTimingsMs: {
+          fetchManifestAndBinary: Math.round((tFetch - t0) * 100) / 100,
+          initWebGL: Math.round((tGl - tFetch) * 100) / 100,
+          createTypedArrayViews: Math.round((tParse - tGl) * 100) / 100,
+          parseViews: Math.round((tParse - tFetch) * 100) / 100,
+          uploadBuffers: Math.round((tUpload - tParse) * 100) / 100,
+        },
+        fitBounds: bounds,
+        notes: manifest.notes,
+      });
+    }
+
+    main().catch((error) => setStats(error.stack || error.message || String(error), true));
+  </script>
+</body>
+</html>
