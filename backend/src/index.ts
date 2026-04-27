@@ -209,7 +209,9 @@ const replayTileBuilderService = new ReplayTileBuilderService(databaseService, r
 const replayRenderBatchService = new ReplayRenderBatchService(replayQueryService, replayTileBuilderService);
 const liveIngestEnabled = process.env.DISABLE_LIVE_INGEST !== 'true';
 const REPLAY_TILE_REFRESH_LAYERS = ['aircraft', 'vessel', 'disasters', 'fire', 'jamming', 'outage', 'conflict', 'gfw', 'cable', 'pipeline', 'airspace'];
+const REPLAY_RENDER_PREWARM_LAYERS = ['airspace', 'pipeline', 'cable', 'jamming', 'gfw', 'disasters', 'fire', 'outage', 'conflict'];
 let replayTileRefreshInFlight = false;
+let replayRenderPrewarmInFlight = false;
 
 async function refreshReplayTilesWindow(): Promise<void> {
     if (replayTileRefreshInFlight || !databaseService.isReady()) return;
@@ -229,6 +231,44 @@ async function refreshReplayTilesWindow(): Promise<void> {
         console.error('[ReplayTiles] Refresh failed:', error);
     } finally {
         replayTileRefreshInFlight = false;
+    }
+}
+
+async function prewarmReplayRenderChunksWindow(reason = 'startup'): Promise<void> {
+    if (replayRenderPrewarmInFlight || !databaseService.isReady()) return;
+    if (process.env.REPLAY_RENDER_PREWARM_DISABLED === 'true') return;
+    replayRenderPrewarmInFlight = true;
+    const startedAt = performance.now();
+    try {
+        const to = new Date();
+        const from = new Date(to.getTime() - 60 * 60 * 1000);
+        const result = await replayRenderBatchService.prewarmReplayChunks({
+            at: to.toISOString(),
+            from: from.toISOString(),
+            to: to.toISOString(),
+            layers: REPLAY_RENDER_PREWARM_LAYERS,
+            z: 0,
+            stepSeconds: 15 * 60,
+            maxFrames: 5,
+            aggregateFires: true,
+        });
+        logPerfEvent('replay.render_chunks_prewarm', {
+            source: 'backend',
+            reason,
+            ...result,
+            wallMs: Math.round(performance.now() - startedAt),
+        });
+        console.log(`[ReplayRender] Prewarmed ${result.chunks} chunks (${result.hits} hits, ${result.misses} misses, ${Math.round(result.bytes / 1024 / 1024)} MB) in ${Math.round(result.ms)}ms`);
+    } catch (error: any) {
+        console.error('[ReplayRender] Prewarm failed:', error?.message || error);
+        logPerfEvent('replay.render_chunks_prewarm_failed', {
+            source: 'backend',
+            reason,
+            error: error?.message || String(error),
+            ms: Math.round(performance.now() - startedAt),
+        });
+    } finally {
+        replayRenderPrewarmInFlight = false;
     }
 }
 
@@ -912,6 +952,102 @@ app.get('/api/live/snapshot', async (_req, res) => {
     }
 });
 
+app.post('/api/replay/render-chunks/prewarm', async (req, res) => {
+    if (!replayQueryService.isReady()) {
+        res.status(503).json({ error: 'Replay database is not ready' });
+        return;
+    }
+
+    const body = ((req.body && typeof req.body === 'object') ? req.body : {}) as Record<string, any>;
+    const rawAt = typeof body.at === 'string' ? body.at : undefined;
+    const parsedAt = parseIsoDateOrNull(rawAt);
+    if (rawAt && !parsedAt) {
+        res.status(400).json({ error: 'Invalid at timestamp' });
+        return;
+    }
+    const at = parsedAt || new Date().toISOString();
+    const rawFrom = typeof body.from === 'string' ? body.from : undefined;
+    const rawTo = typeof body.to === 'string' ? body.to : undefined;
+    const parsedFrom = parseIsoDateOrNull(rawFrom);
+    const parsedTo = parseIsoDateOrNull(rawTo);
+    if ((rawFrom && !parsedFrom) || (rawTo && !parsedTo)) {
+        res.status(400).json({ error: 'Invalid from/to timestamp' });
+        return;
+    }
+    const from = parsedFrom || at;
+    const to = parsedTo || at;
+
+    const layersRaw = Array.isArray(body.layers)
+        ? body.layers.join(',')
+        : (typeof body.layers === 'string' ? body.layers : undefined);
+    const layers = parseLayerScopeList(layersRaw);
+    const effectiveLayers = layers.length > 0 ? layers : REPLAY_RENDER_PREWARM_LAYERS;
+
+    const bboxRaw = Array.isArray(body.bbox)
+        ? body.bbox.join(',')
+        : (typeof body.bbox === 'string' ? body.bbox : undefined);
+    const bbox = parseBbox(bboxRaw, 'swne');
+    if (body.bbox && !bbox) {
+        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        return;
+    }
+
+    const z = body.z == null ? 0 : Number(body.z);
+    if (!Number.isInteger(z) || z < 0 || z > 6) {
+        res.status(400).json({ error: 'Invalid z (expected integer 0..6)' });
+        return;
+    }
+    const stepSeconds = Number(body.stepSeconds ?? body.step_seconds ?? 15 * 60);
+    const maxFrames = Number(body.maxFrames ?? body.max_frames ?? 5);
+    if (!Number.isInteger(stepSeconds) || stepSeconds <= 0 || !Number.isInteger(maxFrames) || maxFrames <= 0) {
+        res.status(400).json({ error: 'Invalid stepSeconds/maxFrames (expected positive integers)' });
+        return;
+    }
+    const aggregateFires = body.cluster === 0 || body.cluster === false || body.cluster === '0' || body.cluster === 'false'
+        ? false
+        : true;
+
+    const routeStartedAt = performance.now();
+    try {
+        const result = await withSpan('replay.render_chunks_prewarm_manual', {
+            'replay.layers': effectiveLayers.join(','),
+            'replay.layers.count': effectiveLayers.length,
+            'replay.from': from,
+            'replay.to': to,
+        }, async () => replayRenderBatchService.prewarmReplayChunks({
+            at,
+            from,
+            to,
+            layers: effectiveLayers,
+            z,
+            bbox: bbox || undefined,
+            stepSeconds,
+            maxFrames,
+            aggregateFires,
+        }));
+        logPerfEvent('replay.render_chunks_prewarm_manual', {
+            source: 'backend',
+            at,
+            from,
+            to,
+            layers: effectiveLayers,
+            z,
+            frames: result.frames,
+            chunks: result.chunks,
+            hits: result.hits,
+            misses: result.misses,
+            bytes: result.bytes,
+            buildMs: result.ms,
+            ms: Math.round(performance.now() - routeStartedAt),
+        });
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({ ok: true, ...result });
+    } catch (err: any) {
+        console.error('[api/replay/render-chunks/prewarm] failed:', err?.message || err);
+        sendError(res, err);
+    }
+});
+
 app.get('/api/replay/render-chunks', async (req, res) => {
     if (!replayQueryService.isReady()) {
         res.status(503).json({ error: 'Replay database is not ready' });
@@ -964,14 +1100,41 @@ app.get('/api/replay/render-chunks', async (req, res) => {
             bbox: bbox || undefined,
             aggregateFires,
         }));
-        const bytes = Object.values(response.layers)
-            .flat()
-            .reduce((sum, chunk) => sum + chunk.bytes.binary, 0);
+        const chunks = Object.values(response.layers).flat();
+        const bytes = chunks.reduce((sum, chunk) => sum + chunk.bytes.binary, 0);
+        const cacheHits = chunks.filter((chunk) => chunk.cache?.hit === true).length;
+        const timingTotals = chunks.reduce((acc, chunk) => {
+            for (const key of ['source', 'pack', 'binary', 'cacheRead', 'cacheWrite', 'total']) {
+                const value = chunk.timingsMs?.[key];
+                if (Number.isFinite(value)) acc[key] = Math.round(((acc[key] || 0) + value) * 100) / 100;
+            }
+            return acc;
+        }, {} as Record<string, number>);
         logPerfEvent('replay.render_chunks', {
             source: 'backend',
             at,
             layers,
+            chunks: chunks.length,
+            cacheHits,
+            cacheMisses: chunks.length - cacheHits,
             bytes,
+            timingsMs: timingTotals,
+            layerStats: chunks.map((chunk) => ({
+                layerId: chunk.layerId,
+                hit: chunk.cache?.hit === true,
+                cacheAt: chunk.cache?.at,
+                sourceAt: chunk.cache?.sourceAt,
+                bytes: chunk.bytes.binary,
+                features: chunk.counts.features,
+                pointVertices: chunk.counts.pointVertices,
+                fillTriangles: chunk.counts.fillTriangles,
+                totalMs: chunk.timingsMs?.total,
+                sourceMs: chunk.timingsMs?.source,
+                packMs: chunk.timingsMs?.pack,
+                binaryMs: chunk.timingsMs?.binary,
+                cacheReadMs: chunk.timingsMs?.cacheRead,
+                cacheWriteMs: chunk.timingsMs?.cacheWrite,
+            })),
             ms: Math.round(performance.now() - routeStartedAt),
         });
         res.setHeader('Cache-Control', 'no-store');
@@ -2628,9 +2791,15 @@ async function bootstrap() {
         console.log(`Backend server running on port ${PORT}`);
     });
     void refreshReplayTilesWindow();
+    setTimeout(() => {
+        void prewarmReplayRenderChunksWindow('startup');
+    }, 2500);
     setInterval(() => {
         void refreshReplayTilesWindow();
     }, 10 * 60 * 1000);
+    setInterval(() => {
+        void prewarmReplayRenderChunksWindow('interval');
+    }, 15 * 60 * 1000);
 }
 
 bootstrap();

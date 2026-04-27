@@ -15,6 +15,7 @@ export type ReplayStateFilters = {
     bbox?: [number, number, number, number];
     limit?: number;
     aggregateFires?: boolean;
+    minimal?: boolean;
 };
 
 export type ReplayWindowFilters = {
@@ -732,6 +733,8 @@ export class ReplayQueryService {
         const normalizedLimit = normalizeLimit(filters.limit);
         const limitSql = normalizedLimit ? `LIMIT $${params.push(normalizedLimit)}` : '';
         const outerWhereSql = outerClauses.length ? `WHERE ${outerClauses.join(' AND ')}` : '';
+        const entityPropertiesSql = filters.minimal ? "'{}'::jsonb" : 'e.properties';
+        const positionPropertiesSql = filters.minimal ? "'{}'::jsonb" : 'pf.properties';
 
         const result = await this.database.query<ReplayEntityRow>(
             `
@@ -747,7 +750,7 @@ export class ReplayQueryService {
                         pf.altitude_m,
                         pf.heading_deg,
                         pf.speed_mps,
-                        pf.properties AS position_properties,
+                        ${positionPropertiesSql} AS position_properties,
                         row_number() OVER (
                             PARTITION BY pf.entity_id
                             ORDER BY pf.observed_at DESC, pf.created_at DESC
@@ -766,7 +769,7 @@ export class ReplayQueryService {
                     e.last_observed_at,
                     e.updated_at,
                     NULL::timestamptz AS entity_observed_at,
-                    e.properties AS entity_properties,
+                    ${entityPropertiesSql} AS entity_properties,
                     lf.position_observed_at,
                     lf.geometry,
                     lf.display_lat,

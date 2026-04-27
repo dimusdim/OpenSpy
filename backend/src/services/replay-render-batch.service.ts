@@ -25,6 +25,11 @@ type BuildReplayPointDeltasParams = {
     aggregateFires?: boolean;
 };
 
+type PrewarmReplayRenderChunksParams = BuildReplayRenderChunksParams & {
+    stepSeconds?: number;
+    maxFrames?: number;
+};
+
 type RenderFeatureRef = {
     featureIndex: number;
     id: string;
@@ -179,6 +184,14 @@ export type ReplayRenderChunkManifest = {
     styles: Record<string, RenderStyle>;
     footprints: RenderFootprint[];
     timingsMs: Record<string, number>;
+    cache?: {
+        key: string;
+        at: string;
+        sourceAt: string;
+        hit: boolean;
+        readMs: number;
+        writeMs?: number;
+    };
 };
 
 export type ReplayRenderChunksResponse = {
@@ -231,6 +244,24 @@ function floorIsoToBucket(atIso: string, bucketSeconds: number): string {
     const bucketMs = bucketSeconds * 1000;
     const atMs = new Date(atIso).getTime();
     return new Date(Math.floor(atMs / bucketMs) * bucketMs).toISOString();
+}
+
+function floorIsoToSecond(atIso: string): string {
+    const atMs = new Date(atIso).getTime();
+    return new Date(Math.floor(atMs / 1000) * 1000).toISOString();
+}
+
+function getRenderChunkCacheAt(layerId: string, atIso: string): string {
+    switch (normalizeLayerId(layerId)) {
+        case 'airspace':
+        case 'pipeline':
+        case 'cable':
+            return floorIsoToBucket(atIso, DAY_SECONDS);
+        default:
+            // Keep moving snapshots exact to the visible playback second while
+            // avoiding millisecond-level cache misses from timeline UI timestamps.
+            return floorIsoToSecond(atIso);
+    }
 }
 
 function stableHash32(input: unknown): number {
@@ -791,7 +822,7 @@ function packGeometry(
             indexStart,
             indexCount,
             styleId,
-            0,
+            stableHash32(id),
         );
         state.featureBboxes.push(bbox[0], bbox[1], bbox[2], bbox[3]);
         state.featureProperties.push(
@@ -1043,6 +1074,7 @@ export class ReplayRenderBatchService {
             layerId,
             bbox,
             aggregateFires,
+            minimal: layerId === 'aircraft' || layerId === 'vessel',
         };
         const [entities, events, assets] = await Promise.all([
             this.replayQueryService.listEntityStateAt(filters),
@@ -1103,6 +1135,7 @@ export class ReplayRenderBatchService {
     private async buildLayerChunk(params: BuildReplayRenderChunksParams, rawLayerId: string): Promise<ReplayRenderChunkManifest> {
         const layerId = normalizeLayerId(rawLayerId);
         const at = new Date(params.at).toISOString();
+        const cacheAt = getRenderChunkCacheAt(layerId, at);
         // Render chunks are exact snapshots. Historical windows/items belong
         // to the legacy replay-tile path, not to the batch that paints the
         // current frame.
@@ -1111,25 +1144,47 @@ export class ReplayRenderBatchService {
         const z = Number.isFinite(params.z) ? Math.max(0, Math.min(6, Math.trunc(params.z as number))) : 0;
         const t0 = performance.now();
         const timingsMs: Record<string, number> = {};
+        const chunkHashInput = [
+            'v8-render-cache-key',
+            layerId,
+            cacheAt,
+            z,
+            params.bbox?.join(',') || 'global',
+            params.aggregateFires === false ? 'fireRaw' : 'fireCluster',
+        ].join('|');
+        const chunkId = contentHash(chunkHashInput);
+        const cacheReadStart = performance.now();
+        const cached = await this.readCachedManifest(chunkId);
+        const cacheReadMs = roundMs(performance.now() - cacheReadStart);
+        if (cached) {
+            return {
+                ...cached,
+                at,
+                from,
+                to,
+                cache: {
+                    key: chunkId,
+                    at: cacheAt,
+                    sourceAt: cached.at,
+                    hit: true,
+                    readMs: cacheReadMs,
+                },
+                timingsMs: {
+                    ...(cached.timingsMs || {}),
+                    cacheHit: 1,
+                    cacheRead: cacheReadMs,
+                    total: roundMs(performance.now() - t0),
+                },
+            };
+        }
 
         const featuresStart = performance.now();
         const source = layerId === 'satellite'
             ? await this.buildSatelliteFeatures(at, params.bbox)
             : await this.buildDbStateFeatures(layerId, at, params.bbox, params.aggregateFires !== false);
         timingsMs.source = roundMs(performance.now() - featuresStart);
-
-        const chunkHashInput = [
-            'v6-render-props',
-            layerId,
-            at,
-            z,
-            params.bbox?.join(',') || 'global',
-            params.aggregateFires === false ? 'fireRaw' : 'fireCluster',
-            source.sourceHash,
-        ].join('|');
-        const chunkId = contentHash(chunkHashInput);
-        const cached = await this.readCachedManifest(chunkId);
-        if (cached) return cached;
+        timingsMs.cacheHit = 0;
+        timingsMs.cacheRead = cacheReadMs;
 
         const packStart = performance.now();
         const packed = packGeometry(source.features, source.motionById);
@@ -1178,9 +1233,19 @@ export class ReplayRenderBatchService {
             styles: packed.styles,
             footprints: packed.footprints,
             timingsMs,
+            cache: {
+                key: chunkId,
+                at: cacheAt,
+                sourceAt: at,
+                hit: false,
+                readMs: cacheReadMs,
+            },
         };
         manifest.timingsMs.total = roundMs(performance.now() - t0);
+        const writeStart = performance.now();
         await this.writeChunk(chunkId, manifest, binary.buffer, packed.details);
+        manifest.timingsMs.cacheWrite = roundMs(performance.now() - writeStart);
+        if (manifest.cache) manifest.cache.writeMs = manifest.timingsMs.cacheWrite;
         return manifest;
     }
 
@@ -1203,6 +1268,75 @@ export class ReplayRenderBatchService {
             from,
             to,
             layers,
+        };
+    }
+
+    async prewarmReplayChunks(params: PrewarmReplayRenderChunksParams): Promise<{
+        frames: number;
+        layers: string[];
+        chunks: number;
+        hits: number;
+        misses: number;
+        bytes: number;
+        ms: number;
+        samples: Array<{ at: string; layerId: string; hit: boolean; bytes: number; totalMs?: number; sourceMs?: number }>;
+    }> {
+        const startedAt = performance.now();
+        const normalizedLayers = Array.from(new Set(params.layers.map(normalizeLayerId).filter(Boolean)));
+        const fromMs = params.from ? new Date(params.from).getTime() : new Date(params.at).getTime();
+        const toMs = params.to ? new Date(params.to).getTime() : new Date(params.at).getTime();
+        const stepSeconds = Math.max(1, Math.trunc(params.stepSeconds || 60));
+        const maxFrames = Math.max(1, Math.trunc(params.maxFrames || 24));
+        const frameTimes: string[] = [];
+        if (Number.isFinite(fromMs) && Number.isFinite(toMs)) {
+            const startMs = Math.min(fromMs, toMs);
+            const endMs = Math.max(fromMs, toMs);
+            for (let ms = startMs; ms <= endMs && frameTimes.length < maxFrames; ms += stepSeconds * 1000) {
+                frameTimes.push(new Date(ms).toISOString());
+            }
+        }
+        if (frameTimes.length === 0) frameTimes.push(new Date(params.at).toISOString());
+
+        let chunks = 0;
+        let hits = 0;
+        let misses = 0;
+        let bytes = 0;
+        const samples: Array<{ at: string; layerId: string; hit: boolean; bytes: number; totalMs?: number; sourceMs?: number }> = [];
+        for (const at of frameTimes) {
+            const response = await this.buildReplayChunks({
+                ...params,
+                at,
+                from: at,
+                to: at,
+                layers: normalizedLayers,
+            });
+            for (const chunk of Object.values(response.layers).flat()) {
+                chunks += 1;
+                bytes += chunk.bytes.binary;
+                const hit = chunk.cache?.hit === true;
+                if (hit) hits += 1; else misses += 1;
+                if (samples.length < 32) {
+                    samples.push({
+                        at,
+                        layerId: chunk.layerId,
+                        hit,
+                        bytes: chunk.bytes.binary,
+                        totalMs: chunk.timingsMs?.total,
+                        sourceMs: chunk.timingsMs?.source,
+                    });
+                }
+            }
+        }
+
+        return {
+            frames: frameTimes.length,
+            layers: normalizedLayers,
+            chunks,
+            hits,
+            misses,
+            bytes,
+            ms: roundMs(performance.now() - startedAt),
+            samples,
         };
     }
 
@@ -1261,6 +1395,7 @@ export class ReplayRenderBatchService {
             at,
             layerId,
             bbox,
+            minimal: true,
         });
         timingsMs.source = roundMs(performance.now() - sourceStart);
 
