@@ -14,6 +14,7 @@ export type ReplayStateFilters = {
     subtype?: string;
     bbox?: [number, number, number, number];
     limit?: number;
+    aggregateFires?: boolean;
 };
 
 export type ReplayWindowFilters = {
@@ -31,6 +32,7 @@ export type ReplayWindowFilters = {
     bbox?: [number, number, number, number];
     limit?: number;
     stepSeconds?: number;
+    aggregateFires?: boolean;
 };
 
 type ReplayEntityRow = {
@@ -361,8 +363,9 @@ export class ReplayQueryService {
     }
 
     private getReplayFireGridDegrees(
-        filters: Pick<ReplayStateFilters, 'bbox' | 'eventId'> | Pick<ReplayWindowFilters, 'bbox' | 'eventId'>,
+        filters: Pick<ReplayStateFilters, 'bbox' | 'eventId' | 'aggregateFires'> | Pick<ReplayWindowFilters, 'bbox' | 'eventId' | 'aggregateFires'>,
     ): number | null {
+        if (filters.aggregateFires === false) return null;
         if (filters.eventId) return null;
         if (!filters.bbox) return 4.0;
         const [south, west, north, east] = filters.bbox;
@@ -596,6 +599,98 @@ export class ReplayQueryService {
         });
     }
 
+    private async listAggregatedFireStateAt(
+        filters: ReplayStateFilters,
+        gridDegrees: number,
+        limit: number | null,
+    ): Promise<ReplayEventRow[]> {
+        const params: unknown[] = [filters.at];
+        const clauses = [
+            's.observed_at <= $1::timestamptz',
+            "s.layer_id = 'fire'",
+            's.geom IS NOT NULL',
+            '(s.valid_to IS NULL OR s.valid_to >= $1::timestamptz)',
+        ];
+
+        const add = (sql: string, value?: unknown) => {
+            params.push(value);
+            clauses.push(sql.replace('?', `$${params.length}`));
+        };
+
+        if (filters.sourceId) add('s.source_id = ?', filters.sourceId);
+        if (filters.eventKind) add('s.event_kind = ?', filters.eventKind);
+        if (filters.subtype) add('s.subtype = ?', filters.subtype);
+        if (filters.bbox) {
+            const [south, west, north, east] = filters.bbox;
+            params.push(west, south, east, north);
+            const start = params.length - 3;
+            clauses.push(
+                `ST_Intersects(s.geom, ST_MakeEnvelope($${start}, $${start + 1}, $${start + 2}, $${start + 3}, 4326))`,
+            );
+        }
+
+        const gridParam = params.push(gridDegrees);
+        const limitSql = limit ? `LIMIT $${params.push(limit)}` : '';
+
+        const result = await this.database.query<ReplayEventRow>(
+            `
+                WITH clustered AS (
+                    SELECT
+                        s.source_id,
+                        s.subtype,
+                        FLOOR(ST_Y(ST_PointOnSurface(s.geom)) / $${gridParam})::int AS lat_bin,
+                        FLOOR(ST_X(ST_PointOnSurface(s.geom)) / $${gridParam})::int AS lng_bin,
+                        MAX(s.observed_at) AS observed_at,
+                        MAX(s.valid_from) AS valid_from,
+                        MAX(s.valid_to) AS valid_to,
+                        AVG(ST_Y(ST_PointOnSurface(s.geom))) AS display_lat,
+                        AVG(ST_X(ST_PointOnSurface(s.geom))) AS display_lng,
+                        COUNT(*)::int AS count
+                    FROM core.event_snapshots s
+                    WHERE ${clauses.join(' AND ')}
+                    GROUP BY s.source_id, s.subtype, lat_bin, lng_bin
+                )
+                SELECT
+                    CONCAT(
+                        'fire-cluster:',
+                        $${gridParam}::text,
+                        ':',
+                        COALESCE(source_id, 'all'),
+                        ':',
+                        COALESCE(subtype, 'unknown'),
+                        ':',
+                        lat_bin::text,
+                        ':',
+                        lng_bin::text
+                    ) AS event_id,
+                    'fire'::text AS layer_id,
+                    source_id,
+                    'fire_cluster'::text AS event_kind,
+                    subtype,
+                    observed_at,
+                    valid_from,
+                    valid_to,
+                    jsonb_build_object(
+                        'type', 'Point',
+                        'coordinates', jsonb_build_array(display_lng, display_lat)
+                    ) AS geometry,
+                    display_lat,
+                    display_lng,
+                    jsonb_build_object(
+                        'aggregated', true,
+                        'count', count,
+                        'gridDegrees', $${gridParam}
+                    ) AS properties
+                FROM clustered
+                ORDER BY observed_at DESC NULLS LAST, event_id
+                ${limitSql}
+            `,
+            params,
+        );
+
+        return result?.rows || [];
+    }
+
     private async listMovingEntityStateAt(filters: ReplayStateFilters): Promise<ReplayEntityRow[]> {
         const sourceId = filters.sourceId
             || (filters.layerId === 'vessel' || filters.entityId?.startsWith('vessel:') ? 'aisstream' : 'opensky');
@@ -632,7 +727,7 @@ export class ReplayQueryService {
         }
 
         if (filters.entityKind) addOuter('e.entity_kind = ?', filters.entityKind);
-        if (filters.subtype) addOuter('COALESCE(es.subtype, e.subtype) = ?', filters.subtype);
+        if (filters.subtype) addOuter('e.subtype = ?', filters.subtype);
 
         const normalizedLimit = normalizeLimit(filters.limit);
         const limitSql = normalizedLimit ? `LIMIT $${params.push(normalizedLimit)}` : '';
@@ -640,8 +735,8 @@ export class ReplayQueryService {
 
         const result = await this.database.query<ReplayEntityRow>(
             `
-                WITH latest_fix AS (
-                    SELECT DISTINCT ON (pf.entity_id)
+                WITH ranked_fix AS (
+                    SELECT
                         pf.entity_id,
                         pf.layer_id,
                         pf.source_id,
@@ -652,23 +747,26 @@ export class ReplayQueryService {
                         pf.altitude_m,
                         pf.heading_deg,
                         pf.speed_mps,
-                        pf.properties AS position_properties
+                        pf.properties AS position_properties,
+                        row_number() OVER (
+                            PARTITION BY pf.entity_id
+                            ORDER BY pf.observed_at DESC, pf.created_at DESC
+                        ) AS rn
                     FROM core.position_fixes pf
                     WHERE ${fixClauses.join(' AND ')}
-                    ORDER BY pf.entity_id, pf.observed_at DESC, pf.created_at DESC
                 )
                 SELECT
                     e.entity_id,
                     e.layer_id,
                     e.source_id,
                     e.entity_kind,
-                    COALESCE(es.subtype, e.subtype) AS subtype,
-                    COALESCE(es.display_name, e.display_name) AS display_name,
+                    e.subtype,
+                    e.display_name,
                     e.first_observed_at,
                     e.last_observed_at,
                     e.updated_at,
-                    es.observed_at AS entity_observed_at,
-                    COALESCE(es.properties, e.properties) AS entity_properties,
+                    NULL::timestamptz AS entity_observed_at,
+                    e.properties AS entity_properties,
                     lf.position_observed_at,
                     lf.geometry,
                     lf.display_lat,
@@ -677,21 +775,9 @@ export class ReplayQueryService {
                     lf.heading_deg,
                     lf.speed_mps,
                     lf.position_properties
-                FROM latest_fix lf
+                FROM ranked_fix lf
                 JOIN core.entities e ON e.entity_id = lf.entity_id
-                LEFT JOIN LATERAL (
-                    SELECT
-                        snap.observed_at,
-                        snap.subtype,
-                        snap.display_name,
-                        snap.properties
-                    FROM core.entity_snapshots snap
-                    WHERE snap.entity_id = lf.entity_id
-                      AND COALESCE(snap.observed_at, snap.created_at) <= $1::timestamptz
-                    ORDER BY COALESCE(snap.observed_at, snap.created_at) DESC, snap.created_at DESC
-                    LIMIT 1
-                ) es ON true
-                ${outerWhereSql}
+                ${outerWhereSql ? `${outerWhereSql} AND lf.rn = 1` : 'WHERE lf.rn = 1'}
                 ORDER BY lf.position_observed_at DESC, e.updated_at DESC
                 ${limitSql}
             `,
@@ -1733,7 +1819,12 @@ export class ReplayQueryService {
     async listEventStateAt(filters: ReplayStateFilters): Promise<ReplayEventRow[]> {
         if (!this.database.isReady()) return [];
 
-        const aggregateFire = filters.layerId === 'fire' && !filters.eventId;
+        const aggregateFire = filters.layerId === 'fire' && !filters.eventId && filters.aggregateFires !== false;
+        const normalizedLimit = normalizeLimit(filters.limit);
+        const aggregateFireGrid = aggregateFire ? this.getReplayFireGridDegrees(filters) : null;
+        if (aggregateFireGrid) {
+            return this.listAggregatedFireStateAt(filters, aggregateFireGrid, normalizedLimit);
+        }
 
         const params: unknown[] = [filters.at];
         const clauses = ['COALESCE(s.observed_at, s.valid_from, s.created_at) <= $1::timestamptz'];
@@ -1758,7 +1849,6 @@ export class ReplayQueryService {
         }
 
         clauses.push('(s.valid_to IS NULL OR s.valid_to >= $1::timestamptz)');
-        const normalizedLimit = normalizeLimit(filters.limit);
         const limitSql = normalizedLimit && !aggregateFire ? `LIMIT $${params.push(normalizedLimit)}` : '';
 
         const result = await this.database.query<ReplayEventRow>(

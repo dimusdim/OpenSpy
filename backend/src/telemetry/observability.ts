@@ -45,6 +45,16 @@ const replayTileBundleBytes = meter.createHistogram('openspy.replay.tile_bundle.
     unit: 'By',
 });
 
+const replayTileBundlePhaseDurationMs = meter.createHistogram('openspy.replay.tile_bundle.phase.duration_ms', {
+    description: 'Replay tile-bundle internal phase duration',
+    unit: 'ms',
+});
+
+const replayTileBundlePhaseBytes = meter.createHistogram('openspy.replay.tile_bundle.phase.bytes', {
+    description: 'Replay tile-bundle internal phase bytes',
+    unit: 'By',
+});
+
 export function telemetryEnabled(): boolean {
     return isTelemetryEnabled();
 }
@@ -140,6 +150,21 @@ export function recordReplayTileBundle(tileCount: number, bytes: number, duratio
     if (!telemetryEnabled()) return;
     replayTileBundleDurationMs.record(durationMs, { 'replay.tile_count_bin': tileBin(tileCount) });
     replayTileBundleBytes.record(bytes, { 'replay.tile_count_bin': tileBin(tileCount) });
+}
+
+export function recordReplayTileBundlePhase(
+    phase: 'read' | 'encode' | 'send',
+    tileCount: number,
+    bytes: number,
+    durationMs: number,
+) {
+    if (!telemetryEnabled()) return;
+    const attrs = {
+        'replay.tile_count_bin': tileBin(tileCount),
+        'replay.phase': phase,
+    };
+    replayTileBundlePhaseDurationMs.record(durationMs, attrs);
+    replayTileBundlePhaseBytes.record(bytes, attrs);
 }
 
 function tileBin(n: number): string {

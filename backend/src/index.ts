@@ -8,7 +8,7 @@ import compression from 'compression';
 import axios from 'axios';
 import path from 'path';
 import fs from 'fs';
-import { recordRateLimitReject, recordReplayRequest, recordInfraFetch, recordReplayTileBundle, withSpan } from './telemetry/observability';
+import { recordRateLimitReject, recordReplayRequest, recordInfraFetch, recordReplayTileBundle, recordReplayTileBundlePhase, withSpan } from './telemetry/observability';
 import { logPerfEvent, logPerfEventFromClient } from './telemetry/perf-log';
 
 // Global process-level safety nets. Without these, a single upstream HTTP
@@ -57,6 +57,7 @@ import { AssetQueryService } from './services/asset-query.service';
 import { LiveProjectionService } from './services/live-projection.service';
 import { ReplayQueryService } from './services/replay-query.service';
 import { ReplayTileBuilderService } from './services/replay-tile-builder.service';
+import { ReplayRenderBatchService } from './services/replay-render-batch.service';
 
 // CORS origin whitelist — comma-separated list in ALLOWED_ORIGINS env var.
 // Defaults to localhost dev ports if unset.
@@ -106,6 +107,7 @@ app.use(compression({
     // the event loop for ~30s and serialises subsequent requests.
     filter: (req, res) => {
         if (req.path === '/api/replay/tile-bundle') return false;
+        if (req.path.startsWith('/api/replay/render-chunks/') && req.path.endsWith('/data')) return false;
         if (req.path.startsWith('/static/replay-tiles/')) return false;
         return compression.filter(req, res);
     },
@@ -204,6 +206,7 @@ const assetQueryService = new AssetQueryService(databaseService);
 const liveProjectionService = new LiveProjectionService(databaseService);
 const replayQueryService = new ReplayQueryService(databaseService);
 const replayTileBuilderService = new ReplayTileBuilderService(databaseService, replayQueryService);
+const replayRenderBatchService = new ReplayRenderBatchService(replayQueryService, replayTileBuilderService);
 const liveIngestEnabled = process.env.DISABLE_LIVE_INGEST !== 'true';
 const REPLAY_TILE_REFRESH_LAYERS = ['aircraft', 'vessel', 'disasters', 'fire', 'jamming', 'outage', 'conflict', 'gfw', 'cable', 'pipeline', 'airspace'];
 let replayTileRefreshInFlight = false;
@@ -700,11 +703,15 @@ function parseLayerLimitMap(value: string | undefined): Record<string, number> {
     return result;
 }
 
+// 2026-04-24: убрал жёсткий потолок Math.min(5000, ...) — это был скрытый
+// максимум для любого endpoint'а использующего этот helper. Теперь если
+// клиент явно передал limit=N, он получает ровно N. Защита от бреда остаётся:
+// невалидное значение → fallback.
 function parsePositiveLimit(value: string | undefined, fallback = 200): number {
     if (!value) return fallback;
     const parsed = Number(value);
     if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
-    return Math.max(1, Math.min(5000, Math.trunc(parsed)));
+    return Math.max(1, Math.trunc(parsed));
 }
 
 function parseOptionalPositiveLimit(value: string | undefined): number | undefined {
@@ -789,11 +796,14 @@ app.get('/api/satellites', async (_req, res) => {
         return;
     }
     try {
+        // 2026-04-24: default=null (весь каталог). Раньше 5000 скрывало
+        // 3.8× спутников (реальных 19k). Клиент явно передаёт ?limit=N
+        // только если хочет обрезку (напр. тесты).
         const rawLimit = typeof _req.query.limit === 'string' ? _req.query.limit.trim().toLowerCase() : '';
-        let limit: number | null | undefined = 5000;
-        if (rawLimit === 'all' || rawLimit === '0') {
+        let limit: number | null | undefined = null;
+        if (rawLimit === 'all' || rawLimit === '0' || rawLimit === '') {
             limit = null;
-        } else if (rawLimit) {
+        } else {
             const parsed = Number(rawLimit);
             if (!Number.isInteger(parsed) || parsed < 0) {
                 res.status(400).json({ error: 'Invalid limit (expected positive integer or "all")' });
@@ -814,10 +824,10 @@ app.get('/api/satellites/recon', async (req, res) => {
     }
     try {
         const rawLimit = typeof req.query.limit === 'string' ? req.query.limit.trim().toLowerCase() : '';
-        let limit: number | null | undefined = 5000;
-        if (rawLimit === 'all' || rawLimit === '0') {
+        let limit: number | null | undefined = null;
+        if (rawLimit === 'all' || rawLimit === '0' || rawLimit === '') {
             limit = null;
-        } else if (rawLimit) {
+        } else {
             const parsed = Number(rawLimit);
             if (!Number.isInteger(parsed) || parsed < 0) {
                 res.status(400).json({ error: 'Invalid limit (expected positive integer or "all")' });
@@ -899,6 +909,254 @@ app.get('/api/live/snapshot', async (_req, res) => {
     } catch (err: any) {
         console.error('[api/live/snapshot] failed:', err?.message || err);
         res.status(500).json({ error: 'snapshot-failed' });
+    }
+});
+
+app.get('/api/replay/render-chunks', async (req, res) => {
+    if (!replayQueryService.isReady()) {
+        res.status(503).json({ error: 'Replay database is not ready' });
+        return;
+    }
+
+    const at = parseIsoDateOrNull(req.query.at as string | undefined);
+    if (!at) {
+        res.status(400).json({ error: 'Missing or invalid at timestamp' });
+        return;
+    }
+    const from = parseIsoDateOrNull(req.query.from as string | undefined) || at;
+    const to = parseIsoDateOrNull(req.query.to as string | undefined) || at;
+
+    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    if (req.query.bbox && !bbox) {
+        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        return;
+    }
+
+    const zRaw = req.query.z as string | undefined;
+    const z = zRaw == null ? 0 : Number(zRaw);
+    if (zRaw != null && (!Number.isInteger(z) || z < 0 || z > 6)) {
+        res.status(400).json({ error: 'Invalid z (expected integer 0..6)' });
+        return;
+    }
+
+    const layers = parseLayerScopeList(req.query.layers as string | undefined);
+    if (layers.length === 0) {
+        res.status(400).json({ error: 'render-chunks requires at least one layer' });
+        return;
+    }
+
+    const aggregateFires = req.query.cluster === '0' || req.query.cluster === 'false'
+        ? false
+        : true;
+
+    const routeStartedAt = performance.now();
+    try {
+        const response = await withSpan('replay.render_chunks', {
+            'replay.layers': layers.join(','),
+            'replay.layers.count': layers.length,
+            'replay.at': at,
+        }, async () => replayRenderBatchService.buildReplayChunks({
+            at,
+            from,
+            to,
+            layers,
+            z,
+            bbox: bbox || undefined,
+            aggregateFires,
+        }));
+        const bytes = Object.values(response.layers)
+            .flat()
+            .reduce((sum, chunk) => sum + chunk.bytes.binary, 0);
+        logPerfEvent('replay.render_chunks', {
+            source: 'backend',
+            at,
+            layers,
+            bytes,
+            ms: Math.round(performance.now() - routeStartedAt),
+        });
+        res.setHeader('Cache-Control', 'no-store');
+        res.json(response);
+    } catch (err: any) {
+        console.error('[api/replay/render-chunks] failed:', err?.message || err);
+        sendError(res, err);
+    }
+});
+
+app.get('/api/replay/render-chunks/:chunkId/data', async (req, res) => {
+    try {
+        const read = await replayRenderBatchService.readChunkData(req.params.chunkId);
+        if (!read) {
+            res.status(404).json({ error: 'Render chunk not found' });
+            return;
+        }
+        res.setHeader('Content-Type', 'application/octet-stream');
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        res.setHeader('ETag', read.manifest.chunkId);
+        res.send(read.buffer);
+    } catch (err: any) {
+        console.error('[api/replay/render-chunks/:chunkId/data] failed:', err?.message || err);
+        sendError(res, err);
+    }
+});
+
+app.get('/api/replay/render-chunks/:chunkId/features', async (req, res) => {
+    try {
+        const read = await replayRenderBatchService.readFeatureRefs(req.params.chunkId);
+        if (!read) {
+            res.status(404).json({ error: 'Render chunk not found' });
+            return;
+        }
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        res.json({
+            chunkId: req.params.chunkId,
+            at: read.manifest.at,
+            layerId: read.manifest.layerId,
+            features: read.features,
+        });
+    } catch (err: any) {
+        console.error('[api/replay/render-chunks/:chunkId/features] failed:', err?.message || err);
+        sendError(res, err);
+    }
+});
+
+app.get('/api/replay/render-chunks/:chunkId/features/:featureIndex', async (req, res) => {
+    const featureIndex = Number(req.params.featureIndex);
+    if (!Number.isInteger(featureIndex) || featureIndex < 0) {
+        res.status(400).json({ error: 'Invalid feature index' });
+        return;
+    }
+    try {
+        const feature = await replayRenderBatchService.readFeatureMetadata(req.params.chunkId, featureIndex);
+        if (!feature) {
+            res.status(404).json({ error: 'Render feature not found' });
+            return;
+        }
+        res.setHeader('Cache-Control', 'no-store');
+        res.json(feature);
+    } catch (err: any) {
+        console.error('[api/replay/render-chunks/:chunkId/features/:featureIndex] failed:', err?.message || err);
+        sendError(res, err);
+    }
+});
+
+app.get('/api/replay/render-point-deltas', async (req, res) => {
+    if (!replayQueryService.isReady()) {
+        res.status(503).json({ error: 'Replay database is not ready' });
+        return;
+    }
+
+    const at = parseIsoDateOrNull(req.query.at as string | undefined);
+    if (!at) {
+        res.status(400).json({ error: 'Missing or invalid at timestamp' });
+        return;
+    }
+    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    if (req.query.bbox && !bbox) {
+        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        return;
+    }
+    const layers = parseLayerScopeList(req.query.layers as string | undefined);
+    if (layers.length === 0) {
+        res.status(400).json({ error: 'render-point-deltas requires at least one layer' });
+        return;
+    }
+    const aggregateFires = req.query.cluster === '0' || req.query.cluster === 'false'
+        ? false
+        : true;
+
+    const routeStartedAt = performance.now();
+    try {
+        if (String(req.query.format || '').toLowerCase() === 'bin') {
+            if (layers.length !== 1) {
+                res.status(400).json({ error: 'Binary render-point-deltas requires exactly one layer' });
+                return;
+            }
+            const binary = await withSpan('replay.render_point_delta_binary', {
+                'replay.layers': layers.join(','),
+                'replay.layers.count': layers.length,
+                'replay.at': at,
+            }, async () => replayRenderBatchService.buildPointDeltaBinary({
+                at,
+                layers,
+                bbox: bbox || undefined,
+                aggregateFires,
+            }));
+            if (!binary) {
+                res.status(404).json({ error: 'Render point delta not found' });
+                return;
+            }
+            logPerfEvent('replay.render_point_delta_binary', {
+                source: 'backend',
+                at,
+                layers,
+                count: binary.count,
+                bytes: binary.buffer.byteLength,
+                ms: Math.round(performance.now() - routeStartedAt),
+            });
+            res.setHeader('Cache-Control', 'no-store');
+            res.setHeader('Content-Type', 'application/octet-stream');
+            res.setHeader('X-Replay-At', binary.at);
+            res.setHeader('X-Replay-Layer', binary.layerId);
+            res.send(binary.buffer);
+            return;
+        }
+        const response = await withSpan('replay.render_point_deltas', {
+            'replay.layers': layers.join(','),
+            'replay.layers.count': layers.length,
+            'replay.at': at,
+        }, async () => replayRenderBatchService.buildPointDeltas({
+            at,
+            layers,
+            bbox: bbox || undefined,
+            aggregateFires,
+        }));
+        logPerfEvent('replay.render_point_deltas', {
+            source: 'backend',
+            at,
+            layers,
+            count: Object.values(response.layers).reduce((sum, layer) => sum + layer.count, 0),
+            ms: Math.round(performance.now() - routeStartedAt),
+        });
+        res.setHeader('Cache-Control', 'no-store');
+        res.json(response);
+    } catch (err: any) {
+        console.error('[api/replay/render-point-deltas] failed:', err?.message || err);
+        sendError(res, err);
+    }
+});
+
+app.get('/api/replay/render-feature', async (req, res) => {
+    if (!replayQueryService.isReady()) {
+        res.status(503).json({ error: 'Replay database is not ready' });
+        return;
+    }
+    const at = parseIsoDateOrNull(req.query.at as string | undefined);
+    const layerId = String(req.query.layerId || '');
+    const family = String(req.query.family || '');
+    const id = String(req.query.id || '');
+    const hashRaw = req.query.hash != null ? Number(req.query.hash) : null;
+    if (!at || !layerId || (!id && !Number.isFinite(hashRaw ?? NaN)) || !['entity', 'event', 'asset'].includes(family)) {
+        res.status(400).json({ error: 'Missing or invalid at/layerId/family/id-or-hash' });
+        return;
+    }
+    try {
+        const feature = await replayRenderBatchService.readFeatureMetadataAt({
+            at,
+            layerId,
+            family: family as any,
+            id: id || undefined,
+            hash: Number.isFinite(hashRaw ?? NaN) ? Number(hashRaw) : undefined,
+            sourceId: req.query.sourceId ? String(req.query.sourceId) : null,
+        });
+        if (!feature) {
+            res.status(404).json({ error: 'Render feature not found' });
+            return;
+        }
+        res.setHeader('Cache-Control', 'no-store');
+        res.json(feature);
+    } catch (err: any) {
+        console.error('[api/replay/render-feature] failed:', err?.message || err);
+        sendError(res, err);
     }
 });
 
@@ -1007,48 +1265,105 @@ app.post('/api/replay/tile-bundle', async (req, res) => {
     }
     const tileRoot = path.resolve(__dirname, '../var/replay-tiles');
     try {
-        const t0 = Date.now();
-        const buffers = await Promise.all(urls.map(async (url) => {
-            // url формат: /static/replay-tiles/{layer}/{z}/{x}/{y}/{filename}
-            if (typeof url !== 'string' || !url.startsWith('/static/replay-tiles/')) return null;
-            const rel = url.slice('/static/replay-tiles/'.length);
-            if (rel.includes('..')) return null;
-            const filePath = path.join(tileRoot, rel);
-            try {
-                return await fs.promises.readFile(filePath);
-            } catch {
-                return null;
-            }
-        }));
-        const urlBufs = urls.map((u) => Buffer.from(u, 'utf8'));
-        const totalSize = 4 + buffers.reduce((acc, b, i) => acc + 4 + urlBufs[i].length + 4 + (b?.length || 0), 0);
-        const out = Buffer.allocUnsafe(totalSize);
-        let off = 0;
-        out.writeUInt32LE(buffers.length, off); off += 4;
-        for (let i = 0; i < buffers.length; i += 1) {
-            const kb = urlBufs[i];
-            out.writeUInt32LE(kb.length, off); off += 4;
-            kb.copy(out, off); off += kb.length;
-            const pb = buffers[i];
-            const plen = pb?.length || 0;
-            out.writeUInt32LE(plen, off); off += 4;
-            if (pb && plen > 0) { pb.copy(out, off); off += plen; }
-        }
-        const took = Date.now() - t0;
-        recordReplayTileBundle(urls.length, out.length, took);
         const layerSet = new Set<string>();
         for (const u of urls) {
             if (typeof u !== 'string') continue;
             const parts = u.split('/');
             if (parts[3]) layerSet.add(parts[3]);
         }
-        logPerfEvent('replay.tile_bundle', { source: 'backend', tileCount: urls.length, bytes: out.length, ms: took, layers: Array.from(layerSet) });
-        if (urls.length > 50 || took > 200) {
-            console.log(`[tile-bundle] ${urls.length} tiles, ${out.length} bytes, ${took}ms`);
-        }
-        res.setHeader('Content-Type', 'application/octet-stream');
-        res.setHeader('Cache-Control', 'no-store');
-        res.send(out);
+        await withSpan('replay.tile_bundle', {
+            'http.route': '/api/replay/tile-bundle',
+            'replay.tiles': urls.length,
+            'replay.layers': Array.from(layerSet).join(','),
+        }, async () => {
+            const t0 = performance.now();
+            const tRead0 = performance.now();
+            const buffers = await withSpan('replay.tile_bundle.read', {
+                'replay.tiles': urls.length,
+                'replay.layers': Array.from(layerSet).join(','),
+            }, async () => Promise.all(urls.map(async (url) => {
+                // url формат: /static/replay-tiles/{layer}/{z}/{x}/{y}/{filename}
+                if (typeof url !== 'string' || !url.startsWith('/static/replay-tiles/')) return null;
+                const rel = url.slice('/static/replay-tiles/'.length);
+                if (rel.includes('..')) return null;
+                const filePath = path.join(tileRoot, rel);
+                const tOne = performance.now();
+                try {
+                    const buffer = await fs.promises.readFile(filePath);
+                    const readMs = performance.now() - tOne;
+                    if (readMs > 250) {
+                        logPerfEvent('replay.tile_bundle_read_slow', {
+                            source: 'backend',
+                            url,
+                            bytes: buffer.byteLength,
+                            ms: Math.round(readMs),
+                        });
+                    }
+                    return buffer;
+                } catch {
+                    return null;
+                }
+            })));
+            const readMs = performance.now() - tRead0;
+            const readBytes = buffers.reduce((acc, b) => acc + (b?.length || 0), 0);
+            const missing = buffers.reduce((acc, b) => acc + (b ? 0 : 1), 0);
+            recordReplayTileBundlePhase('read', urls.length, readBytes, readMs);
+
+            const tEncode0 = performance.now();
+            const out = await withSpan('replay.tile_bundle.encode', {
+                'replay.tiles': urls.length,
+                'replay.bytes.read': readBytes,
+                'replay.missing': missing,
+            }, async () => {
+                const urlBufs = urls.map((u) => Buffer.from(u, 'utf8'));
+                const totalSize = 4 + buffers.reduce((acc, b, i) => acc + 4 + urlBufs[i].length + 4 + (b?.length || 0), 0);
+                const encoded = Buffer.allocUnsafe(totalSize);
+                let off = 0;
+                encoded.writeUInt32LE(buffers.length, off); off += 4;
+                for (let i = 0; i < buffers.length; i += 1) {
+                    const kb = urlBufs[i];
+                    encoded.writeUInt32LE(kb.length, off); off += 4;
+                    kb.copy(encoded, off); off += kb.length;
+                    const pb = buffers[i];
+                    const plen = pb?.length || 0;
+                    encoded.writeUInt32LE(plen, off); off += 4;
+                    if (pb && plen > 0) { pb.copy(encoded, off); off += plen; }
+                }
+                return encoded;
+            });
+            const encodeMs = performance.now() - tEncode0;
+            recordReplayTileBundlePhase('encode', urls.length, out.length, encodeMs);
+
+            const took = performance.now() - t0;
+            recordReplayTileBundle(urls.length, out.length, took);
+            logPerfEvent('replay.tile_bundle', {
+                source: 'backend',
+                tileCount: urls.length,
+                bytes: out.length,
+                ms: Math.round(took),
+                readMs: Math.round(readMs),
+                encodeMs: Math.round(encodeMs),
+                missing,
+                layers: Array.from(layerSet),
+            });
+            if (urls.length > 50 || took > 200) {
+                console.log(`[tile-bundle] ${urls.length} tiles, ${out.length} bytes, ${Math.round(took)}ms read=${Math.round(readMs)}ms encode=${Math.round(encodeMs)}ms missing=${missing}`);
+            }
+            res.setHeader('Content-Type', 'application/octet-stream');
+            res.setHeader('Cache-Control', 'no-store');
+            const tSend0 = performance.now();
+            res.send(out);
+            const sendMs = performance.now() - tSend0;
+            recordReplayTileBundlePhase('send', urls.length, out.length, sendMs);
+            logPerfEvent('replay.tile_bundle_phase', {
+                source: 'backend',
+                phase: 'send',
+                tileCount: urls.length,
+                bytes: out.length,
+                ms: Math.round(sendMs),
+                layers: Array.from(layerSet),
+            });
+        });
     } catch (err: any) {
         console.error('[api/replay/tile-bundle] failed:', err?.message || err);
         res.status(500).json({ error: err?.message || 'tile-bundle-failed' });
@@ -1148,6 +1463,9 @@ app.get('/api/replay/state', async (req, res) => {
 
         const layerIds = parseLayerScopeList(req.query.layers as string | undefined);
         const layerLimitMap = parseLayerLimitMap(req.query.layerLimits as string | undefined);
+        const aggregateFires = req.query.cluster === '0' || req.query.cluster === 'false'
+            ? false
+            : true;
         const routeStartedAt = performance.now();
 
         await withSpan('replay.state', {
@@ -1167,6 +1485,7 @@ app.get('/api/replay/state', async (req, res) => {
                 subtype: req.query.subtype as string | undefined,
                 bbox: bbox || undefined,
                 limit: replayLimit,
+                aggregateFires,
             };
 
             let entities;

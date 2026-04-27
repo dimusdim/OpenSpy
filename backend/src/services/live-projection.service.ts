@@ -163,7 +163,10 @@ export class LiveProjectionService {
         return this.database.isReady();
     }
 
-    private async listLatestEvents(layerId: string, sourceId?: string | null, limit = 200000): Promise<EventRow[]> {
+    // limit = null/undefined → SQL без LIMIT (возвращаем всё).
+    // Раньше default 200000 молча обрезал. 2026-04-24: пользователь запретил
+    // искусственные обрезки объёма — каждый caller решает явно.
+    private async listLatestEvents(layerId: string, sourceId?: string | null, limit?: number | null): Promise<EventRow[]> {
         if (!this.database.isReady()) return [];
 
         const params: unknown[] = [layerId];
@@ -172,7 +175,7 @@ export class LiveProjectionService {
             params.push(sourceId);
             sourceWhere = `AND e.source_id = $${params.length}`;
         }
-        params.push(limit);
+        const limitSql = limit != null ? (params.push(limit), `LIMIT $${params.length}`) : '';
 
         const result = await this.database.query<EventRow>(
             `
@@ -189,7 +192,7 @@ export class LiveProjectionService {
                 WHERE e.layer_id = $1
                 ${sourceWhere}
                 ORDER BY COALESCE(e.observed_at, e.updated_at) DESC NULLS LAST, e.updated_at DESC
-                LIMIT $${params.length}
+                ${limitSql}
             `,
             params,
         );
@@ -197,7 +200,7 @@ export class LiveProjectionService {
         return result?.rows || [];
     }
 
-    private async listLatestAssets(layerId: string, sourceId?: string | null, limit = 100000): Promise<AssetRow[]> {
+    private async listLatestAssets(layerId: string, sourceId?: string | null, limit?: number | null): Promise<AssetRow[]> {
         if (!this.database.isReady()) return [];
 
         const params: unknown[] = [layerId];
@@ -206,7 +209,7 @@ export class LiveProjectionService {
             params.push(sourceId);
             sourceWhere = `AND a.source_id = $${params.length}`;
         }
-        params.push(limit);
+        const limitSql = limit != null ? (params.push(limit), `LIMIT $${params.length}`) : '';
 
         const result = await this.database.query<AssetRow>(
             `
@@ -221,7 +224,7 @@ export class LiveProjectionService {
                 WHERE a.layer_id = $1
                 ${sourceWhere}
                 ORDER BY COALESCE(a.last_observed_at, a.updated_at, a.created_at) DESC NULLS LAST, a.updated_at DESC
-                LIMIT $${params.length}
+                ${limitSql}
             `,
             params,
         );
@@ -266,8 +269,11 @@ export class LiveProjectionService {
         return result?.rows || [];
     }
 
-    private async listLiveEntities(layerId: string, maxAgeSeconds: number, limit = 50000): Promise<EntityLiveRow[]> {
+    private async listLiveEntities(layerId: string, maxAgeSeconds: number, limit?: number | null): Promise<EntityLiveRow[]> {
         if (!this.database.isReady()) return [];
+
+        const params: unknown[] = [layerId, maxAgeSeconds];
+        const limitSql = limit != null ? (params.push(limit), `LIMIT $${params.length}`) : '';
 
         const result = await this.database.query<EntityLiveRow>(
             `
@@ -288,9 +294,9 @@ export class LiveProjectionService {
                 WHERE e.layer_id = $1
                   AND ls.observed_at >= now() - ($2::text || ' seconds')::interval
                 ORDER BY ls.observed_at DESC, ls.updated_at DESC
-                LIMIT $3
+                ${limitSql}
             `,
-            [layerId, maxAgeSeconds, limit],
+            params,
         );
 
         return result?.rows || [];
@@ -419,7 +425,7 @@ export class LiveProjectionService {
     }
 
     async getIodaOutages(): Promise<OutageRecord[]> {
-        const rows = await this.listLatestEvents('outage', 'ioda', 10000);
+        const rows = await this.listLatestEvents('outage', 'ioda');
         return rows.map((row) => {
             const props = stripStateHash(row.properties);
             const observedAt = normalizeObservedAt(row.observed_at);
@@ -437,7 +443,7 @@ export class LiveProjectionService {
     }
 
     async getCloudflareOutages(): Promise<CloudflareOutage[]> {
-        const rows = await this.listLatestEvents('outage', 'cloudflare_radar', 10000);
+        const rows = await this.listLatestEvents('outage', 'cloudflare_radar');
         return rows.map((row) => {
             const props = stripStateHash(row.properties);
             const observedAt = normalizeObservedAt(row.observed_at);
@@ -456,7 +462,7 @@ export class LiveProjectionService {
     }
 
     async getAcledConflicts(): Promise<ConflictEvent[]> {
-        const rows = await this.listLatestEvents('conflict', 'acled', 5000);
+        const rows = await this.listLatestEvents('conflict', 'acled');
         return rows.map((row) => {
             const props = stripStateHash(row.properties);
             const observedAt = normalizeObservedAt(row.observed_at);
@@ -477,7 +483,7 @@ export class LiveProjectionService {
     }
 
     async getGdeltConflicts(): Promise<GdeltConflictEvent[]> {
-        const rows = await this.listLatestEvents('conflict', 'gdelt', 5000);
+        const rows = await this.listLatestEvents('conflict', 'gdelt');
         return rows.map((row) => {
             const props = stripStateHash(row.properties);
             const observedAt = normalizeObservedAt(row.observed_at);
@@ -504,7 +510,7 @@ export class LiveProjectionService {
     }
 
     async getGfwEvents(): Promise<GFWEvent[]> {
-        const rows = await this.listLatestEvents('gfw', 'gfw', 5000);
+        const rows = await this.listLatestEvents('gfw', 'gfw');
         return rows.map((row) => {
             const props = stripStateHash(row.properties);
             const observedAt = normalizeObservedAt(row.observed_at);
@@ -528,7 +534,7 @@ export class LiveProjectionService {
     }
 
     async getAirspaceZones(): Promise<AirspaceZone[]> {
-        const rows = await this.listLatestAssets('airspace', 'openaip', 50000);
+        const rows = await this.listLatestAssets('airspace', 'openaip');
         return rows.map((row) => {
             const props = stripStateHash(row.properties);
             return {
@@ -544,7 +550,7 @@ export class LiveProjectionService {
     }
 
     async getPipelines(): Promise<PipelineRecord[]> {
-        const rows = await this.listLatestAssets('pipeline', 'osm_pipelines', 50000);
+        const rows = await this.listLatestAssets('pipeline', 'osm_pipelines');
         return rows.map((row) => {
             const props = stripStateHash(row.properties);
             return {
@@ -557,7 +563,7 @@ export class LiveProjectionService {
     }
 
     async getCables(): Promise<any> {
-        const rows = await this.listLatestAssets('cable', 'telegeography', 10000);
+        const rows = await this.listLatestAssets('cable', 'telegeography');
         return {
             type: 'FeatureCollection',
             features: rows
@@ -574,7 +580,7 @@ export class LiveProjectionService {
     }
 
     async getAircraftLive(): Promise<LiveAircraftRecord[]> {
-        const rows = await this.listLiveEntities('aircraft', await this.getSourceRemovalWindowSeconds('opensky', 300), 25000);
+        const rows = await this.listLiveEntities('aircraft', await this.getSourceRemovalWindowSeconds('opensky', 300));
         return rows
             .map((row) => {
                 const entityProps = stripStateHash(row.entity_properties);
@@ -607,7 +613,7 @@ export class LiveProjectionService {
     }
 
     async getVesselsLive(): Promise<LiveVesselRecord[]> {
-        const rows = await this.listLiveEntities('vessel', await this.getSourceRemovalWindowSeconds('aisstream', 1800), 60000);
+        const rows = await this.listLiveEntities('vessel', await this.getSourceRemovalWindowSeconds('aisstream', 1800));
         return rows
             .map((row) => {
                 const entityProps = stripStateHash(row.entity_properties);
