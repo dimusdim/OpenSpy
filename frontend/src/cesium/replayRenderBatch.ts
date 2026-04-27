@@ -318,7 +318,13 @@ function familyFromCode(code: number | undefined, layerId: string): RenderFeatur
     if (code === 1) return 'entity';
     if (code === 2) return 'event';
     if (code === 3) return 'asset';
-    return layerId === 'aircraft' || layerId === 'vessel' || layerId === 'satellite' ? 'entity' : 'event';
+    return defaultFeatureFamilyForLayer(layerId);
+}
+
+function defaultFeatureFamilyForLayer(layerId: string): RenderFeatureRef['family'] {
+    if (layerId === 'aircraft' || layerId === 'vessel' || layerId === 'satellite') return 'entity';
+    if (layerId === 'airspace' || layerId === 'pipeline' || layerId === 'cable') return 'asset';
+    return 'event';
 }
 
 function decodePointDeltaBinary(buffer: ArrayBuffer, layerId: string, atIso: string): PointDeltaLayer {
@@ -394,8 +400,6 @@ const REPLAY_POINT_ICON_DEFAULT = svgUri('<circle cx="12" cy="12" r="7" fill="#3
 const REPLAY_JAM_HIGH = svgUri('<circle cx="12" cy="12" r="7" fill="#ef4444"/>');
 const REPLAY_JAM_MEDIUM = svgUri('<circle cx="12" cy="12" r="7" fill="#f97316"/>');
 const REPLAY_JAM_LOW = svgUri('<circle cx="12" cy="12" r="7" fill="#eab308"/>');
-const POINT_DELTA_LAYER_IDS = new Set(['aircraft', 'vessel', 'satellite', 'disasters', 'fire', 'outage', 'conflict']);
-
 const LAYER_COLORS: Record<string, Cesium.Color> = {
     aircraft: Cesium.Color.fromCssColorString('#38bdf8'),
     vessel: Cesium.Color.fromCssColorString('#22d3ee'),
@@ -557,6 +561,7 @@ function getFeatureRow(table: Uint32Array, rowIndex: number): {
     indexStart: number;
     indexCount: number;
     styleId: number;
+    featureHash: number;
 } {
     const offset = rowIndex * 12;
     return {
@@ -571,6 +576,7 @@ function getFeatureRow(table: Uint32Array, rowIndex: number): {
         indexStart: table[offset + 8],
         indexCount: table[offset + 9],
         styleId: table[offset + 10],
+        featureHash: table[offset + 11] >>> 0,
     };
 }
 
@@ -737,7 +743,10 @@ export class ReplayRenderBatchManager {
             if (isCancelled()) {
                 return { applied: false, layerId: options.layerId, featureCount: 0, pointCount: 0, shapeCount: 0, bytes, motionTracks: [], footprints: [] };
             }
-            const shouldFetchRefs = POINT_DELTA_LAYER_IDS.has(options.layerId);
+            // Full render chunks carry feature hashes in the binary feature
+            // table. Card/details metadata is loaded on demand by hash/id, so
+            // initial paint does not need to download the per-feature refs JSON.
+            const shouldFetchRefs = false;
             const [response, refsResponse] = await Promise.all([
                 axios.get<ArrayBuffer>(absoluteApiUrl(this.apiUrl, chunk.dataUrl), {
                     responseType: 'arraybuffer',
@@ -1150,6 +1159,8 @@ export class ReplayRenderBatchManager {
                 if (row.pointCount === 0) continue;
                 const style = manifest.styles[String(row.styleId)];
                 const ref = refs[row.featureIndex];
+                const featureHash = (row.featureHash || (ref?.id ? stableHash32(ref.id) : 0)) >>> 0;
+                const featureFamily = ref?.family || defaultFeatureFamilyForLayer(manifest.layerId);
                 const props = getFeatureProperties(decoded, row.featureIndex);
                 const icon = pointIconForStyle(manifest.layerId, style);
                 const scale = pointScaleForStyle(manifest.layerId, style);
@@ -1176,10 +1187,11 @@ export class ReplayRenderBatchManager {
                     alt: props.altitude,
                     speed: props.speedMps,
                     heading: props.headingDeg,
-                    extra: ref ? {
-                        featureId: ref.id,
-                        featureFamily: ref.family,
-                    } : undefined,
+                    extra: {
+                        ...(ref?.id ? { featureId: ref.id } : {}),
+                        ...(featureHash ? { featureHash } : {}),
+                        featureFamily,
+                    },
                     renderBatch: {
                         chunkId: manifest.chunkId,
                         featureIndex: row.featureIndex,
@@ -1202,27 +1214,7 @@ export class ReplayRenderBatchManager {
                         ...(manifest.layerId === 'vessel' ? { alignedAxis: Cesium.Cartesian3.UNIT_Z } : {}),
                         show: visible,
                     });
-                    if (ref?.id) {
-                        const slot: SatelliteApplySlot = {
-                            index: pointCount,
-                            targetId: pickId,
-                            billboard,
-                            scratch: new Cesium.Cartesian3(),
-                            getVisible: () => this.resolveVisible(
-                                pickId,
-                                style?.layerId || manifest.layerId,
-                                style?.subtype,
-                                style?.sourceId,
-                            ),
-                        };
-                        pointSlotsByFeatureId.set(ref.id, slot);
-                        pickIdByFeatureId.set(ref.id, pickId);
-                        featureIdByPickId.set(pickId, ref.id);
-                        const hash = stableHash32(ref.id);
-                        pointSlotsByFeatureHash.set(hash, slot);
-                        pickIdByFeatureHash.set(hash, pickId);
-                    }
-                    pointSlotsByFeatureIndex.set(row.featureIndex, {
+                    const slot: SatelliteApplySlot = {
                         index: pointCount,
                         targetId: pickId,
                         billboard,
@@ -1233,7 +1225,17 @@ export class ReplayRenderBatchManager {
                             style?.subtype,
                             style?.sourceId,
                         ),
-                    });
+                    };
+                    if (ref?.id) {
+                        pointSlotsByFeatureId.set(ref.id, slot);
+                        pickIdByFeatureId.set(ref.id, pickId);
+                        featureIdByPickId.set(pickId, ref.id);
+                    }
+                    if (featureHash) {
+                        pointSlotsByFeatureHash.set(featureHash, slot);
+                        pickIdByFeatureHash.set(featureHash, pickId);
+                    }
+                    pointSlotsByFeatureIndex.set(row.featureIndex, slot);
                     pickIdByFeatureIndex.set(row.featureIndex, pickId);
                     this.onPointAdd?.(pickId, billboard);
                     pointCount += 1;
@@ -1247,6 +1249,8 @@ export class ReplayRenderBatchManager {
             const row = getFeatureRow(table, rowIndex);
             const style = manifest.styles[String(row.styleId)];
             const ref = refs[row.featureIndex];
+            const featureHash = (row.featureHash || (ref?.id ? stableHash32(ref.id) : 0)) >>> 0;
+            const featureFamily = ref?.family || defaultFeatureFamilyForLayer(manifest.layerId);
             const props = getFeatureProperties(decoded, row.featureIndex);
             const pickId = makeRenderId(manifest.chunkId, row.featureIndex);
             const visible = this.resolveVisible(
@@ -1271,10 +1275,11 @@ export class ReplayRenderBatchManager {
                     alt: props.altitude,
                     speed: props.speedMps,
                     heading: props.headingDeg,
-                    extra: ref ? {
-                        featureId: ref.id,
-                        featureFamily: ref.family,
-                    } : undefined,
+                    extra: {
+                        ...(ref?.id ? { featureId: ref.id } : {}),
+                        ...(featureHash ? { featureHash } : {}),
+                        featureFamily,
+                    },
                     renderBatch: {
                         chunkId: manifest.chunkId,
                         featureIndex: row.featureIndex,
