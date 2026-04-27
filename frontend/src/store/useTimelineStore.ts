@@ -427,7 +427,10 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
   setInfraViewportPct: (pct) => set({ infraViewportPct: pct }),
   tileMode: 'google' as 'google' | 'osm' | 'modis',
   clusteringEnabled: true,
-  satelliteRenderLimit: 5000,
+  // null = 'all' — показываем весь каталог TLE из backend (~19k). 5000 был
+  // артефактом ранней оптимизации и прятал 3.8× спутников. Пользователь
+  // 2026-04-24: "5000 ровно это явно обрезка, проблема в логике".
+  satelliteRenderLimit: null,
   prevFilterState: null,
   activeFilter: null,
   activePreset: null,
@@ -514,7 +517,17 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
   })),
   setReplayHydrating: (replayHydrating) => set({ replayHydrating }),
   setSpeedMultiplier: (speedMultiplier) => set({ speedMultiplier }),
-  setIsPlaying: (isPlaying) => set({ isPlaying }),
+  // Snapshot = все объекты. Запрет включить play в historical replay
+  // пока идёт гидрация: UI-кнопка уже disabled на `replayHydrating`,
+  // но store-guard нужен, чтобы прямой вызов (тесты, keyboard shortcut,
+  // URL-параметр) не стартовал playback на наполовину загруженном
+  // snapshot. Отключение playback (isPlaying=false) разрешено всегда.
+  setIsPlaying: (isPlaying) => set((state) => {
+      if (isPlaying && state.mode === 'playback' && state.playbackKind === 'historical' && state.replayHydrating) {
+          return {} as Partial<typeof state>;
+      }
+      return { isPlaying };
+  }),
   secondaryLoadReleased: false,
   releaseSecondaryLoad: () => set({ secondaryLoadReleased: true }),
   setShowTrajectories: (show) => set(state => {

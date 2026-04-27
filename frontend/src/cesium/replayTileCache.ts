@@ -54,6 +54,7 @@ type CachedTileRecord = {
     contentHash: string;
     payload: ReplayTilePayload;
     updatedAt: number;
+    bytes?: number;
 };
 
 const DB_NAME = 'openspy-replay-tiles';
@@ -88,6 +89,7 @@ const IDB_PUT_YIELD_MS = 0;
 
 export class ReplayTileCache {
     private readonly memLRU = new Map<string, CachedTileRecord>();
+    private memBytes = 0;
     private dbPromise: Promise<IDBDatabase | null> | null = null;
     // Dedup in-flight network fetches per-URL. Without this, a background
     // prefetch and a foreground seek may both POST the same URLs, doubling
@@ -301,7 +303,11 @@ export class ReplayTileCache {
         });
     }
 
-    constructor(private readonly apiUrl: string, private readonly maxMemEntries = 100) {
+    constructor(
+        private readonly apiUrl: string,
+        private readonly maxMemEntries = 100,
+        private readonly maxMemBytes = 160 * 1024 * 1024,
+    ) {
         // Prewarm IndexedDB open. On cold-after-wipe we observed
         // `cache-open-db = 7 040 ms` inside fetchTilesBundle — 7 seconds
         // blocked the first seek before any HTTP even started. Opening
@@ -335,13 +341,39 @@ export class ReplayTileCache {
         return this.dbPromise;
     }
 
+    private recordBytes(record: CachedTileRecord): number {
+        const bytes = Number(record.bytes);
+        return Number.isFinite(bytes) && bytes > 0 ? bytes : 0;
+    }
+
+    private estimatePayloadBytes(entry: ReplayManifestTileEntry, payload: ReplayTilePayload): number {
+        if (Number.isFinite(entry.bytes) && entry.bytes > 0) return entry.bytes;
+        const itemCount =
+            (payload.items?.length || 0) +
+            (payload.snapshot?.entities?.length || 0) +
+            (payload.snapshot?.events?.length || 0) +
+            (payload.snapshot?.assets?.length || 0);
+        return Math.max(1024, itemCount * 512);
+    }
+
+    private deleteMem(key: string): void {
+        const existing = this.memLRU.get(key);
+        if (!existing) return;
+        this.memBytes = Math.max(0, this.memBytes - this.recordBytes(existing));
+        this.memLRU.delete(key);
+    }
+
     private touchMem(record: CachedTileRecord) {
-        this.memLRU.delete(record.key);
+        this.deleteMem(record.key);
         this.memLRU.set(record.key, record);
-        while (this.memLRU.size > this.maxMemEntries) {
+        this.memBytes += this.recordBytes(record);
+        while (
+            this.memLRU.size > this.maxMemEntries ||
+            (this.memLRU.size > 1 && this.memBytes > this.maxMemBytes)
+        ) {
             const oldest = this.memLRU.keys().next().value;
             if (!oldest) break;
-            this.memLRU.delete(oldest);
+            this.deleteMem(oldest);
         }
     }
 
@@ -366,6 +398,7 @@ export class ReplayTileCache {
             throw error;
         });
         if (!payload || payload.contentHash !== entry.contentHash) return null;
+        payload.bytes = payload.bytes ?? this.estimatePayloadBytes(entry, payload.payload);
         this.touchMem(payload);
         return payload.payload;
     }
@@ -378,6 +411,7 @@ export class ReplayTileCache {
             contentHash: entry.contentHash,
             payload,
             updatedAt: Date.now(),
+            bytes: this.estimatePayloadBytes(entry, payload),
         };
         this.touchMem(record);
 

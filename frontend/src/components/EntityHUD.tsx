@@ -16,6 +16,7 @@ import { airspaceMetaMap } from '../cesium/useAirspaceLayer';
 import { infraMetaMap } from '../cesium/useInfrastructureLayer';
 import { satelliteMetaMap } from '../cesium/useSatellitesLayer';
 import { replayMetaMap } from '../cesium/useReplayOverlay';
+import { replayRenderBatchMetaMap } from '../cesium/replayRenderBatch';
 
 // Squawk code interpretation
 function squawkBadge(code: string | null): { label: string; color: string } | null {
@@ -149,6 +150,27 @@ export default function EntityHUD() {
                     heading: replayMeta.heading ?? undefined,
                     description: replayMeta.description,
                     extra: replayMeta.extra,
+                });
+                requestAnimationFrame(update);
+                return;
+            }
+
+            const replayBatchMeta = replayRenderBatchMetaMap.get(selectedEntityId);
+            if (replayBatchMeta) {
+                const pos = Cesium.Cartesian3.fromDegrees(replayBatchMeta.lng, replayBatchMeta.lat, replayBatchMeta.alt || 0);
+                const canvasPos = Cesium.SceneTransforms.worldToWindowCoordinates(cesViewer.scene, pos);
+                setScreenPos(canvasPos ? { x: canvasPos.x, y: canvasPos.y } : null);
+                setLive({
+                    lat: replayBatchMeta.lat,
+                    lng: replayBatchMeta.lng,
+                    alt: replayBatchMeta.alt,
+                    layer: replayBatchMeta.layer,
+                    subtype: replayBatchMeta.subtype ?? undefined,
+                    source: replayBatchMeta.source || undefined,
+                    speed: replayBatchMeta.speed ?? undefined,
+                    heading: replayBatchMeta.heading ?? undefined,
+                    description: replayBatchMeta.description,
+                    extra: replayBatchMeta.extra,
                 });
                 requestAnimationFrame(update);
                 return;

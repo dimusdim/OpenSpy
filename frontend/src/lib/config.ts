@@ -13,4 +13,5 @@ const DEFAULT_OTEL_ENDPOINT =
         ? 'http://127.0.0.1:4318'
         : `${window.location.protocol}//${window.location.hostname}:4318`;
 export const OTEL_ENDPOINT = process.env.NEXT_PUBLIC_OTEL_ENDPOINT || DEFAULT_OTEL_ENDPOINT;
-export const OTEL_ENABLED = process.env.NEXT_PUBLIC_OTEL_ENABLED !== '0';
+const RAW_OTEL_ENABLED = process.env.NEXT_PUBLIC_OTEL_ENABLED;
+export const OTEL_ENABLED = RAW_OTEL_ENABLED === '1' || RAW_OTEL_ENABLED === 'true';

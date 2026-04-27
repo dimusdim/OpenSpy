@@ -106,19 +106,37 @@ export class ReplayShapeBatch {
         const showValue = Cesium.ShowGeometryInstanceAttribute.toValue(visible);
         let updated = false;
 
-        const polygonFillAttrs = this.polygonFillPrimitive?.getGeometryInstanceAttributes(id);
+        // Async primitives (asynchronous: true in rebuildIfDirty) throw
+        // DeveloperError from getGeometryInstanceAttributes until the first
+        // update tick flips `ready`. Guard on ready + try/catch to survive
+        // visibility toggles during the ~50–200 ms async build window.
+        // Falling back to dirty=true re-queues a rebuild so the descriptor's
+        // new visibility is baked in via fresh ShowGeometryInstanceAttribute.
+        const safeGetAttrs = (
+            prim: Cesium.Primitive | Cesium.GroundPolylinePrimitive | null,
+        ): any => {
+            if (!prim) return null;
+            if (!(prim as any).ready) return null;
+            try {
+                return prim.getGeometryInstanceAttributes(id);
+            } catch {
+                return null;
+            }
+        };
+
+        const polygonFillAttrs = safeGetAttrs(this.polygonFillPrimitive);
         if (polygonFillAttrs) {
-            (polygonFillAttrs as any).show = showValue;
+            polygonFillAttrs.show = showValue;
             updated = true;
         }
-        const polygonOutlineAttrs = this.polygonOutlinePrimitive?.getGeometryInstanceAttributes(id);
+        const polygonOutlineAttrs = safeGetAttrs(this.polygonOutlinePrimitive);
         if (polygonOutlineAttrs) {
-            (polygonOutlineAttrs as any).show = showValue;
+            polygonOutlineAttrs.show = showValue;
             updated = true;
         }
-        const polylineAttrs = this.polylinePrimitive?.getGeometryInstanceAttributes(id);
+        const polylineAttrs = safeGetAttrs(this.polylinePrimitive);
         if (polylineAttrs) {
-            (polylineAttrs as any).show = showValue;
+            polylineAttrs.show = showValue;
             updated = true;
         }
 
@@ -195,8 +213,22 @@ export class ReplayShapeBatch {
                     translucent: true,
                     closed: false,
                 }),
-                asynchronous: false,
-                releaseGeometryInstances: false,
+                // Build geometry off the main thread in Cesium's worker pool.
+                // Before this change: a single airspace rebuild with ~10k
+                // polygon instances produced a 5.7s synchronous longtask in
+                // `CesiumPrimitive.update` on the main thread — the largest
+                // source of "browser freezes" observed in replay after the
+                // billboard fast-path + scratch fixes. Trade-off: the first
+                // render tick after rebuild may show the shape batch as
+                // still-building (invisible for ~50–200 ms); acceptable for
+                // airspace/pipeline/cable which already fade in.
+                asynchronous: true,
+                // Let Cesium drop the CPU-side GeometryInstance array after
+                // the first GPU build. Codex flagged per-rebuild persistence
+                // of these arrays (hundreds of polygon/polyline instances
+                // for airspace/pipeline/cable) as an episodic memory spike
+                // source during replay window reloads.
+                releaseGeometryInstances: true,
             })
             : null;
         const nextPolygonOutline = polygonOutlineInstances.length > 0
@@ -206,16 +238,44 @@ export class ReplayShapeBatch {
                     translucent: true,
                     flat: true,
                 }),
-                asynchronous: false,
-                releaseGeometryInstances: false,
+                // Build geometry off the main thread in Cesium's worker pool.
+                // Before this change: a single airspace rebuild with ~10k
+                // polygon instances produced a 5.7s synchronous longtask in
+                // `CesiumPrimitive.update` on the main thread — the largest
+                // source of "browser freezes" observed in replay after the
+                // billboard fast-path + scratch fixes. Trade-off: the first
+                // render tick after rebuild may show the shape batch as
+                // still-building (invisible for ~50–200 ms); acceptable for
+                // airspace/pipeline/cable which already fade in.
+                asynchronous: true,
+                // Let Cesium drop the CPU-side GeometryInstance array after
+                // the first GPU build. Codex flagged per-rebuild persistence
+                // of these arrays (hundreds of polygon/polyline instances
+                // for airspace/pipeline/cable) as an episodic memory spike
+                // source during replay window reloads.
+                releaseGeometryInstances: true,
             })
             : null;
         const nextPolyline = polylineInstances.length > 0
             ? new Cesium.GroundPolylinePrimitive({
                 geometryInstances: polylineInstances,
                 appearance: new Cesium.PolylineColorAppearance(),
-                asynchronous: false,
-                releaseGeometryInstances: false,
+                // Build geometry off the main thread in Cesium's worker pool.
+                // Before this change: a single airspace rebuild with ~10k
+                // polygon instances produced a 5.7s synchronous longtask in
+                // `CesiumPrimitive.update` on the main thread — the largest
+                // source of "browser freezes" observed in replay after the
+                // billboard fast-path + scratch fixes. Trade-off: the first
+                // render tick after rebuild may show the shape batch as
+                // still-building (invisible for ~50–200 ms); acceptable for
+                // airspace/pipeline/cable which already fade in.
+                asynchronous: true,
+                // Let Cesium drop the CPU-side GeometryInstance array after
+                // the first GPU build. Codex flagged per-rebuild persistence
+                // of these arrays (hundreds of polygon/polyline instances
+                // for airspace/pipeline/cable) as an episodic memory spike
+                // source during replay window reloads.
+                releaseGeometryInstances: true,
             })
             : null;
 

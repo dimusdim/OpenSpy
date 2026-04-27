@@ -74,6 +74,9 @@ export function useFiresLayer(viewer: Cesium.Viewer | null) {
     const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
     const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
     const secondaryReleased = useSecondaryLoadGate();
+    // Global clustering toggle (see TileModeToggle button). When false,
+    // fires always render raw — ignore altitude-based grid aggregation.
+    const clusteringEnabled = useTimelineStore(s => s.clusteringEnabled);
 
     const rawCollectionRef = useRef<Cesium.PointPrimitiveCollection | null>(null);
     const clusterCollectionRef = useRef<Cesium.PointPrimitiveCollection | null>(null);
@@ -295,7 +298,10 @@ export function useFiresLayer(viewer: Cesium.Viewer | null) {
                         Cesium.Math.toDegrees(rect.east),
                     ]
                     : null;
-                const gridDegrees = !storeState.isolatedEntityId
+                // Clustering toggle is authoritative. When OFF, force raw
+                // (null grid) regardless of altitude. When ON, default
+                // altitude-based grid still applies.
+                const gridDegrees = !storeState.isolatedEntityId && storeState.clusteringEnabled
                     ? getClusterGridDegrees(getViewerAltitudeMeters(viewer))
                     : null;
                 const params = new URLSearchParams();
@@ -378,7 +384,7 @@ export function useFiresLayer(viewer: Cesium.Viewer | null) {
 
     useEffect(() => {
         void fetchNowRef.current?.();
-    }, [subtypeVisibility, isolatedEntityId]);
+    }, [subtypeVisibility, isolatedEntityId, clusteringEnabled]);
 
     useEffect(() => {
         if (isSourceOn) return;

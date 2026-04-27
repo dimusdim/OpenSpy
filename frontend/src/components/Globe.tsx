@@ -20,6 +20,8 @@ import { useConflictsLayer } from '../cesium/useConflictsLayer';
 import { useAirspaceLayer, airspaceMetaMap, airspaceInstanceToLogical } from '../cesium/useAirspaceLayer';
 import { useGFWLayer } from '../cesium/useGFWLayer';
 import { replayMetaMap, useReplayOverlay } from '../cesium/useReplayOverlay';
+import { fetchReplayRenderBatchMetadata, isReplayRenderBatchId, replayRenderBatchMetaMap } from '../cesium/replayRenderBatch';
+import { API_URL } from '../lib/config';
 import { perfLog } from '../lib/perf-log';
 
 if (typeof window !== 'undefined') {
@@ -50,6 +52,7 @@ export default function Globe() {
             fullscreenButton: false,
             infoBox: false,
             selectionIndicator: false,
+            scene3DOnly: true,
             requestRenderMode: true,
             baseLayer: Cesium.ImageryLayer.fromProviderAsync(
                 Cesium.createWorldImageryAsync({
@@ -335,6 +338,32 @@ export default function Globe() {
                         type: replayMeta.layer,
                     });
                     return;
+                }
+
+                if (isReplayRenderBatchId(pickedObject.id)) {
+                    const renderMeta = replayRenderBatchMetaMap.get(pickedObject.id);
+                    if (renderMeta) {
+                        useTimelineStore.getState().setSelectedEntityId(renderMeta.id, {
+                            name: renderMeta.name,
+                            id: renderMeta.id,
+                            type: renderMeta.layer,
+                        });
+                        void fetchReplayRenderBatchMetadata(API_URL, pickedObject.id)
+                            .then((loaded) => {
+                                if (!loaded) return;
+                                const state = useTimelineStore.getState();
+                                if (state.selectedEntityId !== pickedObject.id) return;
+                                state.setSelectedEntityId(loaded.id, {
+                                    name: loaded.name,
+                                    id: loaded.id,
+                                    type: loaded.layer,
+                                });
+                            })
+                            .catch((error) => {
+                                console.warn('[Globe] render batch metadata fetch failed:', error);
+                            });
+                        return;
+                    }
                 }
 
                 // Webcam billboard
