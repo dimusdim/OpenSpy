@@ -189,7 +189,9 @@ const DOMAIN_TREE: DomainNode[] = [
                 layer: 'pipelines', label: 'Pipelines', icon: Fuel,
                 subtypes: [
                     { key: 'oil', label: 'Oil', icon: Fuel, color: 'text-red-500' },
-                    { key: 'gas', label: 'Gas', icon: Fuel, color: 'text-blue-400' },
+                    { key: 'gas', label: 'Gas', icon: Fuel, color: 'text-sky-400' },
+                    { key: 'water', label: 'Water', icon: Droplets, color: 'text-teal-400' },
+                    { key: 'other', label: 'Other', icon: Fuel, color: 'text-yellow-300' },
                 ],
             },
             {

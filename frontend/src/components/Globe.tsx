@@ -13,7 +13,7 @@ import { useFiresLayer, fireMetaMap } from '../cesium/useFiresLayer';
 import { useCablesLayer, cableMetaMap, cableInstanceToLogical } from '../cesium/useCablesLayer';
 import { useWebcamsLayer, webcamMetaMap } from '../cesium/useWebcamsLayer';
 import { useInfrastructureLayer, infraMetaMap, infraStripInstanceId } from '../cesium/useInfrastructureLayer';
-import { usePipelinesLayer, pipelineMetaMap } from '../cesium/usePipelinesLayer';
+import { usePipelinesLayer, pipelineMetaMap, pipelineInstanceToLogical } from '../cesium/usePipelinesLayer';
 import { useOutagesLayer } from '../cesium/useOutagesLayer';
 import { useTrafficLayer } from '../cesium/useTrafficLayer';
 import { useConflictsLayer } from '../cesium/useConflictsLayer';
@@ -448,13 +448,14 @@ export default function Globe() {
                     return;
                 }
 
-                // Pipeline (Primitive + PolylineGeometry). Single-part — no
-                // instance-id suffix so logicalId is the pick id directly.
-                const pipelineMeta = pipelineMetaMap.get(pickedObject.id);
+                // Pipeline (GroundPolylinePrimitive). Multipart lines use a
+                // part id like "pipeline#2", so resolve it to the logical id.
+                const pipelineLogicalId = pipelineInstanceToLogical.get(pickedObject.id) ?? pickedObject.id;
+                const pipelineMeta = pipelineMetaMap.get(pipelineLogicalId);
                 if (pipelineMeta) {
-                    useTimelineStore.getState().setSelectedEntityId(pickedObject.id, {
+                    useTimelineStore.getState().setSelectedEntityId(pipelineLogicalId, {
                         name: pipelineMeta.name,
-                        id: pickedObject.id,
+                        id: pipelineLogicalId,
                         type: 'Pipeline',
                     });
                     return;

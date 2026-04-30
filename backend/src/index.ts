@@ -2482,9 +2482,9 @@ app.get('/api/power-infra', async (req, res) => {
     }
 });
 
-// Oil & gas pipeline centroids from the local Overture DuckDB cache.
-// Full Overture geometry/details are intentionally not part of the initial
-// viewport payload; those belong behind a feature-details endpoint.
+// Pipeline render geometry from the local Overture DuckDB cache. The viewport
+// payload includes only render-critical fields; descriptive metadata remains
+// behind /api/live/details/pipeline/:id.
 app.get('/api/pipelines', async (req, res) => {
     const parsed = parseBbox(req.query.bbox as string | undefined, 'swne');
     if (!parsed) {
@@ -2521,6 +2521,7 @@ app.get('/api/pipelines', async (req, res) => {
                 lat: row.lat,
                 lng: row.lng,
                 substance: row.substance,
+                coordinates: row.coordinates,
             })),
             source: 'overture',
             elapsedMs,

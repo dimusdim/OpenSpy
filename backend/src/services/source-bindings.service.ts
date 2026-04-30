@@ -75,6 +75,7 @@ export const TRANSFORMER_REGISTRY: Record<string, SourceTransformerDefinition> =
     'gfw-event': { transformerId: 'gfw-event', outputKind: 'events' },
     'openaip-airspace-zone': { transformerId: 'openaip-airspace-zone', outputKind: 'assets' },
     'overture-pipeline-centroid': { transformerId: 'overture-pipeline-centroid', outputKind: 'assets' },
+    'overture-pipeline-geometry': { transformerId: 'overture-pipeline-geometry', outputKind: 'assets' },
     'telegeography-cable-geojson': { transformerId: 'telegeography-cable-geojson', outputKind: 'assets' },
     'gpsjam-h3-zone': { transformerId: 'gpsjam-h3-zone', outputKind: 'events' },
     'firms-active-fire-csv': { transformerId: 'firms-active-fire-csv', outputKind: 'events' },

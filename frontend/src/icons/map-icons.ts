@@ -434,6 +434,16 @@ export const INFRA_ICONS: Record<string, string> = {
     `<path d="M6 13 H11 V9 H18" stroke="#fff" stroke-width="2" fill="none"/>` +
     `<circle cx="18" cy="9" r="1.6" fill="#fff" stroke="none"/>`,
   ),
+  pipeline_water: infraSvgUri(
+    `<circle cx="12" cy="12" r="9" fill="#2dd4bf" fill-opacity="0.9" stroke="#000" stroke-width="1"/>` +
+    `<path d="M6 13 H11 V9 H18" stroke="#fff" stroke-width="2" fill="none"/>` +
+    `<circle cx="18" cy="9" r="1.6" fill="#fff" stroke="none"/>`,
+  ),
+  pipeline_other: infraSvgUri(
+    `<circle cx="12" cy="12" r="9" fill="#facc15" fill-opacity="0.9" stroke="#000" stroke-width="1"/>` +
+    `<path d="M6 13 H11 V9 H18" stroke="#111827" stroke-width="2" fill="none"/>` +
+    `<circle cx="18" cy="9" r="1.6" fill="#111827" stroke="none"/>`,
+  ),
   desalination: infraSvgUri(
     `<path d="M12 2 C12 2 5 12 5 16 a7 7 0 0 0 14 0 C19 12 12 2 12 2 Z" fill="#3b82f6" stroke="#000" stroke-width="1"/>`,
   ),

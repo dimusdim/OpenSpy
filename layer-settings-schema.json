@@ -365,7 +365,9 @@
               ],
               "subtypes": [
                 { "id": "oil", "title": "Oil Pipelines", "enabled": true, "color": "#ef4444" },
-                { "id": "gas", "title": "Gas Pipelines", "enabled": true, "color": "#3b82f6" }
+                { "id": "gas", "title": "Gas Pipelines", "enabled": true, "color": "#38bdf8" },
+                { "id": "water", "title": "Water Pipelines", "enabled": true, "color": "#2dd4bf" },
+                { "id": "other", "title": "Other Pipelines", "enabled": true, "color": "#facc15" }
               ]
             }
           ]

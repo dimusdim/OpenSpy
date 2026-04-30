@@ -76,7 +76,7 @@ const PROVIDERS: ProviderDef[] = [
     // Fires
     { id: 'firms', name: 'NASA FIRMS', description: 'VIIRS active fire hotspots, 3-hourly global updates.', url: 'firms.modaps.eosdis.nasa.gov', type: 'CSV', poll: '30m', layers: ['fires'], free: true },
     // Infrastructure
-    { id: 'overture', name: 'Overture Maps', description: 'Global infrastructure data cached in local DuckDB. Power plants, refineries, military bases, pipeline centroids.', url: 'overturemaps.org', type: 'DuckDB cache', poll: 'on viewport', layers: ['infrastructure', 'pipelines'], free: true },
+    { id: 'overture', name: 'Overture Maps', description: 'Global infrastructure data cached in local DuckDB. Power plants, refineries, military bases, power lines, and utility pipeline geometry.', url: 'overturemaps.org', type: 'DuckDB cache', poll: 'on viewport', layers: ['infrastructure', 'pipelines'], free: true },
     { id: 'overpass', name: 'OpenStreetMap Overpass', description: 'Real-time OSM queries for infrastructure viewport enrichment.', url: 'overpass-api.de', type: 'Overpass QL', poll: 'on viewport', layers: ['infrastructure'], free: true },
     // Cables
     { id: 'telegeography', name: 'TeleGeography', description: 'Global submarine cable network map.', url: 'submarinecablemap.com', type: 'GeoJSON', poll: 'on load', layers: ['cables'], free: true },

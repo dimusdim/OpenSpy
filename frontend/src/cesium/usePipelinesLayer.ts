@@ -8,15 +8,24 @@ import { perfLog } from '../lib/perf-log';
 import { INFRA_ICONS } from '../icons/map-icons';
 import { getViewerAltitudeMeters } from './position-utils';
 
-type PipelineSubstance = 'oil' | 'gas';
+type PipelineSubstance = 'oil' | 'gas' | 'water' | 'other';
 type PipelineStatus = 'connecting' | 'streaming' | 'warning' | 'error' | 'disabled' | 'auth-missing' | 'degraded' | 'limited' | 'rate-limited';
 
-// Overture pipeline payloads are viewport-scoped point centroids. Full
-// geometry/details are intentionally not loaded during initial render.
+type PipelineRecord = {
+    id?: string;
+    name?: string;
+    lat?: number;
+    lng?: number;
+    substance?: string | null;
+    rawSubstance?: string | null;
+    coordinates?: unknown;
+};
+
 export interface PipelineMeta {
     id: string;
     name: string;
     substance: PipelineSubstance;
+    rawSubstance?: string | null;
     lat: number;
     lng: number;
     layer: 'Pipeline';
@@ -25,6 +34,17 @@ export interface PipelineMeta {
 }
 
 export const pipelineMetaMap = new Map<string, PipelineMeta>();
+export const pipelineInstanceToLogical = new Map<string, string>();
+
+type PipelineDebugWindow = Window & {
+    __openspyPipelineMetaMap?: typeof pipelineMetaMap;
+    __openspyPipelineInstanceToLogical?: typeof pipelineInstanceToLogical;
+};
+
+export function pipelineStripPartId(instanceId: string): string {
+    const hash = instanceId.indexOf('#');
+    return hash === -1 ? instanceId : instanceId.slice(0, hash);
+}
 
 const TILE_DEG = 2;
 const MAX_LOADED_TILES = 80;
@@ -33,14 +53,23 @@ const FETCH_CONCURRENCY = 4;
 const PIPELINE_FETCH_TIMEOUT_MS = 20_000;
 const PIPELINE_ALTITUDE_CUTOFF_KM = 200;
 
+const PIPELINE_COLORS: Record<PipelineSubstance, Cesium.Color> = {
+    oil: Cesium.Color.fromCssColorString('#ef4444').withAlpha(0.78),
+    gas: Cesium.Color.fromCssColorString('#38bdf8').withAlpha(0.78),
+    water: Cesium.Color.fromCssColorString('#2dd4bf').withAlpha(0.78),
+    other: Cesium.Color.fromCssColorString('#facc15').withAlpha(0.72),
+};
+
 type TileState = {
-    collection: Cesium.BillboardCollection | null;
-    billboards: Array<{ billboard: Cesium.Billboard; substance: PipelineSubstance; logicalId: string }>;
+    linePrimitive: Cesium.GroundPolylinePrimitive | null;
+    fallbackCollection: Cesium.BillboardCollection | null;
+    fallbackBillboards: Array<{ billboard: Cesium.Billboard; substance: PipelineSubstance; logicalId: string }>;
+    instanceIds: string[];
     logicalIds: Set<string>;
 };
 
 function emptyCounts(): Record<string, number> {
-    return { oil: 0, gas: 0 };
+    return { oil: 0, gas: 0, water: 0, other: 0 };
 }
 
 function cellKey(south: number, west: number): string {
@@ -83,10 +112,70 @@ function cellsForViewport(
     return out;
 }
 
+function normalizeSubstance(raw: unknown): PipelineSubstance {
+    const value = String(raw ?? '').toLowerCase();
+    if (
+        value.includes('gas') ||
+        value.includes('methane') ||
+        value.includes('lng') ||
+        value.includes('lpg') ||
+        value.includes('ngl') ||
+        value.includes('cng') ||
+        value.includes('hydrogen') ||
+        value.includes('propane') ||
+        value.includes('butane') ||
+        value.includes('ethane') ||
+        value.includes('ethylene') ||
+        value.includes('propylene')
+    ) return 'gas';
+    if (
+        value.includes('oil') ||
+        value.includes('petroleum') ||
+        value.includes('crude') ||
+        value.includes('fuel') ||
+        value.includes('hydrocarbon') ||
+        value.includes('condensate') ||
+        value.includes('naphtha')
+    ) return 'oil';
+    if (
+        value.includes('water') ||
+        value.includes('sewer') ||
+        value.includes('sewage') ||
+        value.includes('drain') ||
+        value.includes('steam') ||
+        value.includes('brine') ||
+        value.includes('heat')
+    ) return 'water';
+    return 'other';
+}
+
+function normalizeLineParts(raw: unknown): [number, number][][] {
+    if (!Array.isArray(raw) || raw.length === 0) return [];
+    const isFlatLine = Array.isArray(raw[0]) && typeof raw[0][0] === 'number';
+    const rawParts = isFlatLine ? [raw] : raw;
+    const parts: [number, number][][] = [];
+
+    for (const rawPart of rawParts) {
+        if (!Array.isArray(rawPart)) continue;
+        const part: [number, number][] = [];
+        for (const pair of rawPart) {
+            if (!Array.isArray(pair) || pair.length < 2) continue;
+            const lat = Number(pair[0]);
+            const lng = Number(pair[1]);
+            if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+            part.push([lat, lng]);
+        }
+        if (part.length >= 2) parts.push(part);
+    }
+
+    return parts;
+}
+
 function pipelineIcon(substance: PipelineSubstance): string {
-    return substance === 'gas'
-        ? (INFRA_ICONS.pipeline_gas || INFRA_ICONS.refinery)
-        : (INFRA_ICONS.pipeline_oil || INFRA_ICONS.refinery);
+    if (substance === 'gas') return INFRA_ICONS.pipeline_gas || INFRA_ICONS.refinery;
+    if (substance === 'water') return INFRA_ICONS.pipeline_water || INFRA_ICONS.pipeline_gas || INFRA_ICONS.refinery;
+    if (substance === 'other') return INFRA_ICONS.pipeline_other || INFRA_ICONS.refinery;
+    return INFRA_ICONS.pipeline_oil || INFRA_ICONS.refinery;
 }
 
 export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
@@ -94,6 +183,7 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
     const isVisible = useTimelineStore((s) => s.visibility.pipelines);
     const mode = useTimelineStore((s) => s.mode);
     const subtypeVisibility = useTimelineStore((s) => s.subtypeVisibility);
+    const isolatedEntityId = useTimelineStore((s) => s.isolatedEntityId);
     const secondaryReleased = useSecondaryLoadGate();
 
     const tilesRef = useRef<Map<string, TileState>>(new Map());
@@ -101,6 +191,7 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
     const activeRef = useRef(false);
     const genRef = useRef(0);
     const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const readyTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
     const aggregateCountsRef = useRef<Record<string, number>>(emptyCounts());
     const logicalRefCountRef = useRef<Map<string, number>>(new Map());
 
@@ -114,22 +205,66 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
     }, []);
 
     const applyTileVisibility = useCallback((tile: TileState) => {
+        const state = useTimelineStore.getState();
         const showLayer =
-            mode !== 'playback' &&
-            useTimelineStore.getState().sources.pipelines &&
-            useTimelineStore.getState().visibility.pipelines;
-        if (tile.collection) tile.collection.show = showLayer;
-        const vis = useTimelineStore.getState().subtypeVisibility;
-        for (const entry of tile.billboards) {
-            entry.billboard.show = vis[`pipelines:${entry.substance}`] !== false;
+            state.mode !== 'playback' &&
+            state.sources.pipelines &&
+            state.visibility.pipelines;
+        const vis = state.subtypeVisibility;
+        const soloId = state.isolatedEntityId;
+
+        if (tile.linePrimitive) tile.linePrimitive.show = showLayer;
+        if (tile.fallbackCollection) tile.fallbackCollection.show = showLayer;
+
+        for (const entry of tile.fallbackBillboards) {
+            const subtypeOk = vis[`pipelines:${entry.substance}`] !== false;
+            const soloOk = !soloId || soloId === entry.logicalId;
+            entry.billboard.show = subtypeOk && soloOk;
         }
-    }, [mode]);
+
+        if (!tile.linePrimitive?.ready) return;
+
+        const showOn = Cesium.ShowGeometryInstanceAttribute.toValue(true);
+        const showOff = Cesium.ShowGeometryInstanceAttribute.toValue(false);
+        for (const instanceId of tile.instanceIds) {
+            const logicalId = pipelineInstanceToLogical.get(instanceId) ?? pipelineStripPartId(instanceId);
+            const meta = pipelineMetaMap.get(logicalId);
+            if (!meta) continue;
+            const subtypeOk = vis[`pipelines:${meta.substance}`] !== false;
+            const soloOk = !soloId || soloId === logicalId;
+            const attrs = tile.linePrimitive.getGeometryInstanceAttributes(instanceId);
+            if (attrs) (attrs as { show?: unknown }).show = subtypeOk && soloOk ? showOn : showOff;
+        }
+    }, []);
+
+    const scheduleReadyApply = useCallback((key: string, tile: TileState) => {
+        if (readyTimersRef.current.has(key)) return;
+        const tick = () => {
+            readyTimersRef.current.delete(key);
+            const current = tilesRef.current.get(key);
+            if (!current || current !== tile || !activeRef.current) return;
+            applyTileVisibility(tile);
+            if (tile.linePrimitive && !tile.linePrimitive.ready) {
+                readyTimersRef.current.set(key, setTimeout(tick, 80));
+            }
+        };
+        readyTimersRef.current.set(key, setTimeout(tick, 80));
+    }, [applyTileVisibility]);
 
     const evictTile = useCallback((v: Cesium.Viewer, key: string) => {
         const tile = tilesRef.current.get(key);
         if (!tile) return;
-        if (tile.collection && !v.isDestroyed()) {
-            v.scene.primitives.remove(tile.collection);
+
+        const timer = readyTimersRef.current.get(key);
+        if (timer) clearTimeout(timer);
+        readyTimersRef.current.delete(key);
+
+        if (!v.isDestroyed()) {
+            if (tile.linePrimitive) v.scene.groundPrimitives.remove(tile.linePrimitive);
+            if (tile.fallbackCollection) v.scene.primitives.remove(tile.fallbackCollection);
+        }
+        for (const instanceId of tile.instanceIds) {
+            pipelineInstanceToLogical.delete(instanceId);
         }
         for (const logicalId of Array.from(tile.logicalIds)) {
             const next = (logicalRefCountRef.current.get(logicalId) || 1) - 1;
@@ -150,6 +285,21 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
         tilesRef.current.delete(key);
     }, []);
 
+    const registerLogical = useCallback((tile: TileState, logicalId: string, meta: PipelineMeta) => {
+        if (!pipelineMetaMap.has(logicalId)) {
+            pipelineMetaMap.set(logicalId, meta);
+            aggregateCountsRef.current[meta.substance] =
+                (aggregateCountsRef.current[meta.substance] || 0) + 1;
+        }
+        if (!tile.logicalIds.has(logicalId)) {
+            logicalRefCountRef.current.set(
+                logicalId,
+                (logicalRefCountRef.current.get(logicalId) || 0) + 1,
+            );
+            tile.logicalIds.add(logicalId);
+        }
+    }, []);
+
     const fetchTile = useCallback(
         async (v: Cesium.Viewer, south: number, west: number, north: number, east: number) => {
             const key = cellKey(south, west);
@@ -163,75 +313,111 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
                     `${API_URL}/api/pipelines?bbox=${south},${west},${north},${east}`,
                     { timeout: PIPELINE_FETCH_TIMEOUT_MS },
                 );
+                const body = res.data ?? {};
+                const records: PipelineRecord[] = Array.isArray(body) ? body : (body.data ?? []);
                 perfLog('pipelines.fetch', {
                     ms: Math.round(performance.now() - t0),
-                    records: (res.data?.data || res.data || []).length,
+                    records: records.length,
                     bbox: [south, west, north, east],
-                    source: res.data?.source || 'overture',
+                    source: body.source || 'overture',
                 });
                 if (v.isDestroyed() || myGen !== genRef.current) return;
                 if (!useTimelineStore.getState().sources.pipelines) return;
 
-                const body = res.data ?? {};
-                const records: any[] = Array.isArray(body) ? body : (body.data ?? []);
                 const tile: TileState = {
-                    collection: null,
-                    billboards: [],
+                    linePrimitive: null,
+                    fallbackCollection: null,
+                    fallbackBillboards: [],
+                    instanceIds: [],
                     logicalIds: new Set(),
                 };
+                const lineInstances: Cesium.GeometryInstance[] = [];
+                let fallbackCollection: Cesium.BillboardCollection | null = null;
 
-                if (records.length > 0) {
-                    const collection = new Cesium.BillboardCollection({
-                        scene: v.scene,
-                        blendOption: Cesium.BlendOption.TRANSLUCENT,
-                    });
+                for (const rec of records) {
+                    const substance = normalizeSubstance(rec.substance || rec.rawSubstance);
+                    const lat = Number(rec.lat);
+                    const lng = Number(rec.lng);
+                    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
 
-                    for (const rec of records) {
-                        const substance: PipelineSubstance = rec.substance === 'gas' ? 'gas' : 'oil';
-                        const lat = Number(rec.lat);
-                        const lng = Number(rec.lng);
-                        if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+                    const logicalId = String(rec.id || `overture-pipeline-${key}-${tile.logicalIds.size}`);
+                    const meta: PipelineMeta = {
+                        id: logicalId,
+                        name: rec.name || `${substance} pipeline`,
+                        substance,
+                        rawSubstance: rec.rawSubstance || null,
+                        lat,
+                        lng,
+                        layer: 'Pipeline',
+                        source: 'Overture Maps',
+                        description: rec.name || `${substance} pipeline`,
+                    };
+                    registerLogical(tile, logicalId, meta);
 
-                        const logicalId = String(rec.id || `overture-pipeline-${key}-${tile.billboards.length}`);
-                        if (!pipelineMetaMap.has(logicalId)) {
-                            pipelineMetaMap.set(logicalId, {
-                                id: logicalId,
-                                name: rec.name || `${substance} pipeline`,
-                                substance,
-                                lat,
-                                lng,
-                                layer: 'Pipeline',
-                                source: 'Overture Maps',
-                                description: rec.name || `${substance} pipeline`,
-                            });
-                            aggregateCountsRef.current[substance] =
-                                (aggregateCountsRef.current[substance] || 0) + 1;
-                        }
-                        logicalRefCountRef.current.set(
-                            logicalId,
-                            (logicalRefCountRef.current.get(logicalId) || 0) + 1,
-                        );
-                        tile.logicalIds.add(logicalId);
+                    const parts = normalizeLineParts(rec.coordinates);
+                    if (parts.length > 0) {
+                        parts.forEach((part, partIdx) => {
+                            const degreesFlat: number[] = [];
+                            for (const pt of part) {
+                                degreesFlat.push(pt[1], pt[0]);
+                            }
+                            if (degreesFlat.length < 4) return;
 
-                        const billboard = collection.add({
-                            position: Cesium.Cartesian3.fromDegrees(lng, lat, 0),
-                            image: pipelineIcon(substance),
-                            scale: 0.82,
-                            id: logicalId,
-                            heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
-                            verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+                            const instanceId = parts.length === 1
+                                ? logicalId
+                                : `${logicalId}#${partIdx}`;
+                            pipelineInstanceToLogical.set(instanceId, logicalId);
+                            tile.instanceIds.push(instanceId);
+                            lineInstances.push(new Cesium.GeometryInstance({
+                                geometry: new Cesium.GroundPolylineGeometry({
+                                    positions: Cesium.Cartesian3.fromDegreesArray(degreesFlat),
+                                    width: 4.0,
+                                }),
+                                attributes: {
+                                    color: Cesium.ColorGeometryInstanceAttribute.fromColor(PIPELINE_COLORS[substance]),
+                                    show: new Cesium.ShowGeometryInstanceAttribute(true),
+                                },
+                                id: instanceId,
+                            }));
                         });
-                        tile.billboards.push({ billboard, substance, logicalId });
+                        continue;
                     }
 
-                    if (collection.length > 0) {
-                        v.scene.primitives.add(collection);
-                        tile.collection = collection;
+                    if (!fallbackCollection) {
+                        fallbackCollection = new Cesium.BillboardCollection({
+                            scene: v.scene,
+                            blendOption: Cesium.BlendOption.TRANSLUCENT,
+                        });
                     }
+                    const billboard = fallbackCollection.add({
+                        position: Cesium.Cartesian3.fromDegrees(lng, lat, 0),
+                        image: pipelineIcon(substance),
+                        scale: 0.82,
+                        id: logicalId,
+                        heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+                        verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+                    });
+                    tile.fallbackBillboards.push({ billboard, substance, logicalId });
+                }
+
+                if (lineInstances.length > 0) {
+                    const primitive = new Cesium.GroundPolylinePrimitive({
+                        geometryInstances: lineInstances,
+                        appearance: new Cesium.PolylineColorAppearance(),
+                        releaseGeometryInstances: false,
+                    });
+                    v.scene.groundPrimitives.add(primitive);
+                    tile.linePrimitive = primitive;
+                }
+
+                if (fallbackCollection && fallbackCollection.length > 0) {
+                    v.scene.primitives.add(fallbackCollection);
+                    tile.fallbackCollection = fallbackCollection;
                 }
 
                 tilesRef.current.set(key, tile);
                 applyTileVisibility(tile);
+                if (tile.linePrimitive && !tile.linePrimitive.ready) scheduleReadyApply(key, tile);
                 publishState();
 
                 while (tilesRef.current.size > MAX_LOADED_TILES) {
@@ -239,9 +425,11 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
                     if (oldestKey === undefined || inFlightCellsRef.current.has(oldestKey)) break;
                     evictTile(v, oldestKey);
                 }
-            } catch (err: any) {
-                if (!axios.isCancel(err) && err?.code !== 'ERR_CANCELED') {
-                    console.warn('[Pipelines] Overture viewport fetch failed:', err?.message || err);
+            } catch (err: unknown) {
+                const errorCode = typeof err === 'object' && err && 'code' in err ? String((err as { code?: unknown }).code) : '';
+                const message = err instanceof Error ? err.message : String(err);
+                if (!axios.isCancel(err) && errorCode !== 'ERR_CANCELED') {
+                    console.warn('[Pipelines] Overture viewport fetch failed:', message);
                     useTimelineStore.getState().setStreamMetric('pipelines', {
                         status: 'error',
                         speed: 'failed',
@@ -251,7 +439,7 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
                 inFlightCellsRef.current.delete(key);
             }
         },
-        [applyTileVisibility, evictTile, publishState],
+        [applyTileVisibility, evictTile, publishState, registerLogical, scheduleReadyApply],
     );
 
     const fetchForViewport = useCallback(
@@ -329,19 +517,31 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
     useEffect(() => {
         if (!viewer) return;
         activeRef.current = true;
+        const debugWindow = window as PipelineDebugWindow;
+        debugWindow.__openspyPipelineMetaMap = pipelineMetaMap;
+        debugWindow.__openspyPipelineInstanceToLogical = pipelineInstanceToLogical;
+        const readyTimers = readyTimersRef.current;
+        const tiles = tilesRef.current;
+        const inFlightCells = inFlightCellsRef.current;
+        const logicalRefCounts = logicalRefCountRef.current;
         return () => {
             activeRef.current = false;
             if (debounceRef.current) clearTimeout(debounceRef.current);
+            Array.from(readyTimers.values()).forEach((timer) => clearTimeout(timer));
+            readyTimers.clear();
             if (!viewer.isDestroyed()) {
-                for (const key of Array.from(tilesRef.current.keys())) {
+                for (const key of Array.from(tiles.keys())) {
                     evictTile(viewer, key);
                 }
             }
-            tilesRef.current.clear();
-            inFlightCellsRef.current.clear();
-            logicalRefCountRef.current.clear();
+            tiles.clear();
+            inFlightCells.clear();
+            logicalRefCounts.clear();
             aggregateCountsRef.current = emptyCounts();
             pipelineMetaMap.clear();
+            pipelineInstanceToLogical.clear();
+            delete debugWindow.__openspyPipelineMetaMap;
+            delete debugWindow.__openspyPipelineInstanceToLogical;
         };
     }, [viewer, evictTile]);
 
@@ -358,7 +558,8 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
                 useTimelineStore.getState().visibility.pipelines &&
                 useTimelineStore.getState().mode !== 'playback';
             tilesRef.current.forEach((tile) => {
-                if (tile.collection) tile.collection.show = show;
+                if (tile.linePrimitive) tile.linePrimitive.show = show;
+                if (tile.fallbackCollection) tile.fallbackCollection.show = show;
             });
 
             if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -380,20 +581,15 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
     }, [viewer, isSourceOn, mode, secondaryReleased, fetchForViewport]);
 
     useEffect(() => {
-        const show = mode !== 'playback' && isSourceOn && isVisible;
-        tilesRef.current.forEach((tile) => {
-            if (tile.collection) tile.collection.show = show;
-        });
-    }, [isSourceOn, isVisible, mode]);
-
-    useEffect(() => {
         tilesRef.current.forEach(applyTileVisibility);
-    }, [subtypeVisibility, applyTileVisibility]);
+    }, [isSourceOn, isVisible, mode, subtypeVisibility, isolatedEntityId, applyTileVisibility]);
 
     useEffect(() => {
         if (isSourceOn) return;
         genRef.current++;
         if (!viewer || viewer.isDestroyed()) return;
+        Array.from(readyTimersRef.current.values()).forEach((timer) => clearTimeout(timer));
+        readyTimersRef.current.clear();
         for (const key of Array.from(tilesRef.current.keys())) {
             evictTile(viewer, key);
         }
@@ -402,6 +598,7 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
         logicalRefCountRef.current.clear();
         aggregateCountsRef.current = emptyCounts();
         pipelineMetaMap.clear();
+        pipelineInstanceToLogical.clear();
         useTimelineStore.getState().setSubtypeCounts('pipelines', {});
         useTimelineStore.getState().setStreamMetric('pipelines', {
             count: 0,

@@ -1170,7 +1170,7 @@ const ALL_SUBTYPES_FOR_LAYER: Record<string, string[]> = {
     disasters: ['EQ', 'TC', 'FL', 'VO', 'WF', 'DR'],
     fires: ['high', 'medium', 'low'],
     infrastructure: ['power_plant', 'power_substation', 'power_line', 'refinery', 'dam', 'desalination', 'military', 'aerodrome', 'communication_tower'],
-    pipelines: ['oil', 'gas'],
+    pipelines: ['oil', 'gas', 'water', 'other'],
     outages: ['critical', 'warning'],
     jamming: ['high', 'medium', 'low'],
     airspace: ['restricted', 'danger', 'prohibited', 'alert', 'warning'],

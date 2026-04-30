@@ -51,9 +51,11 @@ export interface OverturePipelineRecord {
     lat: number;
     lng: number;
     name: string;
-    substance: 'oil' | 'gas';
+    substance: OverturePipelineSubstance;
     source: 'overture';
     operator?: string | null;
+    rawSubstance?: string | null;
+    coordinates?: [number, number][][];
 }
 
 export interface OverturePipelineDetails {
@@ -62,15 +64,18 @@ export interface OverturePipelineDetails {
     id: string;
     name: string;
     sourceId: 'overture_pipelines';
-    subtype: 'oil' | 'gas';
+    subtype: OverturePipelineSubstance;
     lat: number;
     lng: number;
     properties: {
         name: string;
-        substance: 'oil' | 'gas';
+        substance: OverturePipelineSubstance;
+        rawSubstance?: string | null;
         operator?: string | null;
     };
 }
+
+export type OverturePipelineSubstance = 'oil' | 'gas' | 'water' | 'other';
 
 // ---------------------------------------------------------------------------
 // Configuration — what to extract from Overture
@@ -90,15 +95,7 @@ const INFRA_FILTERS: Record<string, string[]> = {
     airport: ['aerodrome'],
 };
 
-const POWER_LINE_CLASSES = ['power_line'];
-
-const PIPELINE_SUBSTANCE_PATTERNS = [
-    'oil',
-    'gas',
-    'petroleum',
-    'crude',
-    'fuel',
-];
+const POWER_LINE_CLASSES = ['power_line', 'minor_line', 'cable'];
 
 // Build SQL WHERE for infrastructure
 function infraWhere(): string {
@@ -111,19 +108,45 @@ function infraWhere(): string {
 }
 
 function pipelineWhere(): string {
-    const rawSubstance = `LOWER(COALESCE(TRY_CAST(map_extract_value(source_tags, 'substance') AS VARCHAR), ''))`;
-    const substanceMatches = PIPELINE_SUBSTANCE_PATTERNS
-        .map((value) => `${rawSubstance} LIKE '%${value}%'`)
-        .join(' OR ');
-    return `(subtype = 'utility' AND class = 'pipeline' AND (${substanceMatches}))`;
+    return `(subtype = 'utility' AND class = 'pipeline')`;
 }
 
-function normalizePipelineSubstance(raw: unknown): 'oil' | 'gas' | null {
+function normalizePipelineSubstance(raw: unknown): OverturePipelineSubstance {
     const value = String(raw ?? '').toLowerCase();
-    if (!value) return null;
-    if (value.includes('gas')) return 'gas';
-    if (value.includes('oil') || value.includes('petroleum') || value.includes('crude') || value.includes('fuel')) return 'oil';
-    return null;
+    if (!value) return 'other';
+    if (
+        value.includes('gas') ||
+        value.includes('methane') ||
+        value.includes('lng') ||
+        value.includes('lpg') ||
+        value.includes('ngl') ||
+        value.includes('cng') ||
+        value.includes('hydrogen') ||
+        value.includes('propane') ||
+        value.includes('butane') ||
+        value.includes('ethane') ||
+        value.includes('ethylene') ||
+        value.includes('propylene')
+    ) return 'gas';
+    if (
+        value.includes('oil') ||
+        value.includes('petroleum') ||
+        value.includes('crude') ||
+        value.includes('fuel') ||
+        value.includes('hydrocarbon') ||
+        value.includes('condensate') ||
+        value.includes('naphtha')
+    ) return 'oil';
+    if (
+        value.includes('water') ||
+        value.includes('sewer') ||
+        value.includes('sewage') ||
+        value.includes('drain') ||
+        value.includes('steam') ||
+        value.includes('brine') ||
+        value.includes('heat')
+    ) return 'water';
+    return 'other';
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +195,38 @@ function parseLineCoordinates(raw: unknown): [number, number][] | null {
     return out.length >= 2 ? out : null;
 }
 
+function parseLineCoordinateParts(raw: unknown): [number, number][][] | null {
+    if (!raw) return null;
+    let parsed: any;
+    try {
+        parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch {
+        return null;
+    }
+    const coords = parsed?.coordinates;
+    if (!Array.isArray(coords)) return null;
+
+    const rawParts = parsed?.type === 'MultiLineString' || Array.isArray(coords[0]?.[0])
+        ? coords
+        : [coords];
+    const parts: [number, number][][] = [];
+
+    for (const rawPart of rawParts) {
+        if (!Array.isArray(rawPart)) continue;
+        const part: [number, number][] = [];
+        for (const pair of rawPart) {
+            if (!Array.isArray(pair) || pair.length < 2) continue;
+            const lng = Number(pair[0]);
+            const lat = Number(pair[1]);
+            if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+            part.push([lat, lng]);
+        }
+        if (part.length >= 2) parts.push(part);
+    }
+
+    return parts.length > 0 ? parts : null;
+}
+
 // Types that /api/infrastructure serves. Power records are deliberately
 // excluded here because /api/power-infra is the dedicated power endpoint; if
 // both endpoints return the same Overture power records the frontend will draw
@@ -186,7 +241,7 @@ const INFRA_ENDPOINT_TYPES = new Set<OvertureInfraType>([
 // ---------------------------------------------------------------------------
 
 const DEFAULT_OVERTURE_VERSION = '2026-03-18.0';
-const CACHE_SCHEMA_REVISION = 3;
+const CACHE_SCHEMA_REVISION = 4;
 const OVERTURE_S3_REGION = 'us-west-2';
 const OVERTURE_S3_BASE = 's3://overturemaps-us-west-2/release';
 const CACHE_DIR = path.resolve(__dirname, '../../data');
@@ -361,6 +416,16 @@ export class OvertureService {
                 console.log('[Overture] Cache schema changed: missing infra_lines');
                 return false;
             }
+            const pipelineLineTableRows = await this.query<any>(`
+                SELECT COUNT(*)::INTEGER AS c
+                FROM information_schema.tables
+                WHERE table_schema = 'main'
+                  AND table_name = 'pipeline_lines'
+            `);
+            if ((pipelineLineTableRows[0]?.c ?? 0) < 1) {
+                console.log('[Overture] Cache schema changed: missing pipeline_lines');
+                return false;
+            }
             const metaSchemaRows = await this.query<any>(`
                 SELECT COUNT(*)::INTEGER AS c
                 FROM information_schema.columns
@@ -399,6 +464,7 @@ export class OvertureService {
             const rows = await this.query<any>(
                 `SELECT land_use_count, infra_points_count,
                         COALESCE(infra_lines_count, 0) AS infra_lines_count,
+                        COALESCE(pipeline_lines_count, 0) AS pipeline_lines_count,
                         downloaded_at,
                         version FROM cache_meta LIMIT 1`
             );
@@ -406,7 +472,8 @@ export class OvertureService {
                 this._status.records =
                     (rows[0].land_use_count ?? 0) +
                     (rows[0].infra_points_count ?? 0) +
-                    (rows[0].infra_lines_count ?? 0);
+                    (rows[0].infra_lines_count ?? 0) +
+                    (rows[0].pipeline_lines_count ?? 0);
                 const ageMs = Date.now() - new Date(rows[0].downloaded_at).getTime();
                 const ageDays = ageMs / (1000 * 60 * 60 * 24);
                 this._status.cacheAge = ageDays < 1 ? '<1d' : `${Math.floor(ageDays)}d`;
@@ -507,7 +574,7 @@ export class OvertureService {
             console.log(`[Overture]   ${luCount} records (${this.elapsed(t1)})`);
 
             // ---- Step 2: point/centroid infrastructure ----
-            this._status.step = '[2/3] infrastructure points (power, water, communication, airport, oil/gas pipelines)';
+            this._status.step = '[2/4] infrastructure points (power, water, communication, airport, pipelines)';
             console.log(`[Overture] ${this._status.step}...`);
             const t2 = Date.now();
             await this.execOn(tempDb, `
@@ -527,7 +594,7 @@ export class OvertureService {
             console.log(`[Overture]   ${ipCount} records (${this.elapsed(t2)})`);
 
             // ---- Step 3: power transmission line geometry ----
-            this._status.step = '[3/3] infrastructure lines (power_line geometry)';
+            this._status.step = '[3/4] infrastructure lines (power_line/minor_line/cable geometry)';
             console.log(`[Overture] ${this._status.step}...`);
             const t3 = Date.now();
             const powerLineClassList = POWER_LINE_CLASSES.map((value) => `'${value}'`).join(',');
@@ -552,25 +619,52 @@ export class OvertureService {
             const ilCount = await this.countTableOn(tempDb, 'infra_lines');
             console.log(`[Overture]   ${ilCount} records (${this.elapsed(t3)})`);
 
+            // ---- Step 4: utility pipeline line geometry ----
+            this._status.step = '[4/4] pipeline line geometry';
+            console.log(`[Overture] ${this._status.step}...`);
+            const t4 = Date.now();
+            await this.execOn(tempDb, `
+                CREATE TABLE pipeline_lines AS
+                SELECT id, names.primary AS name, subtype, class,
+                       (bbox.ymin + bbox.ymax) / 2 AS lat,
+                       (bbox.xmin + bbox.xmax) / 2 AS lng,
+                       bbox.ymin AS south,
+                       bbox.xmin AS west,
+                       bbox.ymax AS north,
+                       bbox.xmax AS east,
+                       TRY_CAST(map_extract_value(source_tags, 'substance') AS VARCHAR) AS pipeline_substance,
+                       TRY_CAST(map_extract_value(source_tags, 'operator') AS VARCHAR) AS pipeline_operator,
+                       ST_AsGeoJSON(geometry) AS geometry_geojson,
+                       filename
+                FROM read_parquet('${s3Base}/theme=base/type=infrastructure/*',
+                                  hive_partitioning=1, filename=true)
+                WHERE subtype = 'utility'
+                  AND class = 'pipeline'
+            `);
+            const plCount = await this.countTableOn(tempDb, 'pipeline_lines');
+            console.log(`[Overture]   ${plCount} records (${this.elapsed(t4)})`);
+
             // ---- Metadata ----
             await this.execOn(tempDb, `
                 CREATE TABLE cache_meta (
                     version VARCHAR, downloaded_at VARCHAR,
                     land_use_count INTEGER, infra_points_count INTEGER,
                     infra_lines_count INTEGER,
+                    pipeline_lines_count INTEGER,
                     schema_revision INTEGER,
                     land_use_subtypes VARCHAR, infra_filters VARCHAR
                 )
             `);
             await this.execOn(
                 tempDb,
-                'INSERT INTO cache_meta VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                'INSERT INTO cache_meta VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 [
                     this.version,
                     new Date().toISOString(),
                     luCount,
                     ipCount,
                     ilCount,
+                    plCount,
                     CACHE_SCHEMA_REVISION,
                     LAND_USE_SUBTYPES.join(','),
                     JSON.stringify(INFRA_FILTERS),
@@ -611,7 +705,7 @@ export class OvertureService {
             });
             await this.exec('INSTALL spatial; LOAD spatial;');
 
-            this._status.records = luCount + ipCount + ilCount;
+            this._status.records = luCount + ipCount + ilCount + plCount;
             this._status.cacheAge = '<1d';
             this.updateDiskSize();
             this.ready = true;
@@ -619,8 +713,8 @@ export class OvertureService {
             this._status.step = '';
 
             console.log('[Overture] ════════════════════════════════════════════');
-            console.log(`[Overture]  DONE: ${luCount + ipCount + ilCount} records`);
-            console.log(`[Overture]  land_use: ${luCount} | infra points: ${ipCount} | infra lines: ${ilCount}`);
+            console.log(`[Overture]  DONE: ${luCount + ipCount + ilCount + plCount} records`);
+            console.log(`[Overture]  land_use: ${luCount} | infra points: ${ipCount} | infra lines: ${ilCount} | pipeline lines: ${plCount}`);
             console.log(`[Overture]  Disk: ${this._status.diskMb} MB`);
             console.log(`[Overture]  Time: ${this.elapsed(totalT0)}`);
             console.log('[Overture] ════════════════════════════════════════════');
@@ -769,12 +863,15 @@ export class OvertureService {
         let rows: any[];
         try {
             rows = await this.query<any>(`
-                SELECT id, name, lat, lng, pipeline_substance, pipeline_operator
-                FROM infra_points
+                SELECT id, name, lat, lng, pipeline_substance, pipeline_operator,
+                       geometry_geojson
+                FROM pipeline_lines
                 WHERE subtype = 'utility'
                   AND class = 'pipeline'
-                  AND lat BETWEEN ${south} AND ${north}
-                  AND lng BETWEEN ${west} AND ${east}
+                  AND west <= ${east}
+                  AND east >= ${west}
+                  AND south <= ${north}
+                  AND north >= ${south}
                 LIMIT ${QUERY_LIMIT}
             `);
         } catch (err: any) {
@@ -784,9 +881,12 @@ export class OvertureService {
         const records: OverturePipelineRecord[] = [];
         for (const row of rows) {
             const substance = normalizePipelineSubstance(row.pipeline_substance);
-            if (!substance) continue;
-            const lat = Number(row.lat);
-            const lng = Number(row.lng);
+            const coordinates = parseLineCoordinateParts(row.geometry_geojson);
+            if (!coordinates) continue;
+            const firstPart = coordinates[0];
+            const mid = firstPart[Math.floor(firstPart.length / 2)];
+            const lat = Number.isFinite(Number(row.lat)) ? Number(row.lat) : mid[0];
+            const lng = Number.isFinite(Number(row.lng)) ? Number(row.lng) : mid[1];
             if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
             records.push({
                 id: `overture-pipeline-${row.id}`,
@@ -795,6 +895,8 @@ export class OvertureService {
                 name: row.name || `${substance} pipeline`,
                 substance,
                 operator: row.pipeline_operator || null,
+                rawSubstance: row.pipeline_substance || null,
+                coordinates,
                 source: 'overture',
             });
         }
@@ -805,7 +907,8 @@ export class OvertureService {
         if (!this.ready) return null;
         const stripped = String(id || '')
             .replace(/^pipeline:/, '')
-            .replace(/^overture-pipeline-/, '');
+            .replace(/^overture-pipeline-/, '')
+            .replace(/#\d+$/, '');
         // DuckDB's node binding path here is serialized through db.all(sql)
         // without positional parameters, so only allow inert Overture ids.
         if (!/^[A-Za-z0-9:_-]{1,160}$/.test(stripped)) return null;
@@ -813,7 +916,7 @@ export class OvertureService {
         const rows = await this.query<any>(
             `
             SELECT id, name, lat, lng, pipeline_substance, pipeline_operator
-            FROM infra_points
+            FROM pipeline_lines
             WHERE id = ?
               AND subtype = 'utility'
               AND class = 'pipeline'
@@ -841,6 +944,7 @@ export class OvertureService {
             properties: {
                 name,
                 substance,
+                rawSubstance: row.pipeline_substance || null,
                 operator: row.pipeline_operator || null,
             },
         };

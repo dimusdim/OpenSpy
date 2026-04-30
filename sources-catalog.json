@@ -1161,7 +1161,7 @@
     },
     {
       "id": "overture_pipelines",
-      "name": "Overture Maps — Oil & Gas Pipeline Centroids",
+      "name": "Overture Maps — Utility Pipeline Geometry",
       "provider": "Overture Maps Foundation (Linux Foundation)",
       "category": "infrastructure",
       "layer": "Pipeline",
@@ -1189,20 +1189,22 @@
         "limits": "backend rejects bbox tiles larger than 4 square degrees"
       },
       "legend": {
-        "subtypes": ["oil", "gas"],
+        "subtypes": ["oil", "gas", "water", "other"],
         "colors": {
           "oil": "red",
-          "gas": "dodgerblue"
+          "gas": "sky blue",
+          "water": "teal",
+          "other": "yellow"
         }
       },
       "fields_displayed": {
         "map_visual": {
-          "lat/lng": "pipeline bbox centroid from Overture/DuckDB",
-          "substance": "icon color (red=oil, blue=gas)"
+          "geometry": "pipeline line geometry from Overture/DuckDB, clipped by viewport bbox",
+          "substance": "line color (oil=red, gas=sky blue, water=teal, other=yellow)"
         },
         "hud": {
           "name": "pipeline name",
-          "substance": "oil/gas",
+          "substance": "oil/gas/water/other",
           "source": "'Overture Maps'"
         }
       },
@@ -1210,7 +1212,6 @@
         "operator": "available in source_tags when present; not needed for initial render"
       },
       "fields_available_not_loaded": {
-        "geometry": "full Overture geometry. Loaded on demand by feature id, not in initial viewport payload",
         "diameter": "pipe diameter. Indicates capacity/importance",
         "pressure": "operating pressure",
         "usage": "transmission vs distribution. Transmission = strategic backbone",
@@ -1268,19 +1269,19 @@
           },
           "utility": {
             "classes": ["pipeline"],
-            "filter": "source_tags.substance contains oil/gas/petroleum/crude/fuel",
-            "mapping": "served separately by /api/pipelines as Overture pipeline centroids"
+            "filter": "all utility pipeline rows",
+            "mapping": "served separately by /api/pipelines as Overture viewport line geometry"
           }
         }
       },
       "endpoint_filter": {
-        "note": "/api/infrastructure serves the non-pipeline point types. /api/power-infra serves power subtypes. /api/pipelines serves Overture oil/gas pipeline centroids by bbox.",
-        "served_types": ["power_plant", "refinery", "desalination", "military", "power_substation", "communication_tower", "aerodrome", "dam", "pipeline centroid"],
+        "note": "/api/infrastructure serves the non-pipeline point types. /api/power-infra serves power subtypes. /api/pipelines serves Overture utility pipeline line geometry by bbox.",
+        "served_types": ["power_plant", "refinery", "desalination", "military", "power_substation", "communication_tower", "aerodrome", "dam", "pipeline geometry"],
         "loaded_but_filtered_out": []
       },
       "fields_displayed": {
         "map_visual": {
-          "lat/lng": "billboard position (from DuckDB bbox centroid)",
+          "lat/lng": "billboard position for point infrastructure; pipeline and power-line geometry use dedicated line endpoints",
           "type": "icon selection (same as Overpass infrastructure icons)",
           "name": "from Overture names.primary field"
         },
@@ -2333,7 +2334,7 @@
 
     "Pipeline": {
       "sources": ["overture_pipelines"],
-      "render_method": "Viewport BillboardCollection from Overture/DuckDB centroid tiles. Full geometry/details are on-demand.",
+      "render_method": "Viewport GroundPolylinePrimitive from Overture/DuckDB line-geometry tiles. Descriptive details are on-demand.",
       "code_ref": "frontend/src/cesium/usePipelinesLayer.ts",
       "subtypes": {
         "oil": {
@@ -2341,8 +2342,16 @@
           "legend_color": "text-red-500"
         },
         "gas": {
-          "icon_color": "#3b82f6",
-          "legend_color": "text-blue-400"
+          "icon_color": "#38bdf8",
+          "legend_color": "text-sky-400"
+        },
+        "water": {
+          "icon_color": "#2dd4bf",
+          "legend_color": "text-teal-400"
+        },
+        "other": {
+          "icon_color": "#facc15",
+          "legend_color": "text-yellow-300"
         }
       }
     },

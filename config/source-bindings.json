@@ -135,13 +135,13 @@
       "layerId": "pipeline",
       "canonicalTarget": "assets",
       "recordKind": "pipeline",
-      "transformerId": "overture-pipeline-centroid",
+      "transformerId": "overture-pipeline-geometry",
       "writerId": "asset-snapshot",
       "storagePolicyId": "versioned-assets",
       "rawCaptureMode": "snapshot",
       "rawFormat": "json",
       "coverageScope": "global",
-      "notes": "Overture Maps oil/gas pipeline centroids from the local DuckDB cache. Initial render stores only render-required fields; full geometry/details are loaded on demand."
+      "notes": "Overture Maps utility pipeline geometry from the local DuckDB cache. Initial render stores only render-required line geometry and subtype; descriptive details are loaded on demand."
     },
     {
       "sourceId": "telegeography",
