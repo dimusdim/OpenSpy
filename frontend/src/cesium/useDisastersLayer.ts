@@ -75,14 +75,13 @@ export function useDisastersLayer(viewer: Cesium.Viewer | null) {
 
                             const opts: any = {
                                 id: ev.id,
-                                name: ev.description || ev.eventType,
+                                name: ev.eventType || 'Disaster event',
                                 position,
                                 properties: new Cesium.PropertyBag({
                                     layer: 'Disaster',
                                     subtype: ev.eventType || 'XX',
                                     alertLevel: ev.alertLevel || 'Green',
                                     source: ev.source || 'GDACS',
-                                    description: ev.description || '',
                                 }),
                                 billboard: {
                                     image: getDisasterIcon(ev.eventType || 'XX', ev.alertLevel || 'Green'),

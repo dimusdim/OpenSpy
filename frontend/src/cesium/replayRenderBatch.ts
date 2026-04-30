@@ -1,7 +1,9 @@
 import * as Cesium from 'cesium';
-import axios from 'axios';
-import { getAviIcon, getConflictIcon, getDisasterIcon, getMapIcon, getOutageIcon, getSatIcon, getShipIcon, svgUri } from '../icons/map-icons';
+import { getSatBillboardImage } from '../icons/map-icons';
 import { applyFastBillboardPosition, type SatelliteApplySlot } from './satelliteApplyManager';
+import { ReplayDenseGeometryPrimitive, writeDenseColor } from './replayDenseGeometryPrimitive';
+import { baseColorForSatellite, colorForStyle, featureFamilyForLayer, getReplayApplyChunkSize, getReplayHydrationStage, pointIconForStyle, pointScaleForStyle, toHudLayerName } from './renderStyleRegistry';
+import { replayHttpGet } from './replayHttp';
 
 export const REPLAY_RENDER_BATCH_ID_PREFIX = 'rb:';
 
@@ -25,6 +27,7 @@ type RenderSection = {
 type RenderChunkManifest = {
     format: 'AWVBIN1';
     version: 1;
+    cacheKeyVersion?: string;
     mode: 'replay';
     chunkId: string;
     layerId: string;
@@ -53,11 +56,13 @@ type RenderChunkManifest = {
     styles: Record<string, RenderStyle>;
     footprints?: RenderBatchFootprintManifest[];
     timingsMs?: Record<string, number>;
+    degraded?: Record<string, number | string | boolean>;
 };
 
 type RenderChunksResponse = {
     format: 'AWVBIN1';
     version: 1;
+    cacheKeyVersion?: string;
     mode: 'replay';
     at: string;
     from: string;
@@ -94,6 +99,7 @@ type RenderFeatureRef = {
     displayAlt: number;
     speedMps?: number | null;
     headingDeg?: number | null;
+    extra?: Record<string, any>;
 };
 
 type RenderFeatureRefsResponse = {
@@ -195,9 +201,9 @@ type DecodedChunk = {
     featureProperties: Float32Array;
     pointPositions: Float32Array;
     pointFeatureIndices: Uint32Array;
-    linePositions: Float32Array;
+    linePositions: Float64Array;
     lineFeatureIndices: Uint32Array;
-    fillPositions: Float32Array;
+    fillPositions: Float64Array;
     fillIndices: Uint32Array;
     fillFeatureIndices: Uint32Array;
     trackRows: Uint32Array;
@@ -207,7 +213,7 @@ type DecodedChunk = {
 
 type LayerRenderState = {
     pointCollections: Cesium.BillboardCollection[];
-    primitives: Array<Cesium.Primitive>;
+    primitives: Array<Cesium.Primitive | ReplayDenseGeometryPrimitive>;
     pointSlotsByFeatureId: Map<string, SatelliteApplySlot>;
     pickIdByFeatureId: Map<string, string>;
     featureIdByPickId: Map<string, string>;
@@ -221,6 +227,13 @@ type LayerRenderState = {
     motionTrackCount: number;
     footprintCount: number;
 };
+
+const REPLAY_POINT_WORK_BUDGET_MS = 8;
+const REPLAY_POINT_WORK_CHECK_INTERVAL = 250;
+const REPLAY_POINT_UPLOAD_CHUNK_MIN = 3000;
+const REPLAY_SHAPE_WORK_BUDGET_MS = 8;
+
+type ReplayPointImage = string | HTMLCanvasElement | HTMLImageElement;
 
 export type ReplayRenderBatchDeltaResult = {
     applied: boolean;
@@ -254,6 +267,7 @@ export type ReplayRenderBatchApplyResult = {
     bytes: number;
     motionTracks: ReplayRenderBatchMotionTrack[];
     footprints: ReplayRenderBatchFootprint[];
+    degraded?: Record<string, number | string | boolean>;
 };
 
 export type RenderBatchVisibilityResolver = (
@@ -264,6 +278,7 @@ export type RenderBatchVisibilityResolver = (
 ) => boolean;
 
 export const replayRenderBatchMetaMap = new Map<string, RenderBatchReplayMeta>();
+const replayRenderBatchMetadataInFlight = new Map<string, Promise<RenderBatchReplayMeta | null>>();
 
 function makeRenderId(chunkId: string, featureIndex: number): string {
     return `${REPLAY_RENDER_BATCH_ID_PREFIX}${chunkId}:${featureIndex}`;
@@ -318,13 +333,42 @@ function familyFromCode(code: number | undefined, layerId: string): RenderFeatur
     if (code === 1) return 'entity';
     if (code === 2) return 'event';
     if (code === 3) return 'asset';
-    return defaultFeatureFamilyForLayer(layerId);
+    return featureFamilyForLayer(layerId);
 }
 
-function defaultFeatureFamilyForLayer(layerId: string): RenderFeatureRef['family'] {
-    if (layerId === 'aircraft' || layerId === 'vessel' || layerId === 'satellite') return 'entity';
-    if (layerId === 'airspace' || layerId === 'pipeline' || layerId === 'cable') return 'asset';
-    return 'event';
+function cartographicFromEcefPositions(positions: Float32Array): Float32Array {
+    const cartographic = new Float32Array(positions.length);
+    const scratchCartesian = new Cesium.Cartesian3();
+    const scratchCartographic = new Cesium.Cartographic();
+    for (let offset = 0; offset < positions.length; offset += 3) {
+        const x = positions[offset];
+        const y = positions[offset + 1];
+        const z = positions[offset + 2];
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+            cartographic[offset] = Number.NaN;
+            cartographic[offset + 1] = Number.NaN;
+            cartographic[offset + 2] = Number.NaN;
+            continue;
+        }
+        scratchCartesian.x = x;
+        scratchCartesian.y = y;
+        scratchCartesian.z = z;
+        const converted = Cesium.Cartographic.fromCartesian(
+            scratchCartesian,
+            Cesium.Ellipsoid.WGS84,
+            scratchCartographic,
+        );
+        if (!converted) {
+            cartographic[offset] = Number.NaN;
+            cartographic[offset + 1] = Number.NaN;
+            cartographic[offset + 2] = Number.NaN;
+            continue;
+        }
+        cartographic[offset] = Cesium.Math.toDegrees(converted.longitude);
+        cartographic[offset + 1] = Cesium.Math.toDegrees(converted.latitude);
+        cartographic[offset + 2] = converted.height;
+    }
+    return cartographic;
 }
 
 function decodePointDeltaBinary(buffer: ArrayBuffer, layerId: string, atIso: string): PointDeltaLayer {
@@ -354,6 +398,12 @@ function decodePointDeltaBinary(buffer: ArrayBuffer, layerId: string, atIso: str
     const properties = propertyCount > 0 ? new Float32Array(buffer, offset, propertyCount) : new Float32Array(0);
     offset += propertyCount * 4;
     if (offset + stylesBytes > bytes.length) throw new Error('Point delta styles section exceeds payload length');
+    if (positionCount !== 0 && positionCount !== hashCount * 3) {
+        throw new Error(`Point delta position count mismatch: rows=${hashCount} positions=${positionCount}`);
+    }
+    if (propertyCount !== 0 && propertyCount !== hashCount * 4) {
+        throw new Error(`Point delta property count mismatch: rows=${hashCount} properties=${propertyCount}`);
+    }
     const stylesJson = stylesBytes > 0 ? new TextDecoder().decode(bytes.subarray(offset, offset + stylesBytes)) : '{}';
     let styles: Record<string, RenderStyle> = {};
     try {
@@ -373,113 +423,27 @@ function decodePointDeltaBinary(buffer: ArrayBuffer, layerId: string, atIso: str
         sourceIds: [],
         subtypes: [],
         positions,
-        cartographic: [],
+        cartographic: cartographicFromEcefPositions(positions),
         properties,
     };
 }
 
-function toHudLayerName(layerId: string): string {
-    switch (layerId) {
-        case 'aircraft': return 'Aircraft';
-        case 'vessel': return 'Vessel';
-        case 'satellite': return 'Satellite';
-        case 'disasters': return 'Disaster';
-        case 'fire': return 'Fire';
-        case 'jamming': return 'Jamming';
-        case 'cable': return 'Cable';
-        case 'pipeline': return 'Pipeline';
-        case 'outage': return 'Outage';
-        case 'conflict': return 'Conflict';
-        case 'airspace': return 'Airspace';
-        case 'gfw': return 'GFW';
-        default: return layerId;
-    }
-}
-
-const REPLAY_POINT_ICON_DEFAULT = svgUri('<circle cx="12" cy="12" r="7" fill="#38bdf8"/>');
-const REPLAY_JAM_HIGH = svgUri('<circle cx="12" cy="12" r="7" fill="#ef4444"/>');
-const REPLAY_JAM_MEDIUM = svgUri('<circle cx="12" cy="12" r="7" fill="#f97316"/>');
-const REPLAY_JAM_LOW = svgUri('<circle cx="12" cy="12" r="7" fill="#eab308"/>');
-const LAYER_COLORS: Record<string, Cesium.Color> = {
-    aircraft: Cesium.Color.fromCssColorString('#38bdf8'),
-    vessel: Cesium.Color.fromCssColorString('#22d3ee'),
-    satellite: Cesium.Color.fromCssColorString('#a3e635'),
-    disasters: Cesium.Color.fromCssColorString('#facc15'),
-    fire: Cesium.Color.fromCssColorString('#f97316'),
-    outage: Cesium.Color.fromCssColorString('#a855f7'),
-    jamming: Cesium.Color.fromCssColorString('#fb7185'),
-    gfw: Cesium.Color.fromCssColorString('#34d399'),
-    conflict: Cesium.Color.fromCssColorString('#ef4444'),
-    cable: Cesium.Color.fromCssColorString('#38bdf8'),
-    pipeline: Cesium.Color.fromCssColorString('#f59e0b'),
-    airspace: Cesium.Color.fromCssColorString('#60a5fa'),
-};
-
-function colorForLayer(layerId: string, alpha: number): Cesium.Color {
-    const base = LAYER_COLORS[layerId] || Cesium.Color.CYAN;
-    return Cesium.Color.fromAlpha(base, alpha);
-}
-
-function jammingColor(subtype: string | null | undefined, alpha: number): Cesium.Color {
-    if (subtype === 'high') return Cesium.Color.fromAlpha(Cesium.Color.fromCssColorString('#ef4444'), alpha);
-    if (subtype === 'low') return Cesium.Color.fromAlpha(Cesium.Color.fromCssColorString('#eab308'), alpha);
-    return Cesium.Color.fromAlpha(Cesium.Color.fromCssColorString('#f97316'), alpha);
-}
-
-function colorForStyle(layerId: string, subtype: string | null | undefined, alpha: number): Cesium.Color {
-    if (layerId === 'jamming') return jammingColor(subtype, alpha);
-    return colorForLayer(layerId, alpha);
-}
-
-function pointIconForStyle(layerId: string, style: RenderStyle | undefined): string {
-    const subtype = style?.subtype || undefined;
-    const variant = style?.variant || undefined;
-    if (layerId === 'aircraft') return getAviIcon(subtype || 'general');
-    if (layerId === 'vessel') return getShipIcon(subtype || 'unknown');
-    if (layerId === 'satellite') return getSatIcon(subtype || 'civilian', variant === 'recon' || subtype === 'recon');
-    if (layerId === 'disasters') return getDisasterIcon(subtype || 'XX', variant || 'Green');
-    if (layerId === 'conflict') return getConflictIcon(variant || subtype || 'violence');
-    if (layerId === 'outage') return getOutageIcon(subtype || 'warning');
-    if (layerId === 'fire') return getMapIcon('fires', subtype || 'high') || REPLAY_POINT_ICON_DEFAULT;
-    if (layerId === 'gfw') return getMapIcon('gfw', 'default') || REPLAY_POINT_ICON_DEFAULT;
-    if (layerId === 'jamming') {
-        if (subtype === 'high') return REPLAY_JAM_HIGH;
-        if (subtype === 'low') return REPLAY_JAM_LOW;
-        return REPLAY_JAM_MEDIUM;
-    }
-    return REPLAY_POINT_ICON_DEFAULT;
-}
-
-function baseColorForSatellite(subtype: string | null | undefined): Cesium.Color {
-    if (subtype === 'military' || subtype === 'recon') return Cesium.Color.RED;
-    if (subtype === 'commercial') return Cesium.Color.CYAN;
-    return Cesium.Color.LIME;
-}
-
-function pointScaleForLayer(layerId: string): number {
-    if (layerId === 'satellite') return 1.35;
-    if (layerId === 'aircraft') return 1.0;
-    if (layerId === 'vessel') return 1.05;
-    return 1.1;
-}
-
-function pointScaleForStyle(layerId: string, style: RenderStyle | undefined): number {
-    if (layerId === 'satellite' && (style?.variant === 'recon' || style?.subtype === 'recon')) return 1.8;
-    return pointScaleForLayer(layerId);
-}
-
-function getSection<T extends Uint32Array | Float32Array>(
+function getSection<T extends Uint32Array | Float32Array | Float64Array>(
     buffer: ArrayBuffer,
     sections: Record<string, RenderSection>,
     name: string,
-    expectedType: 'uint32' | 'float32',
+    expectedType: 'uint32' | 'float32' | 'float64',
 ): T {
     const section = sections[name];
     if (!section || section.type !== expectedType) {
         throw new Error(`Render chunk missing ${name}`);
     }
+    validateSectionAlignment(name, section, expectedType);
     if (expectedType === 'uint32') {
         return new Uint32Array(buffer, section.byteOffset, section.length) as T;
+    }
+    if (expectedType === 'float64') {
+        return new Float64Array(buffer, section.byteOffset, section.length) as T;
     }
     return new Float32Array(buffer, section.byteOffset, section.length) as T;
 }
@@ -497,15 +461,23 @@ function getOptionalSection<T extends Uint32Array | Float32Array | Float64Array>
         return new Float32Array(0) as T;
     }
     if (section.type !== expectedType) throw new Error(`Render chunk section ${name} has invalid type`);
+    validateSectionAlignment(name, section, expectedType);
     if (expectedType === 'uint32') return new Uint32Array(buffer, section.byteOffset, section.length) as T;
     if (expectedType === 'float64') return new Float64Array(buffer, section.byteOffset, section.length) as T;
     return new Float32Array(buffer, section.byteOffset, section.length) as T;
 }
 
+function validateSectionAlignment(name: string, section: RenderSection, expectedType: 'uint32' | 'float32' | 'float64'): void {
+    const alignment = expectedType === 'float64' ? 8 : 4;
+    if (section.byteOffset % alignment !== 0) {
+        throw new Error(`Render chunk section ${name} is not ${alignment}-byte aligned`);
+    }
+}
+
 function validateMagic(buffer: ArrayBuffer): void {
     const bytes = new Uint8Array(buffer, 0, Math.min(8, buffer.byteLength));
     const magic = Array.from(bytes).map((value) => String.fromCharCode(value)).join('');
-    if (magic !== 'AWVBIN1\0') throw new Error('Invalid render chunk magic');
+    if (magic !== 'AWVBIN1\x00') throw new Error('Invalid render chunk magic');
 }
 
 function decodeChunk(buffer: ArrayBuffer, manifest: RenderChunkManifest): DecodedChunk {
@@ -516,9 +488,9 @@ function decodeChunk(buffer: ArrayBuffer, manifest: RenderChunkManifest): Decode
         featureProperties: getOptionalSection<Float32Array>(buffer, manifest.sections, 'featureProperties', 'float32'),
         pointPositions: getSection<Float32Array>(buffer, manifest.sections, 'pointPositions', 'float32'),
         pointFeatureIndices: getSection<Uint32Array>(buffer, manifest.sections, 'pointFeatureIndices', 'uint32'),
-        linePositions: getSection<Float32Array>(buffer, manifest.sections, 'linePositions', 'float32'),
+        linePositions: getSection<Float64Array>(buffer, manifest.sections, 'linePositions', 'float64'),
         lineFeatureIndices: getSection<Uint32Array>(buffer, manifest.sections, 'lineFeatureIndices', 'uint32'),
-        fillPositions: getSection<Float32Array>(buffer, manifest.sections, 'fillPositions', 'float32'),
+        fillPositions: getSection<Float64Array>(buffer, manifest.sections, 'fillPositions', 'float64'),
         fillIndices: getSection<Uint32Array>(buffer, manifest.sections, 'fillIndices', 'uint32'),
         fillFeatureIndices: getSection<Uint32Array>(buffer, manifest.sections, 'fillFeatureIndices', 'uint32'),
         trackRows: getOptionalSection<Uint32Array>(buffer, manifest.sections, 'trackRows', 'uint32'),
@@ -608,39 +580,76 @@ function metaFromFeature(feature: RenderFeatureMetadata, pickId: string, parsed:
     };
 }
 
+function nextFrame(): Promise<void> {
+    return new Promise((resolve) => {
+        if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(() => resolve());
+            return;
+        }
+        setTimeout(resolve, 0);
+    });
+}
+
+async function yieldForPrimitiveUpload(scene: Cesium.Scene): Promise<void> {
+    scene.requestRender();
+    await nextFrame();
+}
+
+async function pointImageForReplayStyle(layerId: string, style: RenderStyle | undefined): Promise<ReplayPointImage> {
+    if (layerId === 'satellite') {
+        const subtype = style?.subtype || 'civilian';
+        const isRecon = style?.variant === 'recon' || style?.subtype === 'recon';
+        return getSatBillboardImage(subtype, isRecon);
+    }
+    return pointIconForStyle(layerId, style);
+}
+
 export async function fetchReplayRenderBatchMetadata(apiUrl: string, pickId: string): Promise<RenderBatchReplayMeta | null> {
     const parsed = parseRenderBatchId(pickId);
     if (!parsed) return null;
     const existing = replayRenderBatchMetaMap.get(pickId);
     if (existing?.renderBatch?.detailsLoaded) return existing;
-    const featureId = existing?.extra?.featureId;
-    const featureFamily = existing?.extra?.featureFamily;
-    const featureHash = existing?.extra?.featureHash ?? parsed.featureHash;
-    const atIso = existing?.renderBatch?.atIso;
-    const response = (featureId || Number.isFinite(Number(featureHash))) && featureFamily && atIso
-        ? await axios.get<RenderFeatureMetadata>(
-            absoluteApiUrl(
-                apiUrl,
-                `/api/replay/render-feature?${new URLSearchParams({
-                    at: atIso,
-                    layerId: existing.layerId,
-                    family: String(featureFamily),
-                    ...(featureId ? { id: String(featureId) } : { hash: String(featureHash) }),
-                    ...(existing.source ? { sourceId: existing.source } : {}),
-                }).toString()}`,
-            ),
-        )
-        : await axios.get<RenderFeatureMetadata>(
-            absoluteApiUrl(apiUrl, `/api/replay/render-chunks/${parsed.chunkId}/features/${parsed.featureIndex}`),
-        );
-    const meta = metaFromFeature(response.data, pickId, parsed);
-    if (atIso && meta.renderBatch) meta.renderBatch.atIso = atIso;
-    replayRenderBatchMetaMap.set(pickId, meta);
-    return meta;
+    const inFlight = replayRenderBatchMetadataInFlight.get(pickId);
+    if (inFlight) return inFlight;
+    const request = (async () => {
+        const featureId = existing?.extra?.featureId;
+        const featureFamily = existing?.extra?.featureFamily;
+        const featureHash = existing?.extra?.featureHash ?? parsed.featureHash;
+        const atIso = existing?.renderBatch?.atIso;
+        const feature = (featureId || Number.isFinite(Number(featureHash))) && featureFamily && atIso
+            ? await replayHttpGet<RenderFeatureMetadata>(
+                absoluteApiUrl(
+                    apiUrl,
+                    `/api/replay/render-feature?${new URLSearchParams({
+                        at: atIso,
+                        layerId: existing.layerId,
+                        family: String(featureFamily),
+                        ...(featureId ? { id: String(featureId) } : { hash: String(featureHash) }),
+                        ...(existing.source ? { sourceId: existing.source } : {}),
+                    }).toString()}`,
+                ),
+            )
+            : await replayHttpGet<RenderFeatureMetadata>(
+                absoluteApiUrl(apiUrl, `/api/replay/render-chunks/${parsed.chunkId}/features/${parsed.featureIndex}`),
+            );
+        const meta = metaFromFeature(feature, pickId, parsed);
+        if (atIso && meta.renderBatch) meta.renderBatch.atIso = atIso;
+        replayRenderBatchMetaMap.set(pickId, meta);
+        return meta;
+    })();
+    replayRenderBatchMetadataInFlight.set(pickId, request);
+    try {
+        return await request;
+    } finally {
+        if (replayRenderBatchMetadataInFlight.get(pickId) === request) {
+            replayRenderBatchMetadataInFlight.delete(pickId);
+        }
+    }
 }
 
 export function clearReplayRenderBatchMetadata(): void {
     replayRenderBatchMetaMap.clear();
+    replayRenderBatchMetadataInFlight.clear();
 }
 
 export class ReplayRenderBatchManager {
@@ -683,7 +692,7 @@ export class ReplayRenderBatchManager {
             try { this.scene.primitives.remove(collection); } catch {}
         }
         for (const primitive of state.primitives) {
-            try { this.scene.primitives.remove(primitive); } catch {}
+            try { this.scene.primitives.remove(primitive as any); } catch {}
         }
         this.layerStates.delete(layerId);
         for (const id of Array.from(replayRenderBatchMetaMap.keys())) {
@@ -733,12 +742,13 @@ export class ReplayRenderBatchManager {
             z: '0',
         });
         if (options.layerId === 'fire' && options.aggregateFires === false) params.set('cluster', '0');
-        const manifestResponse = await axios.get<RenderChunksResponse>(
+        const manifest = await replayHttpGet<RenderChunksResponse>(
             absoluteApiUrl(this.apiUrl, `/api/replay/render-chunks?${params.toString()}`),
         );
-        const chunks = manifestResponse.data.layers[options.layerId] || [];
+        const chunks = manifest.layers[options.layerId] || [];
         const decoded: Array<{ manifest: RenderChunkManifest; data: DecodedChunk; refs: RenderFeatureRef[] }> = [];
         let bytes = 0;
+        const degraded: Record<string, number | string | boolean> = {};
         for (const chunk of chunks) {
             if (isCancelled()) {
                 return { applied: false, layerId: options.layerId, featureCount: 0, pointCount: 0, shapeCount: 0, bytes, motionTracks: [], footprints: [] };
@@ -747,24 +757,27 @@ export class ReplayRenderBatchManager {
             // table. Card/details metadata is loaded on demand by hash/id, so
             // initial paint does not need to download the per-feature refs JSON.
             const shouldFetchRefs = false;
-            const [response, refsResponse] = await Promise.all([
-                axios.get<ArrayBuffer>(absoluteApiUrl(this.apiUrl, chunk.dataUrl), {
+            const [buffer, refs] = await Promise.all([
+                replayHttpGet<ArrayBuffer>(absoluteApiUrl(this.apiUrl, chunk.dataUrl), {
                     responseType: 'arraybuffer',
                 }),
                 shouldFetchRefs
-                    ? axios.get<RenderFeatureRefsResponse>(absoluteApiUrl(this.apiUrl, chunk.detailsUrl))
+                    ? replayHttpGet<RenderFeatureRefsResponse>(absoluteApiUrl(this.apiUrl, chunk.detailsUrl))
                     : Promise.resolve({
-                        data: {
-                            chunkId: chunk.chunkId,
-                            at: chunk.at,
-                            layerId: chunk.layerId,
-                            features: [],
-                        } satisfies RenderFeatureRefsResponse,
+                        chunkId: chunk.chunkId,
+                        at: chunk.at,
+                        layerId: chunk.layerId,
+                        features: [],
                     }),
             ]);
-            const buffer = response.data;
             bytes += buffer.byteLength;
-            decoded.push({ manifest: chunk, data: decodeChunk(buffer, chunk), refs: refsResponse.data.features || [] });
+            if (chunk.degraded) {
+                for (const [key, value] of Object.entries(chunk.degraded)) {
+                    if (typeof value === 'number') degraded[key] = Number(degraded[key] || 0) + value;
+                    else degraded[key] = value;
+                }
+            }
+            decoded.push({ manifest: chunk, data: decodeChunk(buffer, chunk), refs: refs.features || [] });
         }
         if (isCancelled()) {
             return { applied: false, layerId: options.layerId, featureCount: 0, pointCount: 0, shapeCount: 0, bytes, motionTracks: [], footprints: [] };
@@ -778,7 +791,7 @@ export class ReplayRenderBatchManager {
         let motionTrackCount = 0;
         let footprintCount = 0;
         const pointCollections: Cesium.BillboardCollection[] = [];
-        const primitives: Cesium.Primitive[] = [];
+        const primitives: Array<Cesium.Primitive | ReplayDenseGeometryPrimitive> = [];
         const motionTracks: ReplayRenderBatchMotionTrack[] = [];
         const footprints: ReplayRenderBatchFootprint[] = [];
         const pointSlotsByFeatureId = new Map<string, SatelliteApplySlot>();
@@ -790,7 +803,11 @@ export class ReplayRenderBatchManager {
         const pickIdByFeatureIndex = new Map<number, string>();
 
         for (const item of decoded) {
-            const rendered = this.renderChunk(item.manifest, item.data, item.refs);
+            const rendered = await this.renderChunk(item.manifest, item.data, item.refs, isCancelled);
+            if (!rendered || isCancelled()) {
+                this.clearLayer(options.layerId);
+                return { applied: false, layerId: options.layerId, featureCount: 0, pointCount: 0, shapeCount: 0, bytes, motionTracks: [], footprints: [] };
+            }
             pointCollections.push(...rendered.pointCollections);
             primitives.push(...rendered.primitives);
             rendered.pointSlotsByFeatureId.forEach((slot, featureId) => pointSlotsByFeatureId.set(featureId, slot));
@@ -835,6 +852,7 @@ export class ReplayRenderBatchManager {
             bytes,
             motionTracks,
             footprints,
+            ...(Object.keys(degraded).length > 0 ? { degraded } : {}),
         };
     }
 
@@ -867,6 +885,28 @@ export class ReplayRenderBatchManager {
         this.onPointRemove?.(pickId);
     }
 
+    private findPointSlot(state: LayerRenderState, featureId: string, featureHash: number, featureIndex?: number): {
+        slot?: SatelliteApplySlot;
+        pickId?: string;
+    } {
+        if (featureId) {
+            const slot = state.pointSlotsByFeatureId.get(featureId);
+            const pickId = state.pickIdByFeatureId.get(featureId);
+            if (slot && pickId) return { slot, pickId };
+        }
+        if (Number.isFinite(featureHash)) {
+            const slot = state.pointSlotsByFeatureHash.get(featureHash);
+            const pickId = state.pickIdByFeatureHash.get(featureHash);
+            if (slot && pickId) return { slot, pickId };
+        }
+        if (featureIndex != null && Number.isFinite(featureIndex)) {
+            const slot = state.pointSlotsByFeatureIndex.get(featureIndex);
+            const pickId = state.pickIdByFeatureIndex.get(featureIndex);
+            if (slot && pickId) return { slot, pickId };
+        }
+        return {};
+    }
+
     private ensurePointCollection(state: LayerRenderState): Cesium.BillboardCollection {
         let collection = state.pointCollections[0];
         if (!collection) {
@@ -883,11 +923,25 @@ export class ReplayRenderBatchManager {
     async applyPointDelta(options: {
         layerId: string;
         atIso: string;
+        sinceIso?: string;
+        partial?: boolean;
         aggregateFires?: boolean;
         isCancelled?: () => boolean;
     }): Promise<ReplayRenderBatchDeltaResult> {
         const t0 = performance.now();
         const isCancelled = options.isCancelled || (() => false);
+        const cancelledResult = (): ReplayRenderBatchDeltaResult => ({
+            applied: false,
+            layerId: options.layerId,
+            atIso: options.atIso,
+            count: 0,
+            updated: 0,
+            added: 0,
+            missing: 0,
+            stale: 0,
+            needsFullSync: false,
+            ms: Math.round(performance.now() - t0),
+        });
         const state = this.layerStates.get(options.layerId);
         if (!state || (state.pointSlotsByFeatureId.size === 0 && state.pointSlotsByFeatureHash.size === 0 && state.pointSlotsByFeatureIndex.size === 0)) {
             return {
@@ -909,26 +963,14 @@ export class ReplayRenderBatchManager {
             layers: options.layerId,
             format: 'bin',
         });
+        if (options.sinceIso) params.set('since', options.sinceIso);
         if (options.layerId === 'fire' && options.aggregateFires === false) params.set('cluster', '0');
-        const response = await axios.get<ArrayBuffer>(
+        const buffer = await replayHttpGet<ArrayBuffer>(
             absoluteApiUrl(this.apiUrl, `/api/replay/render-point-deltas?${params.toString()}`),
             { responseType: 'arraybuffer' },
         );
-        if (isCancelled()) {
-            return {
-                applied: false,
-                layerId: options.layerId,
-                atIso: options.atIso,
-                count: 0,
-                updated: 0,
-                added: 0,
-                missing: 0,
-                stale: 0,
-                needsFullSync: false,
-                ms: Math.round(performance.now() - t0),
-            };
-        }
-        const layer = decodePointDeltaBinary(response.data, options.layerId, options.atIso);
+        if (isCancelled()) return cancelledResult();
+        const layer = decodePointDeltaBinary(buffer, options.layerId, options.atIso);
         if (!layer || layer.layerId !== options.layerId) {
             return {
                 applied: false,
@@ -950,39 +992,65 @@ export class ReplayRenderBatchManager {
         let updated = 0;
         let missing = 0;
         let added = 0;
+        let stale = 0;
         const rowCount = layer.ids.length > 0 ? layer.ids.length : (layer.hashes.length > 0 ? layer.hashes.length : layer.count);
+        let pointWorkStartedAt = performance.now();
+        let pointWorkSinceCheck = 0;
+        const maybeYieldPointWork = async (): Promise<boolean> => {
+            pointWorkSinceCheck += 1;
+            if (
+                pointWorkSinceCheck >= REPLAY_POINT_WORK_CHECK_INTERVAL
+                && performance.now() - pointWorkStartedAt >= REPLAY_POINT_WORK_BUDGET_MS
+            ) {
+                await nextFrame();
+                if (isCancelled()) return false;
+                pointWorkStartedAt = performance.now();
+                pointWorkSinceCheck = 0;
+            }
+            return true;
+        };
         for (let i = 0; i < rowCount; i += 1) {
+            if (isCancelled()) return cancelledResult();
             const featureId = layer.ids[i] || '';
             const featureHash = layer.hashes[i];
-            const byIndex = !featureId && options.layerId === 'satellite';
-            const byHash = !featureId && !byIndex && Number.isFinite(featureHash);
+            const hasFeatureHash = Number.isFinite(featureHash);
+            const byIndex = !featureId && !hasFeatureHash && options.layerId === 'satellite';
+            const byHash = !featureId && hasFeatureHash;
             const styleId = layer.styleIds[i];
             const style = Number.isFinite(styleId) ? layer.styles?.[String(styleId)] : undefined;
+            const effectiveStyleId = Number.isFinite(styleId) ? styleId : null;
             const featureFamily = familyFromCode(layer.familyCodes[i], options.layerId);
             if (featureId) seen.add(featureId);
             if (byHash) seenHashes.add(featureHash);
             if (byIndex) seenIndexes.add(i);
-            let slot = byIndex
-                ? state.pointSlotsByFeatureIndex.get(i)
-                : byHash
-                    ? state.pointSlotsByFeatureHash.get(featureHash)
-                    : state.pointSlotsByFeatureId.get(featureId);
-            let pickId = byIndex
-                ? state.pickIdByFeatureIndex.get(i)
-                : byHash
-                    ? state.pickIdByFeatureHash.get(featureHash)
-                    : state.pickIdByFeatureId.get(featureId);
+            const existing = this.findPointSlot(state, featureId, featureHash, byIndex ? i : undefined);
+            let slot = existing.slot;
+            let pickId = existing.pickId;
             const positionOffset = i * 3;
             const x = layer.positions[positionOffset];
             const y = layer.positions[positionOffset + 1];
             const z = layer.positions[positionOffset + 2];
-            if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
-            const subtype = layer.subtypes[i] ?? style?.subtype ?? null;
-            const sourceId = layer.sourceIds[i] ?? style?.sourceId ?? null;
             const propOffset = i * 4;
             const heading = layer.properties[propOffset];
             const speed = layer.properties[propOffset + 1];
             const altitude = layer.properties[propOffset + 2];
+            const removeFlag = layer.properties[propOffset + 3] === 1;
+            if (removeFlag) {
+                if (slot && pickId) {
+                    this.removePointSlot(state, pickId, slot);
+                    stale += 1;
+                } else {
+                    missing += 1;
+                }
+                if (!(await maybeYieldPointWork())) return cancelledResult();
+                continue;
+            }
+            if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+                if (!(await maybeYieldPointWork())) return cancelledResult();
+                continue;
+            }
+            const subtype = layer.subtypes[i] ?? style?.subtype ?? null;
+            const sourceId = layer.sourceIds[i] ?? style?.sourceId ?? null;
             const cartoOffset = i * 3;
             const lng = layer.cartographic[cartoOffset];
             const lat = layer.cartographic[cartoOffset + 1];
@@ -990,12 +1058,14 @@ export class ReplayRenderBatchManager {
             if (!slot || !pickId) {
                 if (byIndex || (!featureId && !byHash)) {
                     missing += 1;
+                    if (!(await maybeYieldPointWork())) return cancelledResult();
                     continue;
                 }
                 const hash = byHash ? featureHash : stableHash32(featureId);
                 pickId = makeDeltaRenderId(options.layerId, hash);
                 const collection = this.ensurePointCollection(state);
-                const icon = pointIconForStyle(options.layerId, style);
+                const icon = await pointImageForReplayStyle(options.layerId, style);
+                if (isCancelled()) return cancelledResult();
                 const scale = pointScaleForStyle(options.layerId, style);
                 const rotation = Number.isFinite(heading) ? Cesium.Math.toRadians(-heading) : 0;
                 const visible = this.resolveVisible(pickId, options.layerId, subtype, sourceId);
@@ -1037,6 +1107,7 @@ export class ReplayRenderBatchManager {
                     extra: {
                         ...(featureId ? { featureId } : {}),
                         featureHash: hash,
+                        ...(effectiveStyleId != null ? { styleId: effectiveStyleId } : {}),
                         featureFamily,
                     },
                     renderBatch: {
@@ -1051,9 +1122,20 @@ export class ReplayRenderBatchManager {
             }
             applyFastBillboardPosition(slot, x, y, z);
             const existingMeta = replayRenderBatchMetaMap.get(pickId);
+            const previousSubtype = existingMeta?.subtype ?? null;
+            const previousSourceId = existingMeta?.source ?? null;
+            const previousStyleId = Number(existingMeta?.extra?.styleId);
             const effectiveSubtype = subtype ?? existingMeta?.subtype ?? null;
             const effectiveSourceId = sourceId ?? existingMeta?.source ?? null;
-            slot.billboard.show = this.resolveVisible(pickId, options.layerId, effectiveSubtype, effectiveSourceId);
+            if (!existingMeta || previousSubtype !== effectiveSubtype || previousSourceId !== effectiveSourceId) {
+                slot.billboard.show = this.resolveVisible(pickId, options.layerId, effectiveSubtype, effectiveSourceId);
+            }
+            const styleChanged = effectiveStyleId != null && (!Number.isFinite(previousStyleId) || previousStyleId !== effectiveStyleId);
+            if (styleChanged || previousSubtype !== effectiveSubtype) {
+                const refreshedIcon = await pointImageForReplayStyle(options.layerId, style);
+                if (isCancelled()) return cancelledResult();
+                (slot.billboard as any).image = refreshedIcon;
+            }
             slot.billboard.rotation = Number.isFinite(heading) ? Cesium.Math.toRadians(-heading) : 0;
             const meta = existingMeta;
             if (meta) {
@@ -1067,7 +1149,8 @@ export class ReplayRenderBatchManager {
                 meta.extra = {
                     ...(meta.extra || {}),
                     ...(featureId ? { featureId } : {}),
-                    ...(byHash ? { featureHash } : {}),
+                    ...(hasFeatureHash ? { featureHash } : {}),
+                    ...(effectiveStyleId != null ? { styleId: effectiveStyleId } : {}),
                     featureFamily,
                 };
                 if (meta.renderBatch) {
@@ -1076,15 +1159,19 @@ export class ReplayRenderBatchManager {
                 }
             }
             updated += 1;
+            if (!(await maybeYieldPointWork())) return cancelledResult();
         }
 
-        let stale = 0;
-        if (options.layerId === 'satellite' && layer.ids.length === 0 && layer.hashes.length === 0) {
-            state.pointSlotsByFeatureIndex.forEach((slot, featureIndex) => {
-                if (seenIndexes.has(featureIndex)) return;
+        const partial = options.partial === true;
+        if (partial) {
+            stale = 0;
+        } else if (options.layerId === 'satellite' && layer.ids.length === 0 && layer.hashes.length === 0) {
+            for (const [featureIndex, slot] of Array.from(state.pointSlotsByFeatureIndex.entries())) {
+                if (seenIndexes.has(featureIndex)) continue;
                 slot.billboard.show = false;
                 stale += 1;
-            });
+                if (!(await maybeYieldPointWork())) return cancelledResult();
+            }
         } else if (layer.hashes.length > 0 && layer.ids.length === 0) {
             const remove: Array<{ pickId: string; slot: SatelliteApplySlot }> = [];
             state.pointSlotsByFeatureHash.forEach((slot, hash) => {
@@ -1095,6 +1182,7 @@ export class ReplayRenderBatchManager {
             for (const item of remove) {
                 this.removePointSlot(state, item.pickId, item.slot);
                 stale += 1;
+                if (!(await maybeYieldPointWork())) return cancelledResult();
             }
         } else {
             const remove: Array<{ pickId: string; slot: SatelliteApplySlot }> = [];
@@ -1106,10 +1194,16 @@ export class ReplayRenderBatchManager {
             for (const item of remove) {
                 this.removePointSlot(state, item.pickId, item.slot);
                 stale += 1;
+                if (!(await maybeYieldPointWork())) return cancelledResult();
             }
         }
-        state.featureCount = layer.count;
-        state.pointCount = layer.count;
+        const indexedCount = Math.max(
+            state.pointSlotsByFeatureId.size,
+            state.pointSlotsByFeatureHash.size,
+            state.pointSlotsByFeatureIndex.size,
+        );
+        state.featureCount = indexedCount;
+        state.pointCount = indexedCount;
         this.scene.requestRender();
 
         const churnThreshold = Math.max(250, Math.round(Math.max(layer.count, state.pointSlotsByFeatureId.size) * 0.08));
@@ -1122,17 +1216,22 @@ export class ReplayRenderBatchManager {
             added,
             missing,
             stale,
-            needsFullSync: missing > churnThreshold,
+            needsFullSync: partial ? false : missing > churnThreshold,
             ms: Math.round(performance.now() - t0),
         };
     }
 
-    private renderChunk(manifest: RenderChunkManifest, decoded: DecodedChunk, refs: RenderFeatureRef[] = []): LayerRenderState & {
+    private async renderChunk(
+        manifest: RenderChunkManifest,
+        decoded: DecodedChunk,
+        refs: RenderFeatureRef[] = [],
+        isCancelled: () => boolean = () => false,
+    ): Promise<(LayerRenderState & {
         motionTracks: ReplayRenderBatchMotionTrack[];
         footprints: ReplayRenderBatchFootprint[];
-    } {
+    }) | null> {
         const pointCollections: Cesium.BillboardCollection[] = [];
-        const primitives: Cesium.Primitive[] = [];
+        const primitives: Array<Cesium.Primitive | ReplayDenseGeometryPrimitive> = [];
         const pointSlotsByFeatureId = new Map<string, SatelliteApplySlot>();
         const pickIdByFeatureId = new Map<string, string>();
         const featureIdByPickId = new Map<string, string>();
@@ -1146,23 +1245,71 @@ export class ReplayRenderBatchManager {
         let shapeCount = 0;
         const motionTracks: ReplayRenderBatchMotionTrack[] = [];
         const footprints: ReplayRenderBatchFootprint[] = [];
+        const addedPickIds = new Set<string>();
+
+        const cleanupPartialRender = (): null => {
+            for (const collection of pointCollections) {
+                try { this.scene.primitives.remove(collection); } catch {}
+            }
+            for (const primitive of primitives) {
+                try { this.scene.primitives.remove(primitive as any); } catch {}
+            }
+            for (const pickId of Array.from(addedPickIds)) {
+                replayRenderBatchMetaMap.delete(pickId);
+                this.onPointRemove?.(pickId);
+            }
+            this.scene.requestRender();
+            return null;
+        };
 
         if (decoded.pointPositions.length > 0) {
-            const collection = new Cesium.BillboardCollection({
-                scene: this.scene,
-                blendOption: Cesium.BlendOption.TRANSLUCENT,
-            });
-            this.scene.primitives.add(collection);
-            pointCollections.push(collection);
+            const shouldChunkPointUpload = getReplayHydrationStage(manifest.layerId) === 'background';
+            const pointUploadChunkSize = shouldChunkPointUpload
+                ? Math.max(REPLAY_POINT_UPLOAD_CHUNK_MIN, getReplayApplyChunkSize(manifest.layerId))
+                : Number.MAX_SAFE_INTEGER;
+            const satelliteImageByStyleId = new Map<number, ReplayPointImage>();
+            const getSatelliteImage = async (styleId: number, style: RenderStyle | undefined): Promise<ReplayPointImage> => {
+                const cached = satelliteImageByStyleId.get(styleId);
+                if (cached) return cached;
+                const image = await pointImageForReplayStyle(manifest.layerId, style);
+                satelliteImageByStyleId.set(styleId, image);
+                return image;
+            };
+            let collection: Cesium.BillboardCollection | null = null;
+            let collectionPointCount = 0;
+            const createPointCollection = (): Cesium.BillboardCollection => {
+                const next = new Cesium.BillboardCollection({
+                    scene: this.scene,
+                    blendOption: Cesium.BlendOption.TRANSLUCENT,
+                });
+                this.scene.primitives.add(next);
+                pointCollections.push(next);
+                collectionPointCount = 0;
+                return next;
+            };
+            const flushPointUploadChunk = async (): Promise<boolean> => {
+                if (!collection || collectionPointCount === 0) return true;
+                await yieldForPrimitiveUpload(this.scene);
+                if (isCancelled()) return false;
+                return true;
+            };
+            let pointWorkStartedAt = performance.now();
+            let pointWorkSinceCheck = 0;
             for (let rowIndex = 0; rowIndex < featureCount; rowIndex += 1) {
+                if (isCancelled()) return cleanupPartialRender();
                 const row = getFeatureRow(table, rowIndex);
                 if (row.pointCount === 0) continue;
                 const style = manifest.styles[String(row.styleId)];
                 const ref = refs[row.featureIndex];
-                const featureHash = (row.featureHash || (ref?.id ? stableHash32(ref.id) : 0)) >>> 0;
-                const featureFamily = ref?.family || defaultFeatureFamilyForLayer(manifest.layerId);
+                const featureHash = Number.isFinite(row.featureHash)
+                    ? (row.featureHash >>> 0)
+                    : (ref?.id ? stableHash32(ref.id) : Number.NaN);
+                const featureFamily = ref?.family || featureFamilyForLayer(manifest.layerId);
                 const props = getFeatureProperties(decoded, row.featureIndex);
-                const icon = pointIconForStyle(manifest.layerId, style);
+                const icon = manifest.layerId === 'satellite'
+                    ? await getSatelliteImage(row.styleId, style)
+                    : pointIconForStyle(manifest.layerId, style);
+                if (isCancelled()) return cleanupPartialRender();
                 const scale = pointScaleForStyle(manifest.layerId, style);
                 const rotation = props.headingDeg != null ? Cesium.Math.toRadians(-props.headingDeg) : 0;
                 const visible = this.resolveVisible(
@@ -1175,6 +1322,7 @@ export class ReplayRenderBatchManager {
                 const lng = (decoded.featureBboxes[bboxOffset] + decoded.featureBboxes[bboxOffset + 2]) / 2;
                 const lat = (decoded.featureBboxes[bboxOffset + 1] + decoded.featureBboxes[bboxOffset + 3]) / 2;
                 const pickId = makeRenderId(manifest.chunkId, row.featureIndex);
+                addedPickIds.add(pickId);
                 replayRenderBatchMetaMap.set(pickId, {
                     id: pickId,
                     name: `${toHudLayerName(manifest.layerId)} ${row.featureIndex}`,
@@ -1188,8 +1336,9 @@ export class ReplayRenderBatchManager {
                     speed: props.speedMps,
                     heading: props.headingDeg,
                     extra: {
+                        ...(ref?.extra || {}),
                         ...(ref?.id ? { featureId: ref.id } : {}),
-                        ...(featureHash ? { featureHash } : {}),
+                        ...(Number.isFinite(featureHash) ? { featureHash } : {}),
                         featureFamily,
                     },
                     renderBatch: {
@@ -1200,6 +1349,12 @@ export class ReplayRenderBatchManager {
                     },
                 });
                 for (let i = 0; i < row.pointCount; i += 1) {
+                    if (!collection) {
+                        collection = createPointCollection();
+                    } else if (shouldChunkPointUpload && collectionPointCount >= pointUploadChunkSize) {
+                        if (!(await flushPointUploadChunk())) return cleanupPartialRender();
+                        collection = createPointCollection();
+                    }
                     const offset = (row.pointStart + i) * 3;
                     const billboard = collection.add({
                         id: pickId,
@@ -1231,7 +1386,7 @@ export class ReplayRenderBatchManager {
                         pickIdByFeatureId.set(ref.id, pickId);
                         featureIdByPickId.set(pickId, ref.id);
                     }
-                    if (featureHash) {
+                    if (Number.isFinite(featureHash)) {
                         pointSlotsByFeatureHash.set(featureHash, slot);
                         pickIdByFeatureHash.set(featureHash, pickId);
                     }
@@ -1239,18 +1394,50 @@ export class ReplayRenderBatchManager {
                     pickIdByFeatureIndex.set(row.featureIndex, pickId);
                     this.onPointAdd?.(pickId, billboard);
                     pointCount += 1;
+                    collectionPointCount += 1;
+                    pointWorkSinceCheck += 1;
+                    if (
+                        pointWorkSinceCheck >= REPLAY_POINT_WORK_CHECK_INTERVAL
+                        && performance.now() - pointWorkStartedAt >= REPLAY_POINT_WORK_BUDGET_MS
+                    ) {
+                        await nextFrame();
+                        if (isCancelled()) return cleanupPartialRender();
+                        pointWorkStartedAt = performance.now();
+                        pointWorkSinceCheck = 0;
+                    }
                 }
             }
+            if (shouldChunkPointUpload && !(await flushPointUploadChunk())) return cleanupPartialRender();
         }
 
-        const fillInstances: Cesium.GeometryInstance[] = [];
-        const lineInstances: Cesium.GeometryInstance[] = [];
+        const fillPositions = new Float64Array(decoded.fillPositions.length);
+        const fillIndices = new Uint32Array(decoded.fillIndices.length);
+        const fillColors = new Uint8Array((decoded.fillPositions.length / 3) * 4);
+        const fillFeatureOrdinals = new Uint32Array(decoded.fillPositions.length / 3);
+        const fillPickIds: string[] = [];
+        let fillVertexCursor = 0;
+        let fillIndexCursor = 0;
+
+        const linePositions = new Float64Array(decoded.linePositions.length);
+        const lineIndices = new Uint32Array(decoded.linePositions.length / 3);
+        const lineColors = new Uint8Array((decoded.linePositions.length / 3) * 4);
+        const lineFeatureOrdinals = new Uint32Array(decoded.linePositions.length / 3);
+        const linePickIds: string[] = [];
+        let lineVertexCursor = 0;
+        let lineIndexCursor = 0;
+
+        const shapeWorkChunkSize = Math.max(1, getReplayApplyChunkSize(manifest.layerId));
+        let shapeWorkStartedAt = performance.now();
+        let shapeRowsSinceCheck = 0;
         for (let rowIndex = 0; rowIndex < featureCount; rowIndex += 1) {
+            if (isCancelled()) return cleanupPartialRender();
             const row = getFeatureRow(table, rowIndex);
             const style = manifest.styles[String(row.styleId)];
             const ref = refs[row.featureIndex];
-            const featureHash = (row.featureHash || (ref?.id ? stableHash32(ref.id) : 0)) >>> 0;
-            const featureFamily = ref?.family || defaultFeatureFamilyForLayer(manifest.layerId);
+            const featureHash = Number.isFinite(row.featureHash)
+                ? (row.featureHash >>> 0)
+                : (ref?.id ? stableHash32(ref.id) : Number.NaN);
+            const featureFamily = ref?.family || featureFamilyForLayer(manifest.layerId);
             const props = getFeatureProperties(decoded, row.featureIndex);
             const pickId = makeRenderId(manifest.chunkId, row.featureIndex);
             const visible = this.resolveVisible(
@@ -1263,6 +1450,7 @@ export class ReplayRenderBatchManager {
             const lng = (decoded.featureBboxes[bboxOffset] + decoded.featureBboxes[bboxOffset + 2]) / 2;
             const lat = (decoded.featureBboxes[bboxOffset + 1] + decoded.featureBboxes[bboxOffset + 3]) / 2;
             if (!replayRenderBatchMetaMap.has(pickId)) {
+                addedPickIds.add(pickId);
                 replayRenderBatchMetaMap.set(pickId, {
                     id: pickId,
                     name: `${toHudLayerName(manifest.layerId)} ${row.featureIndex}`,
@@ -1276,8 +1464,9 @@ export class ReplayRenderBatchManager {
                     speed: props.speedMps,
                     heading: props.headingDeg,
                     extra: {
+                        ...(ref?.extra || {}),
                         ...(ref?.id ? { featureId: ref.id } : {}),
-                        ...(featureHash ? { featureHash } : {}),
+                        ...(Number.isFinite(featureHash) ? { featureHash } : {}),
                         featureFamily,
                     },
                     renderBatch: {
@@ -1290,98 +1479,80 @@ export class ReplayRenderBatchManager {
             }
 
             if (row.fillVertexCount > 0 && row.indexCount > 0) {
-                const positions = decoded.fillPositions.slice(row.fillStart * 3, (row.fillStart + row.fillVertexCount) * 3);
-                const indices = new Uint32Array(row.indexCount);
-                for (let i = 0; i < row.indexCount; i += 1) {
-                    indices[i] = decoded.fillIndices[row.indexStart + i] - row.fillStart;
+                const positions = decoded.fillPositions.subarray(row.fillStart * 3, (row.fillStart + row.fillVertexCount) * 3);
+                fillPositions.set(positions, fillVertexCursor * 3);
+                const color = colorForStyle(manifest.layerId, style?.subtype, visible ? 0.22 : 0);
+                const featureOrdinal = fillPickIds.length;
+                fillPickIds.push(pickId);
+                for (let i = 0; i < row.fillVertexCount; i += 1) {
+                    writeDenseColor(color, fillColors, fillVertexCursor + i);
+                    fillFeatureOrdinals[fillVertexCursor + i] = featureOrdinal;
                 }
-                fillInstances.push(new Cesium.GeometryInstance({
-                    id: pickId,
-                    geometry: new Cesium.Geometry({
-                        attributes: {
-                            position: new Cesium.GeometryAttribute({
-                                // Cesium PrimitivePipeline only encodes world-space
-                                // positions into position3DHigh/position3DLow when
-                                // the source position attribute is declared DOUBLE.
-                                componentDatatype: Cesium.ComponentDatatype.DOUBLE,
-                                componentsPerAttribute: 3,
-                                values: positions,
-                            }),
-                        },
-                        indices,
-                        primitiveType: Cesium.PrimitiveType.TRIANGLES,
-                        boundingSphere: Cesium.BoundingSphere.fromVertices(positions as any),
-                    } as any),
-                    attributes: {
-                        color: Cesium.ColorGeometryInstanceAttribute.fromColor(colorForStyle(manifest.layerId, style?.subtype, 0.22)),
-                        show: new Cesium.ShowGeometryInstanceAttribute(visible),
-                    },
-                }));
+                for (let i = 0; i < row.indexCount; i += 1) {
+                    fillIndices[fillIndexCursor + i] = fillVertexCursor + (decoded.fillIndices[row.indexStart + i] - row.fillStart);
+                }
+                fillVertexCursor += row.fillVertexCount;
+                fillIndexCursor += row.indexCount;
                 shapeCount += 1;
             }
 
             if (row.lineVertexCount > 0) {
-                const positions = decoded.linePositions.slice(row.lineStart * 3, (row.lineStart + row.lineVertexCount) * 3);
-                const indices = new Uint32Array(row.lineVertexCount);
-                for (let i = 0; i < row.lineVertexCount; i += 1) indices[i] = i;
-                lineInstances.push(new Cesium.GeometryInstance({
-                    id: pickId,
-                    geometry: new Cesium.Geometry({
-                        attributes: {
-                            position: new Cesium.GeometryAttribute({
-                                componentDatatype: Cesium.ComponentDatatype.DOUBLE,
-                                componentsPerAttribute: 3,
-                                values: positions,
-                            }),
-                        },
-                        indices,
-                        primitiveType: Cesium.PrimitiveType.LINES,
-                        boundingSphere: Cesium.BoundingSphere.fromVertices(positions as any),
-                    } as any),
-                    attributes: {
-                        color: Cesium.ColorGeometryInstanceAttribute.fromColor(colorForStyle(manifest.layerId, style?.subtype, 0.8)),
-                        show: new Cesium.ShowGeometryInstanceAttribute(visible),
-                    },
-                }));
+                const positions = decoded.linePositions.subarray(row.lineStart * 3, (row.lineStart + row.lineVertexCount) * 3);
+                linePositions.set(positions, lineVertexCursor * 3);
+                const color = colorForStyle(manifest.layerId, style?.subtype, visible ? 0.8 : 0);
+                const featureOrdinal = linePickIds.length;
+                linePickIds.push(pickId);
+                for (let i = 0; i < row.lineVertexCount; i += 1) {
+                    writeDenseColor(color, lineColors, lineVertexCursor + i);
+                    lineFeatureOrdinals[lineVertexCursor + i] = featureOrdinal;
+                    lineIndices[lineIndexCursor + i] = lineVertexCursor + i;
+                }
+                lineVertexCursor += row.lineVertexCount;
+                lineIndexCursor += row.lineVertexCount;
                 shapeCount += 1;
+            }
+            shapeRowsSinceCheck += 1;
+            if (
+                shapeRowsSinceCheck >= shapeWorkChunkSize
+                && performance.now() - shapeWorkStartedAt >= REPLAY_SHAPE_WORK_BUDGET_MS
+            ) {
+                await nextFrame();
+                if (isCancelled()) return cleanupPartialRender();
+                shapeWorkStartedAt = performance.now();
+                shapeRowsSinceCheck = 0;
             }
         }
 
-        if (fillInstances.length > 0) {
-            const primitive = new Cesium.Primitive({
-                geometryInstances: fillInstances,
-                appearance: new Cesium.PerInstanceColorAppearance({
-                    translucent: true,
-                    flat: true,
-                    closed: false,
-                }),
-                // Raw Cesium.Geometry does not have a Cesium workerName/path.
-                // `asynchronous: true` is only valid for built-in geometries
-                // that Cesium can rebuild in its worker pool.
-                asynchronous: false,
-                compressVertices: false,
-                releaseGeometryInstances: true,
+        if (fillVertexCursor > 0 && fillIndexCursor > 0) {
+            const primitive = new ReplayDenseGeometryPrimitive({
+                kind: 'fill',
+                positions: fillPositions.subarray(0, fillVertexCursor * 3),
+                indices: fillIndices.subarray(0, fillIndexCursor),
+                colors: fillColors.subarray(0, fillVertexCursor * 4),
+                featureOrdinals: fillFeatureOrdinals.subarray(0, fillVertexCursor),
+                pickIds: fillPickIds,
+                debugLabel: `${manifest.layerId}:${manifest.chunkId}:fill`,
             });
-            this.scene.primitives.add(primitive);
+            this.scene.primitives.add(primitive as any);
             primitives.push(primitive);
+            await yieldForPrimitiveUpload(this.scene);
         }
-
-        if (lineInstances.length > 0) {
-            const primitive = new Cesium.Primitive({
-                geometryInstances: lineInstances,
-                appearance: new Cesium.PerInstanceColorAppearance({
-                    translucent: true,
-                    flat: true,
-                }),
-                // Raw Cesium.Geometry does not have a Cesium workerName/path.
-                // `asynchronous: true` throws DeveloperError at render time.
-                asynchronous: false,
-                compressVertices: false,
-                releaseGeometryInstances: true,
+        if (isCancelled()) return cleanupPartialRender();
+        if (lineVertexCursor > 0 && lineIndexCursor > 0) {
+            const primitive = new ReplayDenseGeometryPrimitive({
+                kind: 'line',
+                positions: linePositions.subarray(0, lineVertexCursor * 3),
+                indices: lineIndices.subarray(0, lineIndexCursor),
+                colors: lineColors.subarray(0, lineVertexCursor * 4),
+                featureOrdinals: lineFeatureOrdinals.subarray(0, lineVertexCursor),
+                pickIds: linePickIds,
+                debugLabel: `${manifest.layerId}:${manifest.chunkId}:line`,
             });
-            this.scene.primitives.add(primitive);
+            this.scene.primitives.add(primitive as any);
             primitives.push(primitive);
+            await yieldForPrimitiveUpload(this.scene);
         }
+        if (isCancelled()) return cleanupPartialRender();
 
         for (let i = 0; i < decoded.trackRows.length; i += 4) {
             const featureIndex = decoded.trackRows[i];

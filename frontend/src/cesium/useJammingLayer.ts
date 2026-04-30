@@ -23,11 +23,7 @@ interface JammingZone {
     lat: number;
     lng: number;
     boundary: [number, number][];
-    countGood: number;
-    countBad: number;
-    ratio: number;
     intensity: 'high' | 'medium' | 'low';
-    h3Index: string;
 }
 
 export function useJammingLayer(viewer: Cesium.Viewer | null) {
@@ -100,13 +96,12 @@ export function useJammingLayer(viewer: Cesium.Viewer | null) {
 
                     ds.entities.add({
                         id: z.id,
-                        name: `GNSS Interference (${(z.ratio * 100).toFixed(0)}% affected)`,
+                        name: `GNSS Interference (${z.intensity})`,
                         position: Cesium.Cartesian3.fromDegrees(z.lng, z.lat, extrudeHeight / 2),
                         properties: new Cesium.PropertyBag({
                             layer: 'Jamming',
                             subtype: z.intensity,
                             source: 'GPSJam.org (ADS-B NIC)',
-                            description: `${z.countBad} of ${z.countGood + z.countBad} aircraft reported degraded GPS in this cell. Ratio: ${(z.ratio * 100).toFixed(1)}%`,
                         }),
                         polygon: {
                             hierarchy: new Cesium.PolygonHierarchy(positions),

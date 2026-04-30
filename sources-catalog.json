@@ -13,6 +13,8 @@
       "refresh": "90s polling",
       "live_contract": {
         "delivery_mode": "delta",
+        "poll_ms": 90000,
+        "motion_max_gap_sec": 300,
         "stale_after_sec": 300,
         "remove_after_sec": 300
       },
@@ -87,8 +89,16 @@
       "refresh": "WebSocket continuous stream",
       "live_contract": {
         "delivery_mode": "delta",
+        "throttle_ms": 60000,
+        "motion_max_gap_sec": 600,
         "stale_after_sec": 3600,
-        "remove_after_sec": 21600
+        "remove_after_sec": 21600,
+        "durability": {
+          "mode": "persisted_buffer",
+          "scope": "post-throttle latest accepted position fix per MMSI before DB flush",
+          "buffer": "AIS_VESSEL_WAL_DIR/pending-vessel-positions.jsonl",
+          "loss_model": "Raw websocket PositionReport messages suppressed by throttle are not stored. Accepted post-throttle fixes are appended to WAL before the memory flush buffer and recovered on restart."
+        }
       },
       "endpoints": [
         "wss://stream.aisstream.io/v0/stream"
@@ -303,7 +313,12 @@
       "type": "near-real-time",
       "refresh": "5 min",
       "live_contract": {
-        "delivery_mode": "replace",
+        "delivery_mode": "incremental",
+        "poll_ms": 3600000,
+        "cursor": "latest core.events.observed_at with overlap",
+        "bootstrap_lookback_days": 3,
+        "max_window_days": 7,
+        "overlap_hours": 6,
         "stale_after_sec": null,
         "remove_after_sec": null
       },
@@ -1036,6 +1051,11 @@
       "endpoints": [
         "https://api.cloudflare.com/client/v4/radar/annotations/outages"
       ],
+      "fetch_contract": {
+        "window": "last 24h",
+        "pagination": "limit + offset until provider returns fewer than page size or CLOUDFLARE_OUTAGE_MAX_PAGES is reached",
+        "completeness_status": "complete unless page cap or malformed page marks the fetch incomplete"
+      },
       "auth": {
         "required": true,
         "method": "Bearer token",
@@ -1140,27 +1160,33 @@
       }
     },
     {
-      "id": "osm_pipelines",
-      "name": "OpenStreetMap Overpass — Oil & Gas Pipelines",
-      "provider": "OpenStreetMap Foundation (via Overpass API)",
+      "id": "overture_pipelines",
+      "name": "Overture Maps — Oil & Gas Pipeline Centroids",
+      "provider": "Overture Maps Foundation (Linux Foundation)",
       "category": "infrastructure",
       "layer": "Pipeline",
       "status": "LIVE",
       "type": "static",
-      "refresh": "one-shot fetch",
+      "refresh": "version-tied DuckDB cache, queried per viewport tile",
+      "coverage": {
+        "scope": "global",
+        "label": "global Overture release, viewport-rendered",
+        "global": true
+      },
       "live_contract": {
-        "delivery_mode": "replace",
+        "delivery_mode": "viewport_tiles",
         "stale_after_sec": null,
         "remove_after_sec": null
       },
       "endpoints": [
-        "https://overpass.kumi.systems/api/interpreter"
+        "s3://overturemaps-us-west-2/release/{version}/theme=base/type=infrastructure/*",
+        "/api/pipelines?bbox=south,west,north,east"
       ],
       "auth": {
         "required": false,
-        "method": "none",
-        "env_keys": [],
-        "limits": "same as infrastructure"
+        "method": "public S3 GeoParquet via DuckDB + httpfs",
+        "env_keys": ["OVERTURE_ENABLED=true"],
+        "limits": "backend rejects bbox tiles larger than 4 square degrees"
       },
       "legend": {
         "subtypes": ["oil", "gas"],
@@ -1171,18 +1197,20 @@
       },
       "fields_displayed": {
         "map_visual": {
-          "substance": "line color (red=oil, blue=gas)",
-          "coordinates": "polyline geometry"
+          "lat/lng": "pipeline bbox centroid from Overture/DuckDB",
+          "substance": "icon color (red=oil, blue=gas)"
         },
         "hud": {
           "name": "pipeline name",
           "substance": "oil/gas",
-          "source": "'OpenStreetMap'"
+          "source": "'Overture Maps'"
         }
       },
-      "fields_loaded_not_displayed": {},
+      "fields_loaded_not_displayed": {
+        "operator": "available in source_tags when present; not needed for initial render"
+      },
       "fields_available_not_loaded": {
-        "operator": "pipeline operator company. Strategic intelligence",
+        "geometry": "full Overture geometry. Loaded on demand by feature id, not in initial viewport payload",
         "diameter": "pipe diameter. Indicates capacity/importance",
         "pressure": "operating pressure",
         "usage": "transmission vs distribution. Transmission = strategic backbone",
@@ -1237,13 +1265,18 @@
           "airport": {
             "classes": ["aerodrome"],
             "mapping": "all → 'military' (shield icon, icon reuse)"
+          },
+          "utility": {
+            "classes": ["pipeline"],
+            "filter": "source_tags.substance contains oil/gas/petroleum/crude/fuel",
+            "mapping": "served separately by /api/pipelines as Overture pipeline centroids"
           }
         }
       },
       "endpoint_filter": {
-        "note": "/api/infrastructure serves only: power_plant, refinery, desalination, military. Power substations and communication towers are loaded into DuckDB but filtered out at the REST endpoint level via INFRA_ENDPOINT_TYPES set.",
-        "served_types": ["power_plant", "refinery", "desalination", "military"],
-        "loaded_but_filtered_out": ["power_substation (from Overture, shown only via /api/power-infra)", "communication_tower (mapped to power_substation, only via /api/power-infra)"]
+        "note": "/api/infrastructure serves the non-pipeline point types. /api/power-infra serves power subtypes. /api/pipelines serves Overture oil/gas pipeline centroids by bbox.",
+        "served_types": ["power_plant", "refinery", "desalination", "military", "power_substation", "communication_tower", "aerodrome", "dam", "pipeline centroid"],
+        "loaded_but_filtered_out": []
       },
       "fields_displayed": {
         "map_visual": {
@@ -2299,18 +2332,16 @@
     },
 
     "Pipeline": {
-      "sources": ["osm_pipelines"],
-      "render_method": "Batched PolylineGeometry (single Primitive, one GPU call). PolylineColorAppearance",
+      "sources": ["overture_pipelines"],
+      "render_method": "Viewport BillboardCollection from Overture/DuckDB centroid tiles. Full geometry/details are on-demand.",
       "code_ref": "frontend/src/cesium/usePipelinesLayer.ts",
       "subtypes": {
         "oil": {
-          "line_color": "Cesium.Color.RED.withAlpha(0.6)",
-          "line_width_px": 2.0,
+          "icon_color": "#ef4444",
           "legend_color": "text-red-500"
         },
         "gas": {
-          "line_color": "Cesium.Color.DODGERBLUE.withAlpha(0.6)",
-          "line_width_px": 2.0,
+          "icon_color": "#3b82f6",
           "legend_color": "text-blue-400"
         }
       }
@@ -2558,7 +2589,7 @@
       "space": ["celestrak", "spectator_earth"],
       "disasters": ["gdacs", "usgs", "eonet", "firms"],
       "conflicts": ["acled"],
-      "infrastructure": ["telegeography", "osm_overpass", "osm_pipelines", "overture", "gem"],
+      "infrastructure": ["telegeography", "osm_overpass", "overture_pipelines", "overture", "gem"],
       "electronic_warfare": ["gpsjam"],
       "traffic": ["tomtom", "here"],
       "monitoring": ["webcams_livenv", "webcams_caltrans", "windy_webcams", "road511"],

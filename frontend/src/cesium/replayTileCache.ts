@@ -1,6 +1,6 @@
-import axios from 'axios';
 import { decode } from '@msgpack/msgpack';
 import { withSpan } from '../lib/otel';
+import { replayHttpGet, replayHttpPost } from './replayHttp';
 
 // Fall-back decode still uses @msgpack/msgpack on the main thread; the
 // Web Worker path below handles the hot loads.
@@ -85,12 +85,17 @@ function tileKey(entry: Pick<ReplayManifestTileEntry, 'layerId' | 'z' | 'x' | 'y
 // serialise the remaining writes through a single drain loop with yields
 // so a heavy writer can't block readonly gets on the same objectStore.
 const IDB_PUT_ITEM_THRESHOLD = 4000;
+const IDB_PUT_BYTE_THRESHOLD = 4 * 1024 * 1024;
+const IDB_MAX_RECORDS = 300;
+const IDB_MAX_BYTES = 180 * 1024 * 1024;
+const IDB_PRUNE_INTERVAL_MS = 30_000;
 const IDB_PUT_YIELD_MS = 0;
 
 export class ReplayTileCache {
     private readonly memLRU = new Map<string, CachedTileRecord>();
     private memBytes = 0;
     private dbPromise: Promise<IDBDatabase | null> | null = null;
+    private destroyed = false;
     // Dedup in-flight network fetches per-URL. Without this, a background
     // prefetch and a foreground seek may both POST the same URLs, doubling
     // work and saturating the localhost socket so both end up slow.
@@ -98,6 +103,8 @@ export class ReplayTileCache {
     // Single-writer IDB drain queue — see rationale above.
     private idbWriteQueue: Array<{ entry: ReplayManifestTileEntry; record: CachedTileRecord }> = [];
     private idbDrainRunning = false;
+    private idbPruneRunning = false;
+    private lastIdbPruneAt = 0;
 
     // Pool of msgpack-decode workers. One shared worker caused queue
     // starvation: a 2 MB cable bundle sat 28 s behind a 95 MB aircraft
@@ -321,6 +328,30 @@ export class ReplayTileCache {
         }
     }
 
+    destroy(): void {
+        this.destroyed = true;
+        this.memLRU.clear();
+        this.memBytes = 0;
+        this.inFlight.clear();
+        this.idbWriteQueue = [];
+        this.idbDrainRunning = false;
+        this.idbPruneRunning = false;
+        for (let i = 0; i < this.workerSlots.length; i += 1) {
+            const slot = this.workerSlots[i];
+            if (!slot) continue;
+            const error = new Error('ReplayTileCache destroyed');
+            slot.pending.forEach((waiter) => waiter.reject(error));
+            slot.pending.clear();
+            try { slot.worker.terminate(); } catch {}
+            this.workerSlots[i] = null;
+        }
+        const dbPromise = this.dbPromise;
+        this.dbPromise = null;
+        void dbPromise?.then((db) => {
+            try { db?.close(); } catch {}
+        }).catch(() => undefined);
+    }
+
     private async openDb(): Promise<IDBDatabase | null> {
         if (typeof indexedDB === 'undefined') return null;
         if (this.dbPromise) return this.dbPromise;
@@ -343,7 +374,15 @@ export class ReplayTileCache {
 
     private recordBytes(record: CachedTileRecord): number {
         const bytes = Number(record.bytes);
-        return Number.isFinite(bytes) && bytes > 0 ? bytes : 0;
+        if (Number.isFinite(bytes) && bytes > 0) return bytes;
+        const payload = record.payload;
+        if (!payload) return 0;
+        const itemCount =
+            (payload.items?.length || 0) +
+            (payload.snapshot?.entities?.length || 0) +
+            (payload.snapshot?.events?.length || 0) +
+            (payload.snapshot?.assets?.length || 0);
+        return Math.max(1024, itemCount * 512);
     }
 
     private estimatePayloadBytes(entry: ReplayManifestTileEntry, payload: ReplayTilePayload): number {
@@ -378,6 +417,7 @@ export class ReplayTileCache {
     }
 
     async get(entry: ReplayManifestTileEntry): Promise<ReplayTilePayload | null> {
+        if (this.destroyed) return null;
         const key = tileKey(entry);
         const mem = this.memLRU.get(key);
         if (mem && mem.contentHash === entry.contentHash) {
@@ -404,6 +444,7 @@ export class ReplayTileCache {
     }
 
     async put(entry: ReplayManifestTileEntry, payload: ReplayTilePayload): Promise<void> {
+        if (this.destroyed) return;
         mark('replay-tile-put');
         const key = tileKey(entry);
         const record: CachedTileRecord = {
@@ -420,7 +461,7 @@ export class ReplayTileCache {
             (payload.snapshot?.entities?.length || 0) +
             (payload.snapshot?.events?.length || 0) +
             (payload.snapshot?.assets?.length || 0);
-        if (itemCount > IDB_PUT_ITEM_THRESHOLD) {
+        if (itemCount > IDB_PUT_ITEM_THRESHOLD || (record.bytes || 0) > IDB_PUT_BYTE_THRESHOLD) {
             // Large payload — skip IDB persist entirely. The synchronous
             // structured-clone inside `store.put(record)` was the 6-s
             // longtask; memLRU continues to serve this tile for the
@@ -435,7 +476,7 @@ export class ReplayTileCache {
     }
 
     private scheduleIdbDrain(): void {
-        if (this.idbDrainRunning) return;
+        if (this.destroyed || this.idbDrainRunning) return;
         this.idbDrainRunning = true;
         // setTimeout(0) defers the first drain off the calling microtask
         // so the caller's critical path (payload return → apply) runs first.
@@ -449,6 +490,7 @@ export class ReplayTileCache {
     private async drainIdbQueue(): Promise<void> {
         try {
             while (this.idbWriteQueue.length > 0) {
+                if (this.destroyed) break;
                 const item = this.idbWriteQueue.shift();
                 if (!item) break;
                 const db = await this.openDb();
@@ -479,17 +521,96 @@ export class ReplayTileCache {
             }
         } finally {
             this.idbDrainRunning = false;
+            this.pruneIdbIfNeeded().catch((err) => {
+                console.error('[ReplayTileCache] prune failed:', err);
+            });
+        }
+    }
+
+    private async pruneIdbIfNeeded(): Promise<void> {
+        if (this.destroyed) return;
+        const now = Date.now();
+        if (this.idbPruneRunning || now - this.lastIdbPruneAt < IDB_PRUNE_INTERVAL_MS) return;
+        this.idbPruneRunning = true;
+        this.lastIdbPruneAt = now;
+        try {
+            const db = await this.openDb();
+            if (!db) return;
+            const records = await new Promise<Array<{ key: string; bytes: number; updatedAt: number }>>((resolve) => {
+                const acc: Array<{ key: string; bytes: number; updatedAt: number }> = [];
+                try {
+                    const tx = db.transaction(STORE_NAME, 'readonly');
+                    const store = tx.objectStore(STORE_NAME);
+                    const request = store.openCursor();
+                    request.onsuccess = () => {
+                        const cursor = request.result;
+                        if (!cursor) {
+                            resolve(acc);
+                            return;
+                        }
+                        const record = cursor.value as CachedTileRecord;
+                        acc.push({
+                            key: String(record.key || cursor.key),
+                            bytes: this.recordBytes(record),
+                            updatedAt: Number(record.updatedAt) || 0,
+                        });
+                        cursor.continue();
+                    };
+                    request.onerror = () => {
+                        console.error('[ReplayTileCache] prune scan failed:', request.error);
+                        resolve(acc);
+                    };
+                } catch (err) {
+                    console.error('[ReplayTileCache] prune scan threw:', err);
+                    resolve(acc);
+                }
+            });
+            let totalBytes = records.reduce((acc, record) => acc + record.bytes, 0);
+            let totalRecords = records.length;
+            if (totalRecords <= IDB_MAX_RECORDS && totalBytes <= IDB_MAX_BYTES) return;
+
+            records.sort((a, b) => a.updatedAt - b.updatedAt);
+            const deleteKeys: string[] = [];
+            for (const record of records) {
+                if (totalRecords <= IDB_MAX_RECORDS && totalBytes <= IDB_MAX_BYTES) break;
+                deleteKeys.push(record.key);
+                totalRecords -= 1;
+                totalBytes = Math.max(0, totalBytes - record.bytes);
+            }
+            if (deleteKeys.length === 0) return;
+            await new Promise<void>((resolve) => {
+                try {
+                    const tx = db.transaction(STORE_NAME, 'readwrite');
+                    const store = tx.objectStore(STORE_NAME);
+                    for (const key of deleteKeys) store.delete(key);
+                    tx.oncomplete = () => resolve();
+                    tx.onerror = () => {
+                        console.error('[ReplayTileCache] prune delete failed:', tx.error);
+                        resolve();
+                    };
+                    tx.onabort = () => {
+                        console.error('[ReplayTileCache] prune delete aborted:', tx.error);
+                        resolve();
+                    };
+                } catch (err) {
+                    console.error('[ReplayTileCache] prune delete threw:', err);
+                    resolve();
+                }
+            });
+        } finally {
+            this.idbPruneRunning = false;
         }
     }
 
     async fetchTile(entry: ReplayManifestTileEntry): Promise<ReplayTilePayload> {
+        if (this.destroyed) throw new Error('ReplayTileCache destroyed');
         const cached = await this.get(entry);
         if (cached) return cached;
-        const response = await axios.get<ArrayBuffer>(`${this.apiUrl}${entry.url}`, {
+        const buffer = await replayHttpGet<ArrayBuffer>(`${this.apiUrl}${entry.url}`, {
             responseType: 'arraybuffer',
         });
         mark('replay-tile-decode');
-        const decoded = await this.decodeInWorker('decode-single', response.data, undefined);
+        const decoded = await this.decodeInWorker('decode-single', buffer, undefined);
         const payload = decoded.payload as ReplayTilePayload;
         measure('replay-tile-decode');
         await this.put(entry, payload);
@@ -514,6 +635,7 @@ export class ReplayTileCache {
         entries: ReplayManifestTileEntry[],
         onPhase?: (phase: string, ms: number, extra?: Record<string, any>) => void,
     ): Promise<ReplayTilePayload[]> {
+        if (this.destroyed) throw new Error('ReplayTileCache destroyed');
         if (entries.length === 0) return [];
         const layerScope = entries[0]?.layerId || 'unknown';
         return withSpan(
@@ -614,18 +736,18 @@ export class ReplayTileCache {
                     // Lets us tell whether the wait is HTTP or worker pool.
                     const queueDepth = this.workerSlots.reduce((acc, slot) => acc + (slot?.pending.size || 0), 0);
                     onPhase?.('http-start', tHttpStart - tEntry, { urls: trulyNewUrls.length, queueDepth });
-                    const response = await axios.post<ArrayBuffer>(
+                    const buffer = await replayHttpPost<ArrayBuffer>(
                         `${this.apiUrl}/api/replay/tile-bundle`,
                         { urls: trulyNewUrls },
                         { responseType: 'arraybuffer' },
                     );
                     const tHttpDone = performance.now();
-                    onPhase?.('http-done', tHttpDone - tHttpStart, { bytes: response.data.byteLength });
+                    onPhase?.('http-done', tHttpDone - tHttpStart, { bytes: buffer.byteLength });
                     // Offload framing + msgpack decode to a worker —
                     // previously this loop decoded 30–80 MB on the main
                     // thread and blocked live ingest + UI for seconds.
                     const tDecodeStart = performance.now();
-                    const decoded = await this.decodeInWorker('decode-bundle', response.data, onPhase);
+                    const decoded = await this.decodeInWorker('decode-bundle', buffer, onPhase);
                     const tDecodeDone = performance.now();
                     onPhase?.('decode-done', tDecodeDone - tDecodeStart);
                     const perUrl = new Map<string, ReplayTilePayload | null>();

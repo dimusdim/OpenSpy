@@ -15,6 +15,12 @@ const VESSEL_TYPES_CACHE_FILE = path.join(__dirname, '../../vessel_types_cache.j
 const VESSEL_TYPES_CACHE_MAX = 50_000;
 // Debounce disk writes — we don't need to fsync every static-data message.
 const VESSEL_TYPES_FLUSH_INTERVAL_MS = 60_000;
+const DEFAULT_AIS_VESSEL_THROTTLE_MS = 60_000;
+
+function positiveIntFromEnv(name: string, fallback: number): number {
+    const value = Number(process.env[name]);
+    return Number.isFinite(value) && value > 0 ? Math.trunc(value) : fallback;
+}
 
 // Common military / state-aircraft callsign prefixes (USAF, RAF, Russian VKS,
 // FrAF, NATO, transport tankers, AWACS, recon, training). Not exhaustive but
@@ -39,6 +45,19 @@ function aisTypeToClass(t: number | null | undefined): 'cargo' | 'tanker' | 'pas
     if (t >= 70 && t <= 79) return 'cargo';
     if (t >= 80 && t <= 89) return 'tanker';
     return 'unknown';
+}
+
+function aisPositionObservedAt(report: any, receivedAtMs: number): string {
+    const timestampSecond = Number(report?.Timestamp);
+    if (!Number.isFinite(timestampSecond) || timestampSecond < 0 || timestampSecond > 59) {
+        return new Date(receivedAtMs).toISOString();
+    }
+    const observed = new Date(receivedAtMs);
+    observed.setUTCSeconds(Math.trunc(timestampSecond), 0);
+    if (observed.getTime() - receivedAtMs > 30_000) {
+        observed.setUTCMinutes(observed.getUTCMinutes() - 1);
+    }
+    return observed.toISOString();
 }
 
 /**
@@ -153,6 +172,8 @@ export class LiveStreamService {
     private openSkyHealth: 'streaming' | 'error' | 'auth-missing' | 'rate-limited' = 'streaming';
     private openSkyLastError: string | null = null;
     private openSkyNextRetry: string | null = null;
+    private openSkyPollTimer: NodeJS.Timeout | null = null;
+    private openSkyFailureCount = 0;
     private aisStreamHealth: 'streaming' | 'error' | 'auth-missing' | 'rate-limited' = 'streaming';
     private aisStreamLastError: string | null = null;
     private aisStreamNextRetry: string | null = null;
@@ -167,6 +188,7 @@ export class LiveStreamService {
     private vesselLastSeen = new Map<string, number>();       // MMSI → timestamp ms
     private vesselReportCount = new Map<string, number>();    // MMSI → # position reports received
     private darkVessels = new Map<string, DarkVessel>();
+    private readonly aisVesselThrottleMs = positiveIntFromEnv('AIS_VESSEL_THROTTLE_MS', DEFAULT_AIS_VESSEL_THROTTLE_MS);
     
     constructor(
         io: Server,
@@ -288,23 +310,52 @@ export class LiveStreamService {
         const vesselPayload = this.liveVesselCache.length > 0
             ? this.liveVesselCache
             : Array.from(this.vessels.values());
+        const aircraftRenderPayload = aircraftPayload.map((aircraft: any) => this.toAircraftRenderPayload(aircraft));
+        const vesselRenderPayload = vesselPayload.map((vessel: any) => this.toVesselRenderPayload(vessel));
         const payload: any = {
-            vessels: vesselPayload,
+            vessels: vesselRenderPayload,
             darkVessels: darkVesselsArr,
             meta: {
-                aviationTotal: aircraftPayload.length,
-                maritimeTotal: vesselPayload.length,
-                aviationCounts: this.countBySubtype(aircraftPayload),
-                maritimeCounts: this.countBySubtype(vesselPayload),
+                aviationTotal: aircraftRenderPayload.length,
+                maritimeTotal: vesselRenderPayload.length,
+                aviationCounts: this.countBySubtype(aircraftRenderPayload),
+                maritimeCounts: this.countBySubtype(vesselRenderPayload),
                 darkVesselCount: darkVesselsArr.length,
             },
         };
 
         if (includeAircraft) {
-            payload.aircrafts = aircraftPayload;
+            payload.aircrafts = aircraftRenderPayload;
         }
 
         return payload;
+    }
+
+    private toAircraftRenderPayload(aircraft: any): any {
+        return {
+            id: aircraft.id,
+            icao24: aircraft.icao24 || aircraft.id,
+            lat: aircraft.lat,
+            lng: aircraft.lng,
+            altMeters: aircraft.altMeters ?? (Number.isFinite(aircraft.alt) ? aircraft.alt * 0.3048 : null),
+            alt: aircraft.alt ?? (Number.isFinite(aircraft.altMeters) ? aircraft.altMeters * 3.28084 : 0),
+            heading: aircraft.heading || 0,
+            type: aircraft.type || 'general',
+            speedMps: aircraft.speedMps ?? null,
+            speed: aircraft.speed ?? (Number.isFinite(aircraft.speedMps) ? aircraft.speedMps * 3.6 : 0),
+        };
+    }
+
+    private toVesselRenderPayload(vessel: any): any {
+        return {
+            id: vessel.id,
+            lat: vessel.lat,
+            lng: vessel.lng,
+            heading: vessel.heading || 0,
+            type: vessel.type || 'unknown',
+            speed: vessel.speed || 0,
+            cog: vessel.cog ?? null,
+        };
     }
 
     private async emitInitialSnapshot(socket: Socket): Promise<void> {
@@ -477,11 +528,20 @@ export class LiveStreamService {
         // bbox is ~1000 sq.deg => 4 credits. 4000 / 4 = 1000 calls/day max =
         // one call every ~86s. We use 90s to leave headroom for token refresh
         // retries. Going faster (e.g. the previous 15s) burns the daily quota
-        // in ~4 hours and triggers HTTP 429s for the rest of the day.
-        const OPENSKY_INTERVAL_MS = 90_000;
-        const fetchOpenSky = async () => {
-            try {
-                const config = await this.getOpenSkyAuthHeader();
+	        // in ~4 hours and triggers HTTP 429s for the rest of the day.
+	        const OPENSKY_INTERVAL_MS = 90_000;
+	        const OPENSKY_MAX_BACKOFF_MS = 60 * 60 * 1000;
+	        const scheduleNext = (delayMs: number) => {
+	            if (this.openSkyPollTimer) clearTimeout(this.openSkyPollTimer);
+	            const jitterMs = Math.round(Math.random() * Math.min(10_000, delayMs * 0.1));
+	            const nextDelayMs = Math.max(5_000, delayMs + jitterMs);
+	            this.openSkyNextRetry = new Date(Date.now() + nextDelayMs).toISOString();
+	            this.openSkyPollTimer = setTimeout(fetchOpenSky, nextDelayMs);
+	        };
+	        const fetchOpenSky = async () => {
+	            let nextDelayMs = OPENSKY_INTERVAL_MS;
+	            try {
+	                const config = await this.getOpenSkyAuthHeader();
                 // Global query (no bbox). Per OpenSky pricing, anything > 400
                 // sq.deg costs the same 4 credits/call as a global request, so
                 // we may as well take the whole world. 86400 / 90 = 960 calls
@@ -492,11 +552,11 @@ export class LiveStreamService {
                     // Recovery path: if the previous fetch (or auth) failed,
                     // this successful response restores 'streaming' and clears
                     // stale error details so /api/status stops lying.
-                    if (this.openSkyHealth !== 'streaming') {
-                        this.openSkyHealth = 'streaming';
-                        this.openSkyLastError = null;
-                        this.openSkyNextRetry = null;
-                    }
+	                    if (this.openSkyHealth !== 'streaming') {
+	                        this.openSkyHealth = 'streaming';
+	                        this.openSkyLastError = null;
+	                    }
+	                    this.openSkyFailureCount = 0;
                     const states = res.data.states;
                     const newAircrafts = new Map<string, any>();
                     
@@ -545,30 +605,30 @@ export class LiveStreamService {
                     }
                     console.log(`[OpenSky] Updated ${this.aircrafts.size} real aircraft.`);
                 }
-            } catch (err: any) {
-                const is429 = err?.response?.status === 429 || /429/.test(err.message);
-                console.error(`[OpenSky] fetch failed (${is429 ? 'rate limited' : 'error'}):`, err.message);
-                // Keep existing aircraft data on transient errors.
-                if (is429) {
-                    this.openSkyHealth = 'rate-limited';
-                    this.openSkyLastError = 'Rate limited by OpenSky (429)';
-                    this.openSkyNextRetry = new Date(Date.now() + OPENSKY_INTERVAL_MS).toISOString();
-                } else {
-                    this.openSkyHealth = 'error';
-                    this.openSkyLastError = err.message || 'fetch failed';
-                    this.openSkyNextRetry = null;
-                }
-            }
-        };
+	            } catch (err: any) {
+	                const is429 = err?.response?.status === 429 || /429/.test(err.message);
+	                console.error(`[OpenSky] fetch failed (${is429 ? 'rate limited' : 'error'}):`, err.message);
+	                // Keep existing aircraft data on transient errors.
+	                this.openSkyFailureCount += 1;
+	                const backoffBase = is429 ? OPENSKY_INTERVAL_MS : 30_000;
+	                nextDelayMs = Math.min(
+	                    OPENSKY_MAX_BACKOFF_MS,
+	                    backoffBase * Math.pow(2, Math.min(5, this.openSkyFailureCount - 1)),
+	                );
+	                if (is429) {
+	                    this.openSkyHealth = 'rate-limited';
+	                    this.openSkyLastError = 'Rate limited by OpenSky (429)';
+	                } else {
+	                    this.openSkyHealth = 'error';
+	                    this.openSkyLastError = err.message || 'fetch failed';
+	                }
+	            } finally {
+	                scheduleNext(nextDelayMs);
+	            }
+	        };
 
-        fetchOpenSky();
-        setInterval(fetchOpenSky, OPENSKY_INTERVAL_MS);
-    }
-
-    // Per-vessel throttle: accept position update at most once per 20s.
-    // At ~160 msg/s globally this cuts processing ~10x while keeping
-    // positions fresh enough (20s ≈ 200m drift at 20 knots).
-    private static AIS_VESSEL_THROTTLE_MS = 160_000; // ~2.5 min per vessel
+	        fetchOpenSky();
+	    }
 
     // Singleton guard — prevents duplicate WebSocket connections if
     // multiple frontends or hot-reloads trigger initAisStream.
@@ -652,10 +712,13 @@ export class LiveStreamService {
                          const report = parsed.Message.PositionReport;
                          const id = String(report.UserID);
 
-                         // Per-vessel throttle: skip if updated less than 20s ago
-                         const now = Date.now();
-                        const lastSeen = this.vesselLastSeen.get(id);
-                         if (lastSeen && now - lastSeen < LiveStreamService.AIS_VESSEL_THROTTLE_MS) return;
+                         // Per-vessel throttle: keep one global AIS fix per vessel
+                         // per configured window. Default is 60s; override with
+                         // AIS_VESSEL_THROTTLE_MS when API/CPU budget changes.
+	                         const now = Date.now();
+	                         const observedAt = aisPositionObservedAt(report, now);
+	                        const lastSeen = this.vesselLastSeen.get(id);
+                         if (lastSeen && now - lastSeen < this.aisVesselThrottleMs) return;
 
                          const cached = this.vesselTypes.get(id);
                          this.vessels.set(id, {
@@ -697,8 +760,8 @@ export class LiveStreamService {
                              draught: cached?.draught ?? null,
                              length: cached?.length ?? null,
                              beam: cached?.beam ?? null,
-                             observedAt: new Date().toISOString(),
-                         });
+	                             observedAt,
+	                         });
                          this.vesselsDirty = true;
 
                          this.vesselLastSeen.set(id, now);
@@ -722,7 +785,7 @@ export class LiveStreamService {
                          }
                      }
                  } catch (err: any) {
-                     console.warn('[AISStream] malformed message ignored:', err?.message || err);
+                     console.warn('[AISStream] message processing failed:', err?.message || err);
                  }
              });
 

@@ -98,17 +98,15 @@ export function useOutagesLayer(viewer: Cesium.Viewer | null) {
                     const color = isCritical ? Cesium.Color.RED : Cesium.Color.ORANGE;
 
                     ds.entities.add({
-                        id: `outage-${o.countryCode}`,
-                        name: `${o.country} Internet Outage (${o.level}) [IODA]`,
+                        id: o.id,
+                        name: `${o.countryCode || 'Country'} Internet Outage (${o.level}) [IODA]`,
                         position,
                         properties: new Cesium.PropertyBag({
                             layer: 'Outage',
                             subtype: o.level,
                             datasource: o.datasource,
                             source: 'IODA',
-                            country: o.country,
                             countryCode: o.countryCode,
-                            startTime: o.startTime,
                         }),
                         billboard: {
                             image: isCritical ? OUTAGE_ICON_CRITICAL : OUTAGE_ICON_WARNING,
@@ -136,41 +134,26 @@ export function useOutagesLayer(viewer: Cesium.Viewer | null) {
                     });
                 }
 
-                // --- Cloudflare Radar outages (ASN-level, use location codes) ---
-                // Cloudflare outages don't have lat/lng directly, but they have
-                // location codes. We map common country codes to centroids.
+                // --- Cloudflare Radar outages (location-expanded by backend) ---
                 for (const cf of cfOutages) {
-                    // Try to get a location from the locations array
-                    const locCode = (cf.locations && cf.locations.length > 0)
-                        ? cf.locations[0].toUpperCase()
-                        : '';
-                    // Use the same IODA centroid table from the outages layer if available
-                    // For now, place at a small offset from the existing IODA markers
-                    // Cloudflare outages are shown as warning-level markers with CF source tag
-                    const centroid = COUNTRY_CENTROIDS_MINI[locCode];
-                    if (!centroid && !locCode) continue; // skip if no location
-
-                    const lat = centroid ? centroid[0] : 0;
-                    const lng = centroid ? centroid[1] : 0;
-                    if (lat === 0 && lng === 0 && !centroid) continue;
-                    const position = safeCartesianFromDegrees(lng + 0.5, lat + 0.5, 50);
+                    const locCode = String(cf.locationCode || cf.locations?.[0] || '').toUpperCase();
+                    const fallbackCentroid = locCode ? COUNTRY_CENTROIDS_MINI[locCode] : null;
+                    const lat = Number.isFinite(Number(cf.lat)) ? Number(cf.lat) : fallbackCentroid?.[0];
+                    const lng = Number.isFinite(Number(cf.lng)) ? Number(cf.lng) : fallbackCentroid?.[1];
+                    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+                    const position = safeCartesianFromDegrees(Number(lng) + 0.5, Number(lat) + 0.5, 50);
                     if (!position) continue;
 
                     ds.entities.add({
                         id: cf.id,
-                        name: `${cf.asnName || `ASN ${cf.asn}`} Outage [Cloudflare]`,
+                        name: `Cloudflare Outage${locCode ? ` ${locCode}` : ''}`,
                         position, // slight offset
                         properties: new Cesium.PropertyBag({
                             layer: 'Outage',
                             subtype: 'warning',
                             datasource: 'cloudflare-radar',
                             source: 'Cloudflare',
-                            asnName: cf.asnName || '',
-                            asn: cf.asn || 0,
-                            outageType: cf.outageType || '',
-                            outageCause: cf.outageCause || '',
-                            startDate: cf.startDate || '',
-                            endDate: cf.endDate || '',
+                            countryCode: locCode,
                         }),
                         billboard: {
                             image: OUTAGE_ICON_WARNING,

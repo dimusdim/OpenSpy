@@ -45,6 +45,7 @@ interface LayerNode {
     icon: LucideIcon;
     subtypes: SubtypeNode[];
     sources?: Array<{ sourceId: string; label: string }>;
+    scope?: 'live-only';
     // special: instead of toggleVisibility, use a different store action
     special?: 'trajectories';
 }
@@ -213,13 +214,16 @@ const DOMAIN_TREE: DomainNode[] = [
     {
         domain: 'context', label: 'Context', icon: Globe2, color: 'text-zinc-400',
         children: [
-            { layer: 'traffic', label: 'Traffic', icon: Car, subtypes: [] },
-            { layer: 'webcams', label: 'Cameras', icon: Camera, subtypes: [] },
+            { layer: 'traffic', label: 'Traffic', icon: Car, subtypes: [], scope: 'live-only' },
+            { layer: 'webcams', label: 'Cameras', icon: Camera, subtypes: [], scope: 'live-only' },
             { layer: 'labels', label: 'Borders', icon: Globe2, subtypes: [] },
-            { layer: 'clouds', label: 'Cloud Cover', icon: Waves, subtypes: [] },
+            { layer: 'clouds', label: 'Cloud Cover', icon: Waves, subtypes: [], scope: 'live-only' },
+            { layer: 'satellite_imagery', label: 'Satellite Imagery', icon: Globe2, subtypes: [], scope: 'live-only' },
         ],
     },
 ];
+
+const LIVE_ONLY_LAYERS = new Set<LayerName>(['traffic', 'webcams', 'clouds', 'satellite_imagery']);
 
 // Flat list of all subtypes for the "All" tab search
 const ALL_SUBTYPES: { layer: LayerName; subtypeKey: string; label: string; parentLabel: string; icon: LucideIcon; color: string }[] = [];
@@ -253,6 +257,7 @@ export default function Legend() {
     const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
     const sourceVisibility = useTimelineStore(s => s.sourceVisibility);
     const streamMetrics = useTimelineStore(s => s.streamMetrics);
+    const mode = useTimelineStore(s => s.mode);
     const toggleVisibility = useTimelineStore(s => s.toggleVisibility);
     const toggleSubtype = useTimelineStore(s => s.toggleSubtype);
     const toggleSourceVisibility = useTimelineStore(s => s.toggleSourceVisibility);
@@ -384,6 +389,7 @@ export default function Legend() {
                     layerCount={layerCount}
                     showTrajectories={showTrajectories}
                     toggleTrajectories={toggleTrajectories}
+                    mode={mode}
                 />}
 
                 {tab === 'missions' && <MissionsTab
@@ -400,6 +406,7 @@ export default function Legend() {
                     counts={counts}
                     toggleVisibility={toggleVisibility}
                     toggleSubtype={toggleSubtype}
+                    mode={mode}
                 />}
             </div>
         </div>
@@ -412,7 +419,7 @@ export default function Legend() {
 function DomainsTab({
     expandedDomains, expandedLayers, toggleDomain, toggleLayerExpand,
     toggleDomainVisibility, visibility, subtypeVisibility, sourceVisibility, counts, sourceCounts, streamMetrics,
-    toggleVisibility, toggleSubtype, toggleSourceVisibility, layerCount, showTrajectories, toggleTrajectories,
+    toggleVisibility, toggleSubtype, toggleSourceVisibility, layerCount, showTrajectories, toggleTrajectories, mode,
 }: {
     expandedDomains: Record<string, boolean>;
     expandedLayers: Record<string, boolean>;
@@ -431,6 +438,7 @@ function DomainsTab({
     layerCount: (l: LayerName, s: SubtypeNode[]) => number;
     showTrajectories: boolean;
     toggleTrajectories: () => void;
+    mode: string;
 }) {
     return (
         <div className="p-2 flex flex-col gap-0.5">
@@ -473,6 +481,7 @@ function DomainsTab({
                                     const hasSubtypes = layerNode.subtypes.length > 0;
                                     const isLayerExpanded = expandedLayers[layerNode.layer] !== false;
                                     const LayerIcon = layerNode.icon;
+                                    const isLiveOnly = layerNode.scope === 'live-only';
 
                                     return (
                                         <div key={layerNode.layer}>
@@ -496,6 +505,19 @@ function DomainsTab({
                                                         <span className={`w-1.5 h-1.5 rounded-full ${statusDotColor(metric?.status)}`} />
                                                         <LayerIcon size={10} className={layerOn ? 'text-zinc-400' : 'text-zinc-700'} />
                                                         {layerNode.label}
+                                                        {isLiveOnly && (
+                                                            <span
+                                                                className={`inline-flex items-center gap-0.5 rounded border px-1 py-px text-[8px] uppercase tracking-wide ${
+                                                                    mode === 'playback'
+                                                                        ? 'border-zinc-700 text-zinc-500'
+                                                                        : 'border-cyan-900/60 text-cyan-500'
+                                                                }`}
+                                                                title="Live mode only. This layer does not block replay loading."
+                                                            >
+                                                                <Radio size={8} />
+                                                                Live
+                                                            </span>
+                                                        )}
                                                     </span>
                                                     <span className="text-zinc-500 tabular-nums text-[9px]">{lCount > 0 ? lCount.toLocaleString() : ''}</span>
                                                 </button>
@@ -630,7 +652,7 @@ function MissionsTab({ activePreset, applyMissionPreset }: {
 // ---------------------------------------------------------------------------
 function AllTab({
     searchQuery, setSearchQuery, filteredAll, visibility, subtypeVisibility,
-    counts, toggleVisibility, toggleSubtype,
+    counts, toggleVisibility, toggleSubtype, mode,
 }: {
     searchQuery: string;
     setSearchQuery: (q: string) => void;
@@ -640,6 +662,7 @@ function AllTab({
     counts: Record<string, number>;
     toggleVisibility: (l: LayerName) => void;
     toggleSubtype: (k: string) => void;
+    mode: string;
 }) {
     return (
         <div className="flex flex-col">
@@ -671,6 +694,7 @@ function AllTab({
                     const subOn = fullKey ? subtypeVisibility[fullKey] !== false : layerOn;
                     const n = fullKey ? (counts[fullKey] || 0) : 0;
                     const ItemIcon = item.icon;
+                    const isLiveOnly = LIVE_ONLY_LAYERS.has(item.layer);
 
                     const handleClick = () => {
                         if (isLayerToggle) toggleVisibility(item.layer);
@@ -689,6 +713,19 @@ function AllTab({
                                 <ItemIcon size={10} className={subOn ? item.color : 'text-zinc-700'} />
                                 <span className="truncate">{item.label}</span>
                                 <span className="text-[8px] text-zinc-600">{item.parentLabel}</span>
+                                {isLiveOnly && (
+                                    <span
+                                        className={`inline-flex items-center gap-0.5 rounded border px-1 py-px text-[8px] uppercase tracking-wide ${
+                                            mode === 'playback'
+                                                ? 'border-zinc-700 text-zinc-500'
+                                                : 'border-cyan-900/60 text-cyan-500'
+                                        }`}
+                                        title="Live mode only. This layer does not block replay loading."
+                                    >
+                                        <Radio size={8} />
+                                        Live
+                                    </span>
+                                )}
                             </span>
                             <span className="text-zinc-500 tabular-nums text-[9px]">{n > 0 ? n.toLocaleString() : ''}</span>
                         </button>

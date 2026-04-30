@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { DatabaseService } from '../db/database.service';
 import { extractPublicSourceLiveContract } from './live-contracts';
+import { listLayerRenderContracts } from './render-contracts';
 
 const SOURCES_CATALOG_FILE = path.resolve(__dirname, '../../..', 'sources-catalog.json');
 const LAYER_SETTINGS_FILE = path.resolve(__dirname, '../../..', 'layer-settings-schema.json');
@@ -166,6 +167,28 @@ export class CatalogReadService {
 
         const layers = await this.listLayers();
         return layers.find((layer) => layer.layer_id === layerId || layer.slug === layerId) || null;
+    }
+
+    async listRenderContracts() {
+        const contracts = listLayerRenderContracts();
+        if (!this.database.isReady()) return contracts;
+
+        const result = await this.database.query<{
+            layer_id: string;
+            history_mode: string;
+            coverage_scope: string;
+            capabilities: any;
+        }>(
+            `
+                SELECT layer_id, history_mode, coverage_scope, capabilities
+                FROM catalog.layers
+            `,
+        );
+        const catalogByLayer = new Map((result?.rows || []).map((row) => [row.layer_id, row]));
+        return contracts.map((contract) => ({
+            ...contract,
+            catalog: catalogByLayer.get(contract.layerId) || null,
+        }));
     }
 
     async getUiTaxonomy() {

@@ -12,12 +12,7 @@ export interface WebcamMeta {
     name: string;
     lat: number;
     lng: number;
-    url: string;
     source: string;
-    quality?: string;
-    country?: string;
-    playerUrl?: string;  // Windy embed player URL
-    imageUrl?: string;   // Windy preview image URL
 }
 
 // Global registry so Globe.tsx picking + EntityHUD can look up webcam metadata.
@@ -68,9 +63,6 @@ export function useWebcamsLayer(viewer: Cesium.Viewer | null) {
                 for (let ci = 0; ci < cams.length; ci++) {
                     const cam = cams[ci];
                     if (!cam.lat || !cam.lng) continue;
-                    // Skip cameras with no URL and no image
-                    if (!cam.url && !cam.imageUrl) continue;
-
                     const camId = `webcam-${cam.id}`;
 
                     billboards.add({
@@ -86,12 +78,7 @@ export function useWebcamsLayer(viewer: Cesium.Viewer | null) {
                         name: cam.name,
                         lat: cam.lat,
                         lng: cam.lng,
-                        url: cam.url || '',
                         source: cam.source,
-                        quality: cam.quality,
-                        country: cam.country,
-                        playerUrl: cam.playerUrl,
-                        imageUrl: cam.imageUrl,
                     });
 
                 }

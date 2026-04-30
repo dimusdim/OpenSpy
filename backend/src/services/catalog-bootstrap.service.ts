@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { DatabaseService } from '../db/database.service';
 import { SOURCE_BINDINGS } from './source-bindings.service';
+import { getLayerRenderContract } from './render-contracts';
 
 type SourceRecord = {
     id: string;
@@ -277,6 +278,29 @@ export class CatalogBootstrapService {
 
     private async upsertLayers(layers: Array<{ layerId: string; slug: string; displayName: string; layerType: string; metadata: Record<string, any> }>) {
         for (const layer of layers) {
+            const renderContract = getLayerRenderContract(layer.layerId);
+            const capabilities = {
+                replay: renderContract.historyMode !== 'none',
+                frontendStoreKey: renderContract.frontendStoreKey || null,
+                replayScope: renderContract.replayScope || null,
+                replayBlocking: renderContract.replayBlocking,
+                renderBatch: renderContract.renderBatch,
+                detailsOnDemand: renderContract.detailsOnDemand,
+                motionModel: renderContract.motionModel,
+                minimalRenderProperties: renderContract.minimalRenderProperties,
+                simplifiedRenderGeometry: renderContract.simplifiedRenderGeometry,
+                simplifyTolerance: renderContract.simplifyTolerance ?? null,
+                geometryComplexity: renderContract.geometryComplexity || null,
+                renderGeometryPolicy: renderContract.renderGeometryPolicy || null,
+                renderGeometryColumn: renderContract.renderGeometryColumn || null,
+                staticAsset: renderContract.staticAsset,
+                pointDeltaMode: renderContract.pointDeltaMode,
+                bucketSeconds: renderContract.bucketSeconds,
+                motionSourceId: renderContract.motionSourceId || null,
+                motionMaxGapFallbackSec: renderContract.motionMaxGapFallbackSec || null,
+                maxSpeedMps: renderContract.maxSpeedMps || null,
+                ...(renderContract.historyMode === 'none' ? { liveOnly: true } : {}),
+            };
             await this.database.query(
                 `
                     INSERT INTO catalog.layers (
@@ -291,12 +315,15 @@ export class CatalogBootstrapService {
                         metadata,
                         updated_at
                     )
-                    VALUES ($1, $2, $3, $4, 'unknown', 'unknown', '[]'::jsonb, '{}'::jsonb, $5::jsonb, now())
+                    VALUES ($1, $2, $3, $4, $5, $6, '[]'::jsonb, $7::jsonb, $8::jsonb, now())
                     ON CONFLICT (layer_id)
                     DO UPDATE SET
                         slug = EXCLUDED.slug,
                         display_name = EXCLUDED.display_name,
                         layer_type = EXCLUDED.layer_type,
+                        history_mode = EXCLUDED.history_mode,
+                        coverage_scope = EXCLUDED.coverage_scope,
+                        capabilities = catalog.layers.capabilities || EXCLUDED.capabilities,
                         metadata = EXCLUDED.metadata,
                         updated_at = now()
                 `,
@@ -305,6 +332,9 @@ export class CatalogBootstrapService {
                     layer.slug,
                     layer.displayName,
                     layer.layerType,
+                    renderContract.historyMode,
+                    renderContract.coverageScope,
+                    JSON.stringify(capabilities),
                     JSON.stringify(layer.metadata),
                 ],
             );

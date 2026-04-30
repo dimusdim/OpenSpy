@@ -22,6 +22,15 @@ type RenderStats = {
 
 type ReplayStats = {
     error?: string | null;
+    degraded?: Record<string, Record<string, number | string | boolean>>;
+};
+
+type ReplayHttpStatus = {
+    state?: 'idle' | 'retrying' | 'recovered' | 'failed';
+    attempt?: number;
+    retries?: number;
+    retryAfterMs?: number | null;
+    message?: string | null;
 };
 
 function formatNumber(value: number | null | undefined, digits = 1): string {
@@ -32,17 +41,24 @@ function formatNumber(value: number | null | undefined, digits = 1): string {
 export default function RenderPerfStatus() {
     const [stats, setStats] = useState<RenderStats | null>(null);
     const [replayStats, setReplayStats] = useState<ReplayStats | null>(null);
+    const [replayHttpStatus, setReplayHttpStatus] = useState<ReplayHttpStatus | null>(null);
 
     useEffect(() => {
         const publish = () => {
             const stats = (window as any).__openspyRenderStats;
             const replayStats = (window as any).__openspyReplayStats;
+            const replayHttpStatus = (window as any).__openspyReplayHttpStatus;
             setStats(stats ? { ...stats } : null);
             setReplayStats(replayStats ? { ...replayStats } : null);
+            setReplayHttpStatus(replayHttpStatus ? { ...replayHttpStatus } : null);
         };
         publish();
         const timer = window.setInterval(publish, 500);
-        return () => window.clearInterval(timer);
+        window.addEventListener('openspy:replay-http-status', publish);
+        return () => {
+            window.clearInterval(timer);
+            window.removeEventListener('openspy:replay-http-status', publish);
+        };
     }, []);
 
     const summary = useMemo(() => {
@@ -58,6 +74,12 @@ export default function RenderPerfStatus() {
             : null;
         return { avgFps, avgFrameMs, p95FrameMs, avgSceneRenderMs, replayDrainMs, longFrames33, mode, playing };
     }, [stats]);
+    const degradedSummary = useMemo(() => {
+        const degraded = replayStats?.degraded || {};
+        const entries = Object.entries(degraded)
+            .flatMap(([layerId, values]) => Object.entries(values).map(([key, value]) => `${layerId}.${key}=${String(value)}`));
+        return entries.slice(0, 3).join(' • ');
+    }, [replayStats]);
 
     return (
         <div className="bg-black/70 backdrop-blur-xl border border-zinc-800 rounded-lg px-3 py-2 text-[11px] font-mono text-zinc-300 shadow-2xl">
@@ -86,6 +108,23 @@ export default function RenderPerfStatus() {
             {replayStats?.error ? (
                 <div className="mt-1 max-w-[28rem] leading-5 text-red-300">
                     <span className="text-red-400">Replay Error</span> {replayStats.error}
+                </div>
+            ) : null}
+            {degradedSummary ? (
+                <div className="mt-1 max-w-[28rem] leading-5 text-amber-300">
+                    <span className="text-amber-400">Replay Degraded</span> {degradedSummary}
+                </div>
+            ) : null}
+            {replayHttpStatus?.state === 'retrying' ? (
+                <div className="mt-1 leading-5 text-amber-300">
+                    <span className="text-amber-400">Replay Retry</span> {replayHttpStatus.attempt ?? 1}/{replayHttpStatus.retries ?? 1}
+                    {Number.isFinite(Number(replayHttpStatus.retryAfterMs))
+                        ? ` • ${formatNumber(Number(replayHttpStatus.retryAfterMs) / 1000, 0)}s`
+                        : ''}
+                </div>
+            ) : replayHttpStatus?.state === 'failed' ? (
+                <div className="mt-1 max-w-[28rem] leading-5 text-red-300">
+                    <span className="text-red-400">Replay Network</span> {replayHttpStatus.message || 'request failed'}
                 </div>
             ) : null}
         </div>

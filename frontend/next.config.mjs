@@ -1,6 +1,14 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   allowedDevOrigins: ['127.0.0.1', 'localhost'],
+  experimental: {
+    externalDir: true,
+  },
   eslint: {
     ignoreDuringBuilds: true,
   },
@@ -14,6 +22,18 @@ const nextConfig = {
   // into the wrong atlas -> `rectangle` is undefined -> the TypeError
   // cascades into every live billboard.add call on the page.
   reactStrictMode: false,
+  webpack(config) {
+    config.resolve.alias = {
+      ...(config.resolve.alias || {}),
+      // Cesium 1.140 imports @spz-loader/core for Gaussian Splat 3D Tiles.
+      // The upstream package embeds WASM in a JS template literal that Next's
+      // production client build emits as an invalid JS chunk. We do not load
+      // SPZ tilesets in this app, so keep the core map build valid and fail
+      // explicitly if that unsupported path is ever exercised.
+      '@spz-loader/core$': path.resolve(__dirname, 'src/cesium/spzLoaderUnavailable.ts'),
+    };
+    return config;
+  },
   async headers() {
     return [{
       source: '/(.*)',

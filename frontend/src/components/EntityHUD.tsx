@@ -18,6 +18,23 @@ import { satelliteMetaMap } from '../cesium/useSatellitesLayer';
 import { replayMetaMap } from '../cesium/useReplayOverlay';
 import { replayRenderBatchMetaMap } from '../cesium/replayRenderBatch';
 
+const LIVE_DETAILS_LAYER_BY_TYPE: Record<string, string> = {
+    Aircraft: 'aircraft',
+    Vessel: 'vessel',
+    Satellite: 'satellite',
+    Webcam: 'webcam',
+    Cable: 'cable',
+    Airspace: 'airspace',
+    Pipeline: 'pipeline',
+    Fire: 'fire',
+    Disaster: 'disasters',
+    Conflict: 'conflict',
+    GFW: 'gfw',
+    'AIS Signal Lost': 'gfw',
+    Jamming: 'jamming',
+    Outage: 'outage',
+};
+
 // Squawk code interpretation
 function squawkBadge(code: string | null): { label: string; color: string } | null {
     if (!code) return null;
@@ -43,6 +60,13 @@ function fmtDuration(sec: number | null): string {
     if (sec < 3600) return `${Math.round(sec / 60)} min`;
     if (sec < 86400) return `${(sec / 3600).toFixed(1)} hr`;
     return `${(sec / 86400).toFixed(1)} days`;
+}
+
+function formatOrbitConfidence(value: unknown): string {
+    if (value === 'nominal') return 'FRESH';
+    if (value === 'degraded') return 'DEGRADED';
+    if (value === 'unknown') return 'UNKNOWN';
+    return String(value || 'UNKNOWN').toUpperCase();
 }
 
 function formatSubtypeLabel(layer: string | undefined, subtype: string | undefined): string {
@@ -80,6 +104,7 @@ export default function EntityHUD() {
     // Per-field selectors keep re-renders bound to what EntityHUD reads.
     const selectedEntityId = useTimelineStore(s => s.selectedEntityId);
     const selectedEntityData = useTimelineStore(s => s.selectedEntityData);
+    const mode = useTimelineStore(s => s.mode);
     const [screenPos, setScreenPos] = useState<{ x: number, y: number } | null>(null);
     const [live, setLive] = useState<{
         lat: number;
@@ -95,6 +120,51 @@ export default function EntityHUD() {
         // Enrichment fields (populated per layer type)
         extra?: Record<string, any>;
     } | null>(null);
+    const [liveDetails, setLiveDetails] = useState<Record<string, any> | null>(null);
+
+    useEffect(() => {
+        setLiveDetails(null);
+        if (mode !== 'live' || !selectedEntityId || !selectedEntityData?.type) return;
+        const layer = LIVE_DETAILS_LAYER_BY_TYPE[selectedEntityData.type] || null;
+        if (!layer) return;
+        let cancelled = false;
+        axios.get(`${API_URL}/api/live/details/${encodeURIComponent(layer)}/${encodeURIComponent(selectedEntityId)}`)
+            .then((res) => {
+                if (cancelled) return;
+                const rawDetails = res.data || null;
+                if (rawDetails?.layerId && rawDetails.layerId !== layer) {
+                    throw new Error(`live details layer mismatch: requested ${layer}, received ${rawDetails.layerId}`);
+                }
+                const details = rawDetails ? { ...rawDetails, layerId: rawDetails.layerId || layer } : null;
+                setLiveDetails(details);
+                if (layer === 'aircraft') {
+                    const meta = aircraftMetaMap.get(selectedEntityId);
+                    if (meta) Object.assign(meta, details);
+                } else if (layer === 'vessel') {
+                    const meta = vesselMetaMap.get(selectedEntityId);
+                    if (meta) Object.assign(meta, {
+                        ...details,
+                        vesselLength: details?.length,
+                    });
+                } else if (layer === 'satellite') {
+                    const meta = satelliteMetaMap.get(selectedEntityId);
+                    if (meta) Object.assign(meta, details);
+                }
+                const state = useTimelineStore.getState();
+                if (state.selectedEntityId === selectedEntityId && details?.name) {
+                    state.setSelectedEntityId(selectedEntityId, {
+                        ...(state.selectedEntityData || {}),
+                        name: details.name,
+                        id: selectedEntityId,
+                        type: selectedEntityData.type,
+                    });
+                }
+            })
+            .catch((err) => {
+                if (!cancelled) console.warn('[EntityHUD] live details fetch failed:', err.message);
+            });
+        return () => { cancelled = true; };
+    }, [mode, selectedEntityId, selectedEntityData?.type]);
 
     useEffect(() => {
         if (!selectedEntityId || typeof window === 'undefined') {
@@ -179,6 +249,7 @@ export default function EntityHUD() {
             // Webcam billboard — read from metadata map.
             const wcMeta = webcamMetaMap.get(selectedEntityId);
             if (wcMeta) {
+                const details = liveDetails?.layerId === 'webcam' ? liveDetails : null;
                 const pos = Cesium.Cartesian3.fromDegrees(wcMeta.lng, wcMeta.lat, 0);
                 const canvasPos = Cesium.SceneTransforms.worldToWindowCoordinates(cesViewer.scene, pos);
                 setScreenPos(canvasPos ? { x: canvasPos.x, y: canvasPos.y } : null);
@@ -188,6 +259,13 @@ export default function EntityHUD() {
                     alt: 0,
                     layer: 'Webcam',
                     source: wcMeta.source,
+                    extra: details ? {
+                        url: details.url,
+                        imageUrl: details.imageUrl,
+                        playerUrl: details.playerUrl,
+                        country: details.country,
+                        quality: details.quality,
+                    } : undefined,
                 });
                 requestAnimationFrame(update);
                 return;
@@ -196,6 +274,8 @@ export default function EntityHUD() {
             // Fire point — read from fireMetaMap
             const fireMeta = fireMetaMap.get(selectedEntityId);
             if (fireMeta) {
+                const details = liveDetails?.layerId === 'fire' ? liveDetails : null;
+                const detailProps = details?.properties || {};
                 const pos = Cesium.Cartesian3.fromDegrees(fireMeta.lng, fireMeta.lat, 500);
                 const canvasPos = Cesium.SceneTransforms.worldToWindowCoordinates(cesViewer.scene, pos);
                 setScreenPos(canvasPos ? { x: canvasPos.x, y: canvasPos.y } : null);
@@ -207,11 +287,16 @@ export default function EntityHUD() {
                     layer: 'Fire',
                     subtype: level,
                     source: 'NASA FIRMS',
-                    description: `FRP: ${fireMeta.frp.toFixed(1)} MW | Brightness: ${fireMeta.brightness.toFixed(0)} K | Confidence: ${fireMeta.confidence}`,
+                    description: details
+                        ? `FRP: ${fireMeta.frp.toFixed(1)} MW | Brightness: ${Number(detailProps.brightness || 0).toFixed(0)} K | Confidence: ${detailProps.confidence || 'unknown'}`
+                        : `FRP: ${fireMeta.frp.toFixed(1)} MW`,
                     extra: {
-                        daynight: fireMeta.daynight,
-                        acqTime: fireMeta.acqTime,
-                        fireType: fireMeta.fireType,
+                        daynight: detailProps.daynight,
+                        acqTime: detailProps.acqTime,
+                        fireType: detailProps.fireType,
+                        acqDate: detailProps.acqDate,
+                        aggregated: fireMeta.aggregated,
+                        count: fireMeta.count,
                     },
                 });
                 requestAnimationFrame(update);
@@ -223,6 +308,8 @@ export default function EntityHUD() {
             // miss them; this branch runs before findEntity() below.
             const cableMeta = cableMetaMap.get(selectedEntityId);
             if (cableMeta) {
+                const details = liveDetails?.layerId === 'cable' ? liveDetails : null;
+                const props = details?.properties || {};
                 const pos = Cesium.Cartesian3.fromDegrees(cableMeta.lng, cableMeta.lat, 0);
                 const canvasPos = Cesium.SceneTransforms.worldToWindowCoordinates(cesViewer.scene, pos);
                 setScreenPos(canvasPos ? { x: canvasPos.x, y: canvasPos.y } : null);
@@ -235,9 +322,9 @@ export default function EntityHUD() {
                     source: cableMeta.source,
                     description: cableMeta.description,
                     extra: {
-                        owners: cableMeta.owners,
-                        length: cableMeta.length,
-                        year: cableMeta.year,
+                        owners: props.owners || props.owner || '',
+                        length: props.length || props.cable_length || '',
+                        year: props.rfs || props.year || '',
                     },
                 });
                 requestAnimationFrame(update);
@@ -248,6 +335,8 @@ export default function EntityHUD() {
             // not in entities, HUD reads straight from metaMap.
             const pipelineMeta = pipelineMetaMap.get(selectedEntityId);
             if (pipelineMeta) {
+                const details = liveDetails?.layerId === 'pipeline' ? liveDetails : null;
+                const props = details?.properties || {};
                 const pos = Cesium.Cartesian3.fromDegrees(pipelineMeta.lng, pipelineMeta.lat, 0);
                 const canvasPos = Cesium.SceneTransforms.worldToWindowCoordinates(cesViewer.scene, pos);
                 setScreenPos(canvasPos ? { x: canvasPos.x, y: canvasPos.y } : null);
@@ -258,7 +347,11 @@ export default function EntityHUD() {
                     layer: pipelineMeta.layer,
                     subtype: pipelineMeta.substance,
                     source: pipelineMeta.source,
-                    description: pipelineMeta.description,
+                    description: details?.name || pipelineMeta.description,
+                    extra: {
+                        operator: props.operator || props.pipeline_operator || '',
+                        substance: props.substance || pipelineMeta.substance,
+                    },
                 });
                 requestAnimationFrame(update);
                 return;
@@ -268,6 +361,8 @@ export default function EntityHUD() {
             // vertical limits and source in the description row below.
             const airspaceMeta = airspaceMetaMap.get(selectedEntityId);
             if (airspaceMeta) {
+                const details = liveDetails?.layerId === 'airspace' ? liveDetails : null;
+                const props = details?.properties || {};
                 const pos = Cesium.Cartesian3.fromDegrees(
                     airspaceMeta.lng,
                     airspaceMeta.lat,
@@ -282,7 +377,7 @@ export default function EntityHUD() {
                     layer: airspaceMeta.layer,
                     subtype: airspaceMeta.subtype,
                     source: airspaceMeta.source,
-                    description: `${airspaceMeta.name} — ${airspaceMeta.lowerLimit}→${airspaceMeta.upperLimit}m`,
+                    description: `${details?.name || airspaceMeta.name} — ${props.lowerLimit ?? airspaceMeta.lowerLimit}→${props.upperLimit ?? airspaceMeta.upperLimit}m`,
                 });
                 requestAnimationFrame(update);
                 return;
@@ -312,6 +407,7 @@ export default function EntityHUD() {
             // Aircraft are now BillboardCollection, not Entity. Read from metadata map.
             const acMeta = aircraftMetaMap.get(selectedEntityId);
             if (acMeta) {
+                const details = liveDetails?.layerId === 'aircraft' ? liveDetails : null;
                 const pos = Cesium.Cartesian3.fromDegrees(acMeta.lng, acMeta.lat, acMeta.alt * 0.3048);
                 const canvasPos = Cesium.SceneTransforms.worldToWindowCoordinates(cesViewer.scene, pos);
                 setScreenPos(canvasPos ? { x: canvasPos.x, y: canvasPos.y } : null);
@@ -325,12 +421,12 @@ export default function EntityHUD() {
                     speed: acMeta.speed,
                     heading: acMeta.heading,
                     extra: {
-                        squawk: acMeta.squawk,
-                        verticalRate: acMeta.verticalRate,
-                        onGround: acMeta.onGround,
-                        lastContact: acMeta.lastContact,
-                        callsign: acMeta.callsign,
-                        icao24: acMeta.icao24,
+                        squawk: details?.squawk ?? acMeta.squawk,
+                        verticalRate: details?.verticalRate ?? acMeta.verticalRate,
+                        onGround: details?.onGround ?? acMeta.onGround,
+                        lastContact: details?.lastContact ?? acMeta.lastContact,
+                        callsign: details?.callsign ?? acMeta.callsign,
+                        icao24: details?.icao24 ?? acMeta.icao24,
                     },
                 });
                 requestAnimationFrame(update);
@@ -340,6 +436,7 @@ export default function EntityHUD() {
             // Live vessel billboard — read from metadata map.
             const vesselMeta = vesselMetaMap.get(selectedEntityId);
             if (vesselMeta) {
+                const details = liveDetails?.layerId === 'vessel' ? liveDetails : null;
                 const pos = Cesium.Cartesian3.fromDegrees(vesselMeta.lng, vesselMeta.lat, 0);
                 const canvasPos = Cesium.SceneTransforms.worldToWindowCoordinates(cesViewer.scene, pos);
                 setScreenPos(canvasPos ? { x: canvasPos.x, y: canvasPos.y } : null);
@@ -352,17 +449,17 @@ export default function EntityHUD() {
                     speed: vesselMeta.speed,
                     heading: vesselMeta.heading,
                     extra: {
-                        vesselName: vesselMeta.name,
-                        callSign: vesselMeta.callSign,
-                        imo: vesselMeta.imo,
-                        navigationStatus: vesselMeta.navigationStatus,
-                        destination: vesselMeta.destination,
-                        eta: vesselMeta.eta,
-                        rateOfTurn: vesselMeta.rateOfTurn,
-                        draught: vesselMeta.draught,
-                        vesselLength: vesselMeta.vesselLength,
-                        beam: vesselMeta.beam,
-                        cog: vesselMeta.cog,
+                        vesselName: details?.name ?? vesselMeta.name,
+                        callSign: details?.callSign ?? vesselMeta.callSign,
+                        imo: details?.imo ?? vesselMeta.imo,
+                        navigationStatus: details?.navigationStatus ?? vesselMeta.navigationStatus,
+                        destination: details?.destination ?? vesselMeta.destination,
+                        eta: details?.eta ?? vesselMeta.eta,
+                        rateOfTurn: details?.rateOfTurn ?? vesselMeta.rateOfTurn,
+                        draught: details?.draught ?? vesselMeta.draught,
+                        vesselLength: details?.length ?? vesselMeta.vesselLength,
+                        beam: details?.beam ?? vesselMeta.beam,
+                        cog: details?.cog ?? vesselMeta.cog,
                     },
                 });
                 requestAnimationFrame(update);
@@ -373,6 +470,7 @@ export default function EntityHUD() {
             // in satelliteMetaMap from the worker positions stream.
             const satMeta = satelliteMetaMap.get(selectedEntityId);
             if (satMeta?.position) {
+                const details = liveDetails?.layerId === 'satellite' ? liveDetails : null;
                 const pos = satMeta.position;
                 const canvasPos = Cesium.SceneTransforms.worldToWindowCoordinates(cesViewer.scene, pos);
                 const carto = Cesium.Cartographic.fromCartesian(pos);
@@ -391,9 +489,15 @@ export default function EntityHUD() {
                     layer: 'Satellite',
                     subtype: satMeta.subtype,
                     extra: {
-                        noradId: satMeta.noradId,
-                        resolution: satMeta.reconMeta?.resolution,
-                        country: satMeta.reconMeta?.country,
+                        noradId: details?.noradId ?? satMeta.noradId,
+                        resolution: details?.reconMeta?.resolution ?? satMeta.reconMeta?.resolution,
+                        country: details?.reconMeta?.country ?? satMeta.reconMeta?.country,
+                        tleEpochAt: details?.tleEpochAt ?? satMeta.tleEpochAt,
+                        fetchedAt: details?.fetchedAt ?? satMeta.fetchedAt,
+                        provider: details?.provider ?? satMeta.provider,
+                        motionConfidence: details?.motionConfidence ?? satMeta.motionConfidence,
+                        motionAgeSec: details?.motionAgeSec ?? satMeta.motionAgeSec,
+                        motionValiditySec: details?.motionValiditySec ?? satMeta.motionValiditySec,
                     },
                 });
                 requestAnimationFrame(update);
@@ -411,6 +515,7 @@ export default function EntityHUD() {
                     const carto = Cesium.Cartographic.fromCartesian(pos);
                     const props = entity.properties as any;
                     const layer = readProp(props, 'layer');
+                    const eventDetails = liveDetails?.properties || {};
                     // Build enrichment extra object based on layer type
                     const extra: Record<string, any> = {};
                     if (layer === 'Vessel') {
@@ -426,28 +531,52 @@ export default function EntityHUD() {
                         extra.beam = readProp(props, 'beam');
                         extra.cog = readProp(props, 'cog');
                     } else if (layer === 'GFW') {
-                        extra.confidence = readProp(props, 'confidence');
-                        extra.duration = readProp(props, 'duration');
-                        extra.vesselOwner = readProp(props, 'vesselOwner');
-                        extra.vesselMmsi = readProp(props, 'vesselMmsi');
-                        extra.vesselType = readProp(props, 'vesselType');
-                        extra.vesselName = readProp(props, 'vesselName');
-                        extra.flagState = readProp(props, 'flagState');
-                        extra.start = readProp(props, 'start');
-                        extra.end = readProp(props, 'end');
+                        extra.confidence = eventDetails.confidence ?? readProp(props, 'confidence');
+                        extra.duration = eventDetails.duration ?? readProp(props, 'duration');
+                        extra.vesselOwner = eventDetails.vesselOwner ?? readProp(props, 'vesselOwner');
+                        extra.vesselMmsi = eventDetails.vesselMmsi ?? readProp(props, 'vesselMmsi');
+                        extra.vesselType = eventDetails.vesselType ?? readProp(props, 'vesselType');
+                        extra.vesselName = eventDetails.vesselName ?? readProp(props, 'vesselName');
+                        extra.flagState = eventDetails.flagState ?? readProp(props, 'flagState');
+                        extra.start = liveDetails?.observedAt ?? readProp(props, 'start');
+                        extra.end = eventDetails.end ?? readProp(props, 'end');
                     } else if (layer === 'Satellite') {
                         extra.noradId = readProp(props, 'noradId');
                         extra.resolution = readProp(props, 'resolution');
                         extra.country = readProp(props, 'country');
+                        extra.motionConfidence = readProp(props, 'motionConfidence');
+                        extra.motionAgeSec = readProp(props, 'motionAgeSec');
+                        extra.motionValiditySec = readProp(props, 'motionValiditySec');
                     } else if (layer === 'Conflict') {
-                        extra.event_type = readProp(props, 'event_type');
-                        extra.sub_event_type = readProp(props, 'sub_event_type');
-                        extra.fatalities = readProp(props, 'fatalities');
-                        extra.country = readProp(props, 'country');
-                        extra.actor1 = readProp(props, 'actor1');
-                        extra.actor2 = readProp(props, 'actor2');
-                        extra.event_date = readProp(props, 'event_date');
-                        extra.notes = readProp(props, 'notes');
+                        extra.event_type = eventDetails.eventType ?? readProp(props, 'event_type');
+                        extra.sub_event_type = eventDetails.subEventType ?? readProp(props, 'sub_event_type');
+                        extra.fatalities = eventDetails.fatalities ?? readProp(props, 'fatalities');
+                        extra.country = eventDetails.country ?? readProp(props, 'country');
+                        extra.actor1 = eventDetails.actor1 ?? readProp(props, 'actor1');
+                        extra.actor2 = eventDetails.actor2 ?? readProp(props, 'actor2');
+                        extra.event_date = liveDetails?.observedAt?.slice?.(0, 10) ?? readProp(props, 'event_date');
+                        extra.notes = eventDetails.notes ?? eventDetails.sourceUrl ?? readProp(props, 'notes');
+                    } else if (layer === 'Jamming') {
+                        extra.countGood = eventDetails.countGood;
+                        extra.countBad = eventDetails.countBad;
+                        extra.ratio = eventDetails.ratio;
+                        extra.h3Index = eventDetails.h3Index;
+                    } else if (layer === 'Disaster') {
+                        extra.eventType = eventDetails.eventType ?? readProp(props, 'subtype');
+                        extra.alertLevel = eventDetails.alertLevel ?? readProp(props, 'alertLevel');
+                        extra.radiusKm = eventDetails.radiusKm;
+                        extra.startTime = liveDetails?.observedAt ?? eventDetails.startTime;
+                        extra.endTime = eventDetails.endTime;
+                    } else if (layer === 'Outage') {
+                        extra.country = eventDetails.country ?? readProp(props, 'country');
+                        extra.countryCode = eventDetails.countryCode ?? readProp(props, 'countryCode');
+                        extra.datasource = eventDetails.datasource ?? readProp(props, 'datasource');
+                        extra.startTime = liveDetails?.observedAt ?? eventDetails.startTime ?? eventDetails.startDate;
+                        extra.endTime = eventDetails.endDate ?? liveDetails?.validTo;
+                        extra.asn = eventDetails.asn;
+                        extra.asnName = eventDetails.asnName;
+                        extra.outageType = eventDetails.outageType;
+                        extra.outageCause = eventDetails.outageCause;
                     }
                     setLive({
                         lat: Cesium.Math.toDegrees(carto.latitude),
@@ -459,7 +588,9 @@ export default function EntityHUD() {
                         source: readProp(props, 'source'),
                         speed: readProp(props, 'speed'),
                         heading: readProp(props, 'heading'),
-                        description: readProp(props, 'description'),
+                        description: liveDetails?.name && ['Disaster', 'Outage'].includes(layer)
+                            ? liveDetails.name
+                            : readProp(props, 'description'),
                         extra,
                     });
                 }
@@ -472,7 +603,7 @@ export default function EntityHUD() {
         return () => {
             active = false;
         };
-    }, [selectedEntityId]);
+    }, [selectedEntityId, liveDetails]);
 
     // Enrich aircraft with photo (Planespotters) + route (OpenSky)
     const [aircraftRoute, setAircraftRoute] = useState<{ origin: string; destination: string } | null>(null);
@@ -488,16 +619,19 @@ export default function EntityHUD() {
 
         // selectedEntityId is now icao24 (primary key). Callsign comes from meta.
         const meta = aircraftMetaMap.get(selectedEntityId);
+        const details = liveDetails?.layerId === 'aircraft' ? liveDetails : null;
         let cancelled = false;
 
         // Origin country from OpenSky data
-        if (meta?.origin) {
-            setAircraftInfo({ origin: meta.origin });
+        const origin = details?.origin || meta?.origin;
+        if (origin) {
+            setAircraftInfo({ origin });
         }
 
         // Photo from Planespotters.net via backend proxy (uses icao24)
-        if (meta?.icao24) {
-            axios.get(`${API_URL}/api/aircraft-photo/${meta.icao24}`)
+        const icao24 = details?.icao24 || meta?.icao24;
+        if (icao24) {
+            axios.get(`${API_URL}/api/aircraft-photo/${icao24}`)
                 .then(res => {
                     if (cancelled) return;
                     const photo = res.data?.photos?.[0];
@@ -509,8 +643,8 @@ export default function EntityHUD() {
         }
 
         // Fetch route via backend proxy (uses callsign, not icao24)
-        const callsign = meta?.callsign?.trim();
-        if (callsign && callsign !== meta?.icao24) {
+        const callsign = String(details?.callsign || meta?.callsign || '').trim();
+        if (callsign && callsign !== icao24) {
             axios.get(`${API_URL}/api/routes/${encodeURIComponent(callsign)}`)
                 .then(res => {
                     if (cancelled) return;
@@ -525,7 +659,7 @@ export default function EntityHUD() {
         }
 
         return () => { cancelled = true; };
-    }, [selectedEntityId, selectedEntityData]);
+    }, [selectedEntityId, selectedEntityData, liveDetails]);
 
     if (!selectedEntityId || !selectedEntityData) return null;
 
@@ -849,14 +983,30 @@ export default function EntityHUD() {
                                     <div className="text-zinc-300 text-sm font-mono">{live.extra.resolution}</div>
                                 </div>
                             )}
-                            {live.extra.country && (
-                                <div>
-                                    <div className="text-[10px] text-zinc-500 font-mono">COUNTRY</div>
-                                    <div className="text-zinc-300 text-sm">{live.extra.country}</div>
-                                </div>
-                            )}
-                        </div>
-                    )}
+	                            {live.extra.country && (
+	                                <div>
+	                                    <div className="text-[10px] text-zinc-500 font-mono">COUNTRY</div>
+	                                    <div className="text-zinc-300 text-sm">{live.extra.country}</div>
+	                                </div>
+	                            )}
+	                            {live.extra.motionConfidence && (
+	                                <div>
+	                                    <div className="text-[10px] text-zinc-500 font-mono">ORBIT MODEL</div>
+	                                    <div className={`text-sm font-mono ${
+	                                        live.extra.motionConfidence === 'degraded' ? 'text-amber-300' : 'text-zinc-300'
+	                                    }`}>
+	                                        {formatOrbitConfidence(live.extra.motionConfidence)}
+	                                    </div>
+	                                </div>
+	                            )}
+	                            {live.extra.motionAgeSec != null && (
+	                                <div>
+	                                    <div className="text-[10px] text-zinc-500 font-mono">TLE AGE</div>
+	                                    <div className="text-zinc-300 text-sm font-mono">{fmtDuration(Number(live.extra.motionAgeSec))}</div>
+	                                </div>
+	                            )}
+	                        </div>
+	                    )}
 
                     <div className="border-t border-zinc-800/60 pt-3">
                         <div className="text-[10px] text-zinc-500 font-mono mb-1">POSITION (WGS-84)</div>
@@ -884,14 +1034,14 @@ export default function EntityHUD() {
                         </div>
                     )}
 
-                    {selectedEntityData?.type === 'Webcam' && (
+                    {selectedEntityData?.type === 'Webcam' && (live?.extra?.url || live?.extra?.imageUrl || live?.extra?.playerUrl) && (
                         <div className="border-t border-zinc-800/60 pt-3">
                             <div className="text-[10px] text-zinc-500 font-mono mb-1">LIVE STREAM</div>
                             <WebcamPlayer
-                                url={selectedEntityData.url}
-                                imageUrl={selectedEntityData.imageUrl}
-                                playerUrl={selectedEntityData.playerUrl}
-                                source={selectedEntityData.source}
+                                url={live.extra.url}
+                                imageUrl={live.extra.imageUrl}
+                                playerUrl={live.extra.playerUrl}
+                                source={live.source}
                             />
                         </div>
                     )}

@@ -69,11 +69,6 @@ export function useConflictsLayer(viewer: Cesium.Viewer | null) {
                     event_type: ev.eventType || ev.event_type || 'Unknown',
                     sub_event_type: ev.subEventType || ev.sub_event_type || '',
                     fatalities: ev.fatalities || 0,
-                    country: ev.country || ev.location || '',
-                    actor1: ev.actor1 || '',
-                    actor2: ev.actor2 || '',
-                    event_date: ev.date || ev.event_date || '',
-                    notes: ev.sourceUrl ? `Source: ${ev.sourceUrl}` : '',
                     source: 'GDELT',
                 }));
 
@@ -96,8 +91,8 @@ export function useConflictsLayer(viewer: Cesium.Viewer | null) {
                     const subtypeKey = getSubtypeKey(ev.event_type);
 
                     ds.entities.add({
-                        id: `conflict-${ev.id}`,
-                        name: `${ev.event_type}: ${ev.country}`,
+                        id: ev.id,
+                        name: ev.event_type || 'Conflict event',
                         position,
                         properties: new Cesium.PropertyBag({
                             layer: 'Conflict',
@@ -106,11 +101,6 @@ export function useConflictsLayer(viewer: Cesium.Viewer | null) {
                             event_type: ev.event_type,
                             sub_event_type: ev.sub_event_type,
                             fatalities: ev.fatalities,
-                            country: ev.country,
-                            actor1: ev.actor1,
-                            actor2: ev.actor2,
-                            event_date: ev.event_date,
-                            notes: ev.notes,
                         }),
                         billboard: {
                             image: getConflictIcon(ev.event_type),

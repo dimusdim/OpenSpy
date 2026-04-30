@@ -240,6 +240,7 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
   // Active flag for in-flight fetches — flipped false on viewer unmount
   // so late responses don't touch a destroyed scene.
   const activeRef = useRef(false);
+  const fetchTileRef = useRef<((v: Cesium.Viewer, south: number, west: number, north: number, east: number) => Promise<void>) | null>(null);
 
   // Apply current subtype visibility to all billboards + power lines in a
   // tile. Called on tile load (with current store state) and on subtype
@@ -420,6 +421,7 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
 
         useTimelineStore.getState().setStreamMetric('infrastructure', {
           count: infraMetaMap.size,
+          status: tile.main || tile.power ? 'streaming' : 'error',
           speed: tile.main || tile.power ? '-' : 'failed',
         });
         useTimelineStore.getState().setSubtypeCounts('infrastructure', {
@@ -551,11 +553,14 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
             const powerBody = powerResult.value.data ?? {};
             const powerRecords: any[] = Array.isArray(powerBody) ? powerBody : (powerBody.data ?? []);
             const powerOverpassTimedOut: boolean = powerBody.overpassTimedOut === true;
-            const powerBillboardCollection = new Cesium.BillboardCollection({
-              scene: v.scene,
-              blendOption: Cesium.BlendOption.TRANSLUCENT,
-            });
+            const powerBillboardCollection = tile.powerBillboards
+              ? null
+              : new Cesium.BillboardCollection({
+                  scene: v.scene,
+                  blendOption: Cesium.BlendOption.TRANSLUCENT,
+                });
             const powerLineInstances: Cesium.GeometryInstance[] = [];
+            let hasPowerLineGeometry = false;
 
             for (let pri = 0; pri < powerRecords.length; pri++) {
               const rec = powerRecords[pri];
@@ -564,6 +569,8 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
                 rec.coordinates &&
                 rec.coordinates.length >= 2
               ) {
+                hasPowerLineGeometry = true;
+                if (tile.powerLinePrimitive) continue;
                 // Backend sends coords as [lat, lng]. Flatten to lng,lat for Cesium.
                 const degreesFlat: number[] = [];
                 for (const pt of rec.coordinates as [number, number][]) {
@@ -580,7 +587,9 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
                   lng: mid[1],
                   subtype: 'power_line',
                   layer: 'Infrastructure',
-                  source: 'OpenStreetMap',
+                  source: typeof rec.id === 'string' && rec.id.startsWith('overture-')
+                    ? 'Overture Maps'
+                    : 'OpenStreetMap',
                   description: `${rec.name || 'Power line'}${rec.voltage ? ' (' + rec.voltage + 'V)' : ''}`,
                 };
                 const instanceId = registerLogical(rec.id, meta);
@@ -597,6 +606,7 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
                   id: instanceId,
                 }));
               } else if (rec.type === 'power_substation' || rec.type === 'power_plant') {
+                if (!powerBillboardCollection) continue;
                 const subtype = rec.type as InfraMeta['subtype'];
                 const meta: InfraMeta = {
                   id: rec.id,
@@ -605,7 +615,9 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
                   lng: rec.lng,
                   subtype,
                   layer: 'Infrastructure',
-                  source: 'OpenStreetMap',
+                  source: typeof rec.id === 'string' && rec.id.startsWith('overture-')
+                    ? 'Overture Maps'
+                    : 'OpenStreetMap',
                   description: `${rec.name || subtype}${rec.source ? ' (' + rec.source + ')' : ''}`,
                 };
                 const instanceId = registerLogical(rec.id, meta);
@@ -621,7 +633,7 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
 
             }
 
-            if (powerBillboardCollection.length > 0) {
+            if (powerBillboardCollection && powerBillboardCollection.length > 0) {
               powerBillboardCollection.show = (useTimelineStore.getState().sources.infrastructure && useTimelineStore.getState().visibility.infrastructure);
               v.scene.primitives.add(powerBillboardCollection);
               tile.powerBillboards = powerBillboardCollection;
@@ -637,11 +649,22 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
               v.scene.groundPrimitives.add(linePrim);
               tile.powerLinePrimitive = linePrim;
             }
-            // Only mark as "done" if Overpass actually responded. When
-            // overpass timed out AND we got zero records, skip marking
-            // so the tile will be refetched on next viewport change.
-            if (!powerOverpassTimedOut || powerRecords.length > 0) {
+            // Only mark as complete once the line-capable source has
+            // answered. Overture provides power point centroids, but power
+            // lines still come from Overpass; if Overpass times out and the
+            // response only has points, keep the tile retryable. The retry
+            // path skips already-added point billboards and adds only lines.
+            if (!powerOverpassTimedOut || hasPowerLineGeometry) {
               tile.power = true;
+            } else {
+              const retryTimer = setTimeout(() => {
+                pendingTimersRef.current.delete(retryTimer);
+                if (v.isDestroyed() || !activeRef.current) return;
+                const current = tilesRef.current.get(key);
+                if (!current || current.power) return;
+                void fetchTileRef.current?.(v, south, west, north, east);
+              }, 12_000);
+              pendingTimersRef.current.add(retryTimer);
             }
           } catch (powerErr) {
             console.warn('[Infrastructure] power parse failed:', powerErr);
@@ -673,6 +696,7 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
     },
     [applyTileVisibility, evictTile]
   );
+  fetchTileRef.current = fetchTile;
 
   // Camera-move callback: enumerate the 2°×2° cells that overlap the
   // current viewport, prioritise by proximity to the camera centre, cap
@@ -696,6 +720,10 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
       const camHeightKm = camHeightMeters / 1000;
       if (camHeightKm > INFRA_ALTITUDE_CUTOFF_KM) {
         useTimelineStore.getState().setInfraViewportPct(-1);
+        useTimelineStore.getState().setStreamMetric('infrastructure', {
+          status: 'streaming',
+          speed: 'zoom in',
+        });
         return;
       }
 
@@ -743,6 +771,11 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
       useTimelineStore.getState().setInfraViewportPct(pct);
 
       if (todo.length === 0) return;
+
+      useTimelineStore.getState().setStreamMetric('infrastructure', {
+        status: 'connecting',
+        speed: 'loading...',
+      });
 
       // Bounded-concurrency dispatcher.
       let cursor = 0;

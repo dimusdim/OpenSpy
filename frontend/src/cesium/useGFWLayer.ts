@@ -57,21 +57,13 @@ export function useGFWLayer(viewer: Cesium.Viewer | null) {
                     if (!position) continue;
                     ds.entities.add({
                         id: ev.id,
-                        name: `GFW: ${ev.vesselName || 'Unknown Vessel'} (${ev.flagState || '??'})`,
+                        name: 'GFW AIS signal gap',
                         position,
                         properties: new Cesium.PropertyBag({
                             layer: 'GFW',
                             subtype: ev.type || 'gap',
-                            vesselId: ev.vesselId,
-                            vesselName: ev.vesselName,
-                            flagState: ev.flagState,
                             start: ev.start,
                             end: ev.end,
-                            confidence: ev.confidence ?? null,
-                            duration: ev.duration ?? null,
-                            vesselOwner: ev.vesselOwner || null,
-                            vesselMmsi: ev.vesselMmsi || null,
-                            vesselType: ev.vesselType || null,
                         }),
                         billboard: {
                             image: GFW_ICON,

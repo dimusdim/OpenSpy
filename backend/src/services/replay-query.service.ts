@@ -1,5 +1,6 @@
 import * as satelliteJs from 'satellite.js';
 import { DatabaseService } from '../db/database.service';
+import { tryGetLayerRenderContract, type LayerRenderContract } from './render-contracts';
 
 export type ReplayStateFilters = {
     at: string;
@@ -16,7 +17,19 @@ export type ReplayStateFilters = {
     limit?: number;
     aggregateFires?: boolean;
     minimal?: boolean;
+    simplifyGeometry?: boolean;
 };
+
+function requireMotionMaxGapFallbackSeconds(layerId: string | null | undefined, contract: LayerRenderContract | null): number {
+    if (!layerId || !contract) {
+        throw new Error(`Missing render contract for moving replay layer=${layerId || 'unknown'}`);
+    }
+    const value = Number(contract.motionMaxGapFallbackSec);
+    if (!Number.isFinite(value) || value <= 0) {
+        throw new Error(`Layer ${layerId} requires positive render.motionMaxGapFallbackSec in layer-contracts.json`);
+    }
+    return value;
+}
 
 export type ReplayWindowFilters = {
     from: string;
@@ -34,9 +47,10 @@ export type ReplayWindowFilters = {
     limit?: number;
     stepSeconds?: number;
     aggregateFires?: boolean;
+    simplifyGeometry?: boolean;
 };
 
-type ReplayEntityRow = {
+export type ReplayEntityRow = {
     entity_id: string;
     layer_id: string;
     source_id: string | null;
@@ -122,6 +136,25 @@ export type ReplaySatelliteTleRow = {
     tle_line2: string | null;
     orbital_properties: any;
 };
+
+export type ReplayPositionFixSampleRow = {
+    entity_id: string;
+    observed_at: string;
+    display_lat: number | null;
+    display_lng: number | null;
+    altitude_m: number | null;
+};
+
+export type ReplayExpiredMovingEntityRow = {
+    entity_id: string;
+};
+
+function inferMovingEntityLayerId(filters: ReplayStateFilters): string | undefined {
+    if (filters.layerId) return filters.layerId;
+    if (filters.entityId?.startsWith('aircraft:')) return 'aircraft';
+    if (filters.entityId?.startsWith('vessel:')) return 'vessel';
+    return undefined;
+}
 
 type ReplayTrackRow = {
     position_fix_id: string;
@@ -276,7 +309,7 @@ export class ReplayQueryService {
 
     private async getSourceLiveContractSeconds(
         sourceId: string,
-        contractField: 'stale_after_sec' | 'remove_after_sec',
+        contractField: 'stale_after_sec' | 'remove_after_sec' | 'motion_max_gap_sec',
         fallbackSeconds: number,
     ): Promise<number> {
         if (!this.database.isReady()) return fallbackSeconds;
@@ -294,6 +327,10 @@ export class ReplayQueryService {
         const liveContract = result?.rows?.[0]?.manifest?.live_contract;
         const value = liveContract?.[contractField];
         return Number.isFinite(value) && value > 0 ? Number(value) : fallbackSeconds;
+    }
+
+    async getSourceMotionMaxGapSeconds(sourceId: string, fallbackSeconds: number): Promise<number> {
+        return this.getSourceLiveContractSeconds(sourceId, 'motion_max_gap_sec', fallbackSeconds);
     }
 
     private isMovingEntityReplay(filters: { layerId?: string; entityId?: string }): boolean {
@@ -693,9 +730,13 @@ export class ReplayQueryService {
     }
 
     private async listMovingEntityStateAt(filters: ReplayStateFilters): Promise<ReplayEntityRow[]> {
-        const sourceId = filters.sourceId
-            || (filters.layerId === 'vessel' || filters.entityId?.startsWith('vessel:') ? 'aisstream' : 'opensky');
-        const fallbackStaleAfterSeconds = sourceId === 'aisstream' ? 3600 : 300;
+        const inferredLayerId = inferMovingEntityLayerId(filters);
+        const contract = inferredLayerId ? tryGetLayerRenderContract(inferredLayerId) : null;
+        const sourceId = filters.sourceId || contract?.motionSourceId;
+        if (!sourceId) {
+            throw new Error(`Missing motion source contract for replay layer=${inferredLayerId || 'unknown'}`);
+        }
+        const fallbackStaleAfterSeconds = requireMotionMaxGapFallbackSeconds(inferredLayerId, contract);
         const staleAfterSeconds = await this.getSourceLiveContractSeconds(sourceId, 'stale_after_sec', fallbackStaleAfterSeconds);
 
         const params: unknown[] = [filters.at, staleAfterSeconds];
@@ -785,6 +826,203 @@ export class ReplayQueryService {
                 ${limitSql}
             `,
             params,
+        );
+
+        return result?.rows || [];
+    }
+
+    async listMovingEntityChangedStateBetween(filters: ReplayStateFilters & { since: string }): Promise<ReplayEntityRow[]> {
+        if (!this.database.isReady()) return [];
+
+        const params: unknown[] = [filters.since, filters.at];
+        const fixClauses = [
+            'pf.observed_at > $1::timestamptz',
+            'pf.observed_at <= $2::timestamptz',
+        ];
+        const outerClauses: string[] = [];
+
+        const addFix = (sql: string, value?: unknown) => {
+            params.push(value);
+            fixClauses.push(sql.replace('?', `$${params.length}`));
+        };
+
+        const addOuter = (sql: string, value?: unknown) => {
+            params.push(value);
+            outerClauses.push(sql.replace('?', `$${params.length}`));
+        };
+
+        if (filters.layerId) addFix('pf.layer_id = ?', filters.layerId);
+        if (filters.sourceId) addFix('pf.source_id = ?', filters.sourceId);
+        if (filters.entityId) addFix('pf.entity_id = ?', filters.entityId);
+        if (filters.bbox) {
+            const [south, west, north, east] = filters.bbox;
+            params.push(west, south, east, north);
+            const start = params.length - 3;
+            fixClauses.push(
+                `pf.geom IS NOT NULL AND ST_Intersects(pf.geom, ST_MakeEnvelope($${start}, $${start + 1}, $${start + 2}, $${start + 3}, 4326))`,
+            );
+        }
+
+        if (filters.entityKind) addOuter('e.entity_kind = ?', filters.entityKind);
+        if (filters.subtype) addOuter('e.subtype = ?', filters.subtype);
+
+        const normalizedLimit = normalizeLimit(filters.limit);
+        const limitSql = normalizedLimit ? `LIMIT $${params.push(normalizedLimit)}` : '';
+        const outerWhereSql = outerClauses.length ? `WHERE ${outerClauses.join(' AND ')}` : '';
+        const entityPropertiesSql = filters.minimal ? "'{}'::jsonb" : 'e.properties';
+        const positionPropertiesSql = filters.minimal ? "'{}'::jsonb" : 'pf.properties';
+
+        const result = await this.database.query<ReplayEntityRow>(
+            `
+                WITH ranked_fix AS (
+                    SELECT
+                        pf.entity_id,
+                        pf.layer_id,
+                        pf.source_id,
+                        pf.observed_at AS position_observed_at,
+                        NULL::jsonb AS geometry,
+                        ST_Y(pf.geom) AS display_lat,
+                        ST_X(pf.geom) AS display_lng,
+                        pf.altitude_m,
+                        pf.heading_deg,
+                        pf.speed_mps,
+                        ${positionPropertiesSql} AS position_properties,
+                        row_number() OVER (
+                            PARTITION BY pf.entity_id
+                            ORDER BY pf.observed_at DESC, pf.created_at DESC
+                        ) AS rn
+                    FROM core.position_fixes pf
+                    WHERE ${fixClauses.join(' AND ')}
+                )
+                SELECT
+                    e.entity_id,
+                    e.layer_id,
+                    e.source_id,
+                    e.entity_kind,
+                    e.subtype,
+                    e.display_name,
+                    e.first_observed_at,
+                    e.last_observed_at,
+                    e.updated_at,
+                    NULL::timestamptz AS entity_observed_at,
+                    ${entityPropertiesSql} AS entity_properties,
+                    lf.position_observed_at,
+                    lf.geometry,
+                    lf.display_lat,
+                    lf.display_lng,
+                    lf.altitude_m,
+                    lf.heading_deg,
+                    lf.speed_mps,
+                    lf.position_properties
+                FROM ranked_fix lf
+                JOIN core.entities e ON e.entity_id = lf.entity_id
+                ${outerWhereSql ? `${outerWhereSql} AND lf.rn = 1` : 'WHERE lf.rn = 1'}
+                ORDER BY lf.position_observed_at DESC, e.updated_at DESC
+                ${limitSql}
+            `,
+            params,
+        );
+
+        return result?.rows || [];
+    }
+
+    async listMovingEntityExpiredBetween(filters: ReplayStateFilters & { since: string }): Promise<ReplayExpiredMovingEntityRow[]> {
+        if (!this.database.isReady()) return [];
+
+        const inferredLayerId = inferMovingEntityLayerId(filters);
+        const contract = inferredLayerId ? tryGetLayerRenderContract(inferredLayerId) : null;
+        const sourceId = filters.sourceId || contract?.motionSourceId;
+        if (!sourceId) {
+            throw new Error(`Missing motion source contract for expired entity replay layer=${inferredLayerId || 'unknown'}`);
+        }
+        const fallbackStaleAfterSeconds = requireMotionMaxGapFallbackSeconds(inferredLayerId, contract);
+        const staleAfterSeconds = await this.getSourceLiveContractSeconds(sourceId, 'stale_after_sec', fallbackStaleAfterSeconds);
+
+        const params: unknown[] = [filters.since, filters.at, staleAfterSeconds];
+        const fixClauses = [
+            'pf.observed_at <= $2::timestamptz',
+            "pf.observed_at >= (LEAST($1::timestamptz, $2::timestamptz) - (($3::double precision * 2) * INTERVAL '1 second'))",
+        ];
+        const outerClauses: string[] = [];
+
+        const addFix = (sql: string, value?: unknown) => {
+            params.push(value);
+            fixClauses.push(sql.replace('?', `$${params.length}`));
+        };
+
+        const addOuter = (sql: string, value?: unknown) => {
+            params.push(value);
+            outerClauses.push(sql.replace('?', `$${params.length}`));
+        };
+
+        if (filters.layerId) addFix('pf.layer_id = ?', filters.layerId);
+        if (filters.sourceId) addFix('pf.source_id = ?', filters.sourceId);
+        if (filters.entityId) addFix('pf.entity_id = ?', filters.entityId);
+        if (filters.bbox) {
+            const [south, west, north, east] = filters.bbox;
+            params.push(west, south, east, north);
+            const start = params.length - 3;
+            fixClauses.push(
+                `pf.geom IS NOT NULL AND ST_Intersects(pf.geom, ST_MakeEnvelope($${start}, $${start + 1}, $${start + 2}, $${start + 3}, 4326))`,
+            );
+        }
+
+        if (filters.entityKind) addOuter('e.entity_kind = ?', filters.entityKind);
+        if (filters.subtype) addOuter('e.subtype = ?', filters.subtype);
+
+        const outerWhereSql = outerClauses.length ? `AND ${outerClauses.join(' AND ')}` : '';
+
+        const result = await this.database.query<ReplayExpiredMovingEntityRow>(
+            `
+                WITH latest_before_at AS (
+                    SELECT DISTINCT ON (pf.entity_id)
+                        pf.entity_id,
+                        pf.observed_at AS position_observed_at
+                    FROM core.position_fixes pf
+                    WHERE ${fixClauses.join(' AND ')}
+                    ORDER BY pf.entity_id, pf.observed_at DESC, pf.created_at DESC
+                )
+                SELECT lb.entity_id
+                FROM latest_before_at lb
+                JOIN core.entities e ON e.entity_id = lb.entity_id
+                WHERE lb.position_observed_at >= ($1::timestamptz - ($3::text || ' seconds')::interval)
+                  AND lb.position_observed_at < ($2::timestamptz - ($3::text || ' seconds')::interval)
+                  ${outerWhereSql}
+                ORDER BY lb.entity_id
+            `,
+            params,
+        );
+
+        return result?.rows || [];
+    }
+
+    async listPositionFixSamplesForEntities(filters: {
+        layerId: string;
+        entityIds: string[];
+        fromExclusive: string;
+        toInclusive: string;
+    }): Promise<ReplayPositionFixSampleRow[]> {
+        if (!this.database.isReady()) return [];
+        const entityIds = Array.from(new Set(filters.entityIds.filter(Boolean)));
+        if (entityIds.length === 0) return [];
+
+        const result = await this.database.query<ReplayPositionFixSampleRow>(
+            `
+                SELECT
+                    pf.entity_id,
+                    pf.observed_at,
+                    ST_Y(pf.geom) AS display_lat,
+                    ST_X(pf.geom) AS display_lng,
+                    pf.altitude_m
+                FROM core.position_fixes pf
+                WHERE pf.layer_id = $1
+                  AND pf.entity_id = ANY($2::text[])
+                  AND pf.observed_at > $3::timestamptz
+                  AND pf.observed_at <= $4::timestamptz
+                  AND pf.geom IS NOT NULL
+                ORDER BY pf.entity_id ASC, pf.observed_at ASC, pf.created_at ASC
+            `,
+            [filters.layerId, entityIds, filters.fromExclusive, filters.toInclusive],
         );
 
         return result?.rows || [];
@@ -895,7 +1133,8 @@ export class ReplayQueryService {
 
     async listSatelliteTleAt(filters: ReplayStateFilters): Promise<ReplaySatelliteTleRow[]> {
         const params: unknown[] = [filters.at];
-        const orbitalClauses = ['oe.layer_id = $2', 'oe.observed_at <= $1::timestamptz'];
+        const orbitalTimeExpr = 'COALESCE(oe.tle_epoch_at, oe.observed_at)';
+        const orbitalClauses = ['oe.layer_id = $2', `${orbitalTimeExpr} <= $1::timestamptz`];
         const outerClauses: string[] = [];
 
         params.push('satellite');
@@ -923,13 +1162,18 @@ export class ReplayQueryService {
                         oe.entity_id,
                         oe.layer_id,
                         oe.source_id,
-                        oe.observed_at AS orbital_observed_at,
+                        ${orbitalTimeExpr} AS orbital_observed_at,
                         oe.tle_line1,
                         oe.tle_line2,
-                        oe.properties AS orbital_properties
+                        oe.properties || jsonb_build_object(
+                            'tle_epoch_at', oe.tle_epoch_at,
+                            'fetched_at', COALESCE(oe.fetched_at, oe.observed_at),
+                            'provider', oe.provider,
+                            'source_publication_at', oe.source_publication_at
+                        ) AS orbital_properties
                     FROM core.orbital_elements oe
                     WHERE ${orbitalClauses.join(' AND ')}
-                    ORDER BY oe.entity_id, oe.observed_at DESC, oe.created_at DESC
+                    ORDER BY oe.entity_id, ${orbitalTimeExpr} DESC, COALESCE(oe.fetched_at, oe.observed_at) DESC, oe.created_at DESC
                 )
                 SELECT
                     e.entity_id,
@@ -982,6 +1226,7 @@ export class ReplayQueryService {
         const { from, to } = this.normalizeTrackWindow(filters);
         const stepSeconds = this.clampStepSeconds(filters.stepSeconds);
         const normalizedLimit = normalizeLimit(filters.limit) || 1000;
+        const orbitalTimeExpr = 'COALESCE(oe.tle_epoch_at, oe.observed_at)';
 
         const result = await this.database.query<{
             entity_id: string;
@@ -998,15 +1243,20 @@ export class ReplayQueryService {
                         oe.entity_id,
                         oe.layer_id,
                         oe.source_id,
-                        oe.observed_at,
+                        ${orbitalTimeExpr} AS observed_at,
                         oe.tle_line1,
                         oe.tle_line2,
-                        oe.properties,
+                        oe.properties || jsonb_build_object(
+                            'tle_epoch_at', oe.tle_epoch_at,
+                            'fetched_at', COALESCE(oe.fetched_at, oe.observed_at),
+                            'provider', oe.provider,
+                            'source_publication_at', oe.source_publication_at
+                        ) AS properties,
                         oe.created_at
                     FROM core.orbital_elements oe
                     WHERE oe.entity_id = $1
-                      AND oe.observed_at <= $3::timestamptz
-                    ORDER BY oe.observed_at DESC, oe.created_at DESC
+                      AND ${orbitalTimeExpr} <= $3::timestamptz
+                    ORDER BY ${orbitalTimeExpr} DESC, COALESCE(oe.fetched_at, oe.observed_at) DESC, oe.created_at DESC
                     LIMIT 1
                 ),
                 in_range AS (
@@ -1014,15 +1264,20 @@ export class ReplayQueryService {
                         oe.entity_id,
                         oe.layer_id,
                         oe.source_id,
-                        oe.observed_at,
+                        ${orbitalTimeExpr} AS observed_at,
                         oe.tle_line1,
                         oe.tle_line2,
-                        oe.properties,
+                        oe.properties || jsonb_build_object(
+                            'tle_epoch_at', oe.tle_epoch_at,
+                            'fetched_at', COALESCE(oe.fetched_at, oe.observed_at),
+                            'provider', oe.provider,
+                            'source_publication_at', oe.source_publication_at
+                        ) AS properties,
                         oe.created_at
                     FROM core.orbital_elements oe
                     WHERE oe.entity_id = $1
-                      AND oe.observed_at >= $2::timestamptz
-                      AND oe.observed_at <= $3::timestamptz
+                      AND ${orbitalTimeExpr} >= $2::timestamptz
+                      AND ${orbitalTimeExpr} <= $3::timestamptz
                 )
                 SELECT DISTINCT ON (observed_at, COALESCE(tle_line1, ''), COALESCE(tle_line2, ''))
                     entity_id,
@@ -1336,7 +1591,8 @@ export class ReplayQueryService {
     private async listSatelliteWindow(filters: ReplayWindowFilters): Promise<ReplayWindowItem[]> {
         const { from, to } = this.normalizeReplayWindow(filters);
         const params: unknown[] = [from, to, 'satellite'];
-        const clauses = ['oe.layer_id = $3', 'oe.observed_at <= $2::timestamptz'];
+        const orbitalTimeExpr = 'COALESCE(oe.tle_epoch_at, oe.observed_at)';
+        const clauses = ['oe.layer_id = $3', `${orbitalTimeExpr} <= $2::timestamptz`];
         const outerClauses: string[] = [];
 
         const add = (target: 'inner' | 'outer', sql: string, value?: unknown) => {
@@ -1358,28 +1614,38 @@ export class ReplayQueryService {
                         oe.entity_id,
                         oe.layer_id,
                         oe.source_id,
-                        oe.observed_at AS orbital_observed_at,
+                        ${orbitalTimeExpr} AS orbital_observed_at,
                         oe.tle_line1,
                         oe.tle_line2,
-                        oe.properties AS orbital_properties
+                        oe.properties || jsonb_build_object(
+                            'tle_epoch_at', oe.tle_epoch_at,
+                            'fetched_at', COALESCE(oe.fetched_at, oe.observed_at),
+                            'provider', oe.provider,
+                            'source_publication_at', oe.source_publication_at
+                        ) AS orbital_properties
                     FROM core.orbital_elements oe
                     WHERE ${clauses.join(' AND ')}
-                      AND oe.observed_at <= $1::timestamptz
-                    ORDER BY oe.entity_id, oe.observed_at DESC, oe.created_at DESC
+                      AND ${orbitalTimeExpr} <= $1::timestamptz
+                    ORDER BY oe.entity_id, ${orbitalTimeExpr} DESC, COALESCE(oe.fetched_at, oe.observed_at) DESC, oe.created_at DESC
                 ),
                 in_range AS (
                     SELECT
                         oe.entity_id,
                         oe.layer_id,
                         oe.source_id,
-                        oe.observed_at AS orbital_observed_at,
+                        ${orbitalTimeExpr} AS orbital_observed_at,
                         oe.tle_line1,
                         oe.tle_line2,
-                        oe.properties AS orbital_properties
+                        oe.properties || jsonb_build_object(
+                            'tle_epoch_at', oe.tle_epoch_at,
+                            'fetched_at', COALESCE(oe.fetched_at, oe.observed_at),
+                            'provider', oe.provider,
+                            'source_publication_at', oe.source_publication_at
+                        ) AS orbital_properties
                     FROM core.orbital_elements oe
                     WHERE ${clauses.join(' AND ')}
-                      AND oe.observed_at > $1::timestamptz
-                      AND oe.observed_at <= $2::timestamptz
+                      AND ${orbitalTimeExpr} > $1::timestamptz
+                      AND ${orbitalTimeExpr} <= $2::timestamptz
                 ),
                 timeline AS (
                     SELECT * FROM seed
@@ -1580,6 +1846,9 @@ export class ReplayQueryService {
                 `s.geom IS NOT NULL AND ST_Intersects(s.geom, ST_MakeEnvelope($${start}, $${start + 1}, $${start + 2}, $${start + 3}, 4326))`,
             );
         }
+        const eventGeometrySql = filters.simplifyGeometry
+            ? `CASE WHEN COALESCE(s.geom_render_low, s.geom) IS NOT NULL THEN ST_AsGeoJSON(COALESCE(s.geom_render_low, s.geom))::jsonb ELSE NULL END AS geometry`
+            : `CASE WHEN s.geom IS NOT NULL THEN ST_AsGeoJSON(s.geom)::jsonb ELSE NULL END AS geometry`;
 
         const result = await this.database.query<ReplayWindowEventSqlRow>(
             `
@@ -1595,7 +1864,7 @@ export class ReplayQueryService {
                         s.valid_to,
                         s.created_at,
                         COALESCE(s.observed_at, s.valid_from, s.created_at) AS effective_at,
-                        CASE WHEN s.geom IS NOT NULL THEN ST_AsGeoJSON(s.geom)::jsonb ELSE NULL END AS geometry,
+                        ${eventGeometrySql},
                         CASE WHEN s.geom IS NOT NULL THEN ST_Y(ST_PointOnSurface(s.geom)) ELSE NULL END AS display_lat,
                         CASE WHEN s.geom IS NOT NULL THEN ST_X(ST_PointOnSurface(s.geom)) ELSE NULL END AS display_lng,
                         s.properties
@@ -1616,7 +1885,7 @@ export class ReplayQueryService {
                         s.valid_to,
                         s.created_at,
                         COALESCE(s.observed_at, s.valid_from, s.created_at) AS effective_at,
-                        CASE WHEN s.geom IS NOT NULL THEN ST_AsGeoJSON(s.geom)::jsonb ELSE NULL END AS geometry,
+                        ${eventGeometrySql},
                         CASE WHEN s.geom IS NOT NULL THEN ST_Y(ST_PointOnSurface(s.geom)) ELSE NULL END AS display_lat,
                         CASE WHEN s.geom IS NOT NULL THEN ST_X(ST_PointOnSurface(s.geom)) ELSE NULL END AS display_lng,
                         s.properties
@@ -1853,6 +2122,9 @@ export class ReplayQueryService {
 
         clauses.push('(s.valid_to IS NULL OR s.valid_to >= $1::timestamptz)');
         const limitSql = normalizedLimit && !aggregateFire ? `LIMIT $${params.push(normalizedLimit)}` : '';
+        const eventGeometrySql = filters.simplifyGeometry
+            ? `CASE WHEN COALESCE(s.geom_render_low, s.geom) IS NOT NULL THEN ST_AsGeoJSON(COALESCE(s.geom_render_low, s.geom))::jsonb ELSE NULL END AS geometry`
+            : `CASE WHEN s.geom IS NOT NULL THEN ST_AsGeoJSON(s.geom)::jsonb ELSE NULL END AS geometry`;
 
         const result = await this.database.query<ReplayEventRow>(
             `
@@ -1866,7 +2138,7 @@ export class ReplayQueryService {
                         s.observed_at,
                         s.valid_from,
                         s.valid_to,
-                        CASE WHEN s.geom IS NOT NULL THEN ST_AsGeoJSON(s.geom)::jsonb ELSE NULL END AS geometry,
+                        ${eventGeometrySql},
                         CASE WHEN s.geom IS NOT NULL THEN ST_Y(ST_PointOnSurface(s.geom)) ELSE NULL END AS display_lat,
                         CASE WHEN s.geom IS NOT NULL THEN ST_X(ST_PointOnSurface(s.geom)) ELSE NULL END AS display_lng,
                         s.properties
@@ -1918,6 +2190,9 @@ export class ReplayQueryService {
 
         const normalizedLimit = normalizeLimit(filters.limit);
         const limitSql = normalizedLimit ? `LIMIT $${params.push(normalizedLimit)}` : '';
+        const assetGeometrySql = filters.simplifyGeometry
+            ? `CASE WHEN COALESCE(s.geom_render_low, s.geom) IS NOT NULL THEN ST_AsGeoJSON(COALESCE(s.geom_render_low, s.geom))::jsonb ELSE NULL END AS geometry`
+            : `CASE WHEN s.geom IS NOT NULL THEN ST_AsGeoJSON(s.geom)::jsonb ELSE NULL END AS geometry`;
 
         const result = await this.database.query<ReplayAssetRow>(
             `
@@ -1930,7 +2205,7 @@ export class ReplayQueryService {
                         s.subtype,
                         s.display_name,
                         s.observed_at,
-                        CASE WHEN s.geom IS NOT NULL THEN ST_AsGeoJSON(s.geom)::jsonb ELSE NULL END AS geometry,
+                        ${assetGeometrySql},
                         CASE WHEN s.geom IS NOT NULL THEN ST_Y(ST_PointOnSurface(s.geom)) ELSE NULL END AS display_lat,
                         CASE WHEN s.geom IS NOT NULL THEN ST_X(ST_PointOnSurface(s.geom)) ELSE NULL END AS display_lng,
                         s.properties
@@ -1947,5 +2222,38 @@ export class ReplayQueryService {
         );
 
         return result?.rows || [];
+    }
+
+    async getAssetLayerStateVersion(filters: ReplayStateFilters): Promise<string | null> {
+        if (!this.database.isReady() || !filters.layerId) return null;
+
+        const params: unknown[] = [filters.layerId, filters.at];
+        const clauses = [
+            's.layer_id = $1',
+            'COALESCE(s.observed_at, s.created_at) <= $2::timestamptz',
+        ];
+        if (filters.sourceId) {
+            params.push(filters.sourceId);
+            clauses.push(`s.source_id = $${params.length}`);
+        }
+        if (filters.bbox) {
+            const [south, west, north, east] = filters.bbox;
+            params.push(west, south, east, north);
+            const start = params.length - 3;
+            clauses.push(
+                `s.geom IS NOT NULL AND ST_Intersects(s.geom, ST_MakeEnvelope($${start}, $${start + 1}, $${start + 2}, $${start + 3}, 4326))`,
+            );
+        }
+
+        const result = await this.database.query<{ version_at: string | null }>(
+            `
+                SELECT MAX(COALESCE(s.observed_at, s.created_at)) AS version_at
+                FROM core.asset_snapshots s
+                WHERE ${clauses.join(' AND ')}
+            `,
+            params,
+        );
+        const value = result?.rows?.[0]?.version_at;
+        return value ? new Date(value).toISOString() : null;
     }
 }

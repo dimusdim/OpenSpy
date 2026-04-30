@@ -45,6 +45,12 @@ export interface SatelliteMeta {
     recon?: boolean;
     reconMeta?: any;
     sensor?: any;
+    tleEpochAt?: string | null;
+    fetchedAt?: string | null;
+    provider?: string | null;
+    motionConfidence?: string | null;
+    motionAgeSec?: number | null;
+    motionValiditySec?: number | null;
 }
 export const satelliteMetaMap = new Map<string, SatelliteMeta>();
 
@@ -564,6 +570,7 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                 if (!bb || !bb.show) continue;
                 const satPos = bb.position;
                 if (!isFiniteCartesian(satPos) || Cesium.Cartesian3.equals(satPos, Cesium.Cartesian3.ZERO)) continue;
+                const satPosStable = Cesium.Cartesian3.clone(satPos);
 
                 const carto = Cesium.Cartographic.fromCartesian(satPos);
                 if (!carto) continue;
@@ -608,7 +615,10 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                         const rayEntity = fpDs.entities.add({
                             id: rayId,
                             polyline: {
-                                positions: new Cesium.ConstantProperty([satPos, perimeter]),
+                                positions: new Cesium.ConstantProperty([
+                                    Cesium.Cartesian3.clone(satPosStable),
+                                    Cesium.Cartesian3.clone(perimeter),
+                                ]),
                                 width: 1,
                                 material: new Cesium.ColorMaterialProperty(cfg.baseColor.withAlpha(0.25)),
                             },
@@ -645,10 +655,14 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                     const rayEntity = st.rayEntities[k];
                     if (rayEntity.polyline) {
                         const posProp = rayEntity.polyline.positions as Cesium.ConstantProperty | undefined;
+                        const nextPositions = [
+                            Cesium.Cartesian3.clone(satPosStable),
+                            Cesium.Cartesian3.clone(perimeter),
+                        ];
                         if (posProp instanceof Cesium.ConstantProperty) {
-                            posProp.setValue([satPos, perimeter]);
+                            posProp.setValue(nextPositions);
                         } else {
-                            rayEntity.polyline.positions = new Cesium.ConstantProperty([satPos, perimeter]);
+                            rayEntity.polyline.positions = new Cesium.ConstantProperty(nextPositions);
                         }
                     }
                 }

@@ -361,7 +361,7 @@
               "catalog_layer": "Pipeline",
               "enabled_by_default": false,
               "sources": [
-                { "source_id": "osm_pipelines", "title": "OpenStreetMap", "auth": [] }
+                { "source_id": "overture_pipelines", "title": "Overture Maps", "auth": [{ "key": "OVERTURE_ENABLED", "label": "Enable Overture", "type": "toggle", "required": false }] }
               ],
               "subtypes": [
                 { "id": "oil", "title": "Oil Pipelines", "enabled": true, "color": "#ef4444" },

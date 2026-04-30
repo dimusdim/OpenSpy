@@ -18,6 +18,8 @@ export interface WebcamRecord {
     imageUrl?: string;  // Windy preview image
 }
 
+export type WebcamRenderRecord = Pick<WebcamRecord, 'id' | 'lat' | 'lng' | 'name' | 'source'>;
+
 // ---------------------------------------------------------------------------
 // WebcamsService — aggregates webcam sources into a unified list
 // Sources: Live-Environment-Streams (GitHub), Caltrans CCTV, Windy API
@@ -47,7 +49,22 @@ export class WebcamsService {
         }, 60 * 60 * 1000);
     }
 
-    getWebcams(): WebcamRecord[] {
+    getWebcams(): WebcamRenderRecord[] {
+        return this.getFullWebcams().map((cam) => ({
+            id: cam.id,
+            lat: cam.lat,
+            lng: cam.lng,
+            name: cam.name,
+            source: cam.source,
+        }));
+    }
+
+    getWebcamDetails(id: string): WebcamRecord | null {
+        const normalized = id.replace(/^webcam-/, '');
+        return this.getFullWebcams().find((cam) => cam.id === normalized || `webcam-${cam.id}` === id) ?? null;
+    }
+
+    private getFullWebcams(): WebcamRecord[] {
         // Merge the "slow" aggregated list (live-env-streams + caltrans, which
         // we cache on an hourly fetchAll cycle) with whatever Windy currently
         // has in its in-memory cache. We do this at read time instead of only

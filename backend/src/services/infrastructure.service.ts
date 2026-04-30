@@ -18,7 +18,9 @@ export interface PipelineRecord {
   id: string;
   name: string;
   substance: 'oil' | 'gas';
-  coordinates: [number, number][];
+  lat?: number;
+  lng?: number;
+  coordinates?: [number, number][];
 }
 
 export interface PowerInfraRecord {
@@ -184,12 +186,6 @@ export class InfrastructureService {
       else break;
     }
   }
-
-  // Pipeline cache (global, fetched once)
-  private pipelinesCache: PipelineRecord[] | null = null;
-  private pipelinesCacheTs = 0;
-  private readonly PIPELINES_TTL = 24 * 60 * 60 * 1000; // 24 hours
-  private pipelinesFetching = false;
 
   // -----------------------------------------------------------------------
   // Critical Infrastructure (per-bbox)
@@ -394,77 +390,4 @@ out center tags geom;`.trim();
     }
   }
 
-  // -----------------------------------------------------------------------
-  // Pipelines (global fetch, cached 24h)
-  // -----------------------------------------------------------------------
-
-  async getPipelines(): Promise<PipelineRecord[]> {
-    if (this.pipelinesCache && Date.now() - this.pipelinesCacheTs < this.PIPELINES_TTL) {
-      return this.pipelinesCache;
-    }
-
-    // Prevent concurrent fetches
-    if (this.pipelinesFetching) {
-      return this.pipelinesCache ?? [];
-    }
-    this.pipelinesFetching = true;
-
-    try {
-      console.log('[Pipelines] Querying Overpass for global oil & gas pipelines...');
-
-      // Query one focused region at a time — full geometry for thousands of
-      // ways is heavy. Use a single Middle East bbox (most strategically
-      // important), with increased maxsize and timeout.
-      const oilQuery = `[out:json][timeout:120][maxsize:104857600];
-way["man_made"="pipeline"]["substance"="oil"](20,30,42,60);
-out geom;`;
-
-      const gasQuery = `[out:json][timeout:120][maxsize:104857600];
-way["man_made"="pipeline"]["substance"="gas"](20,30,42,60);
-out geom;`;
-
-      // Route both pipeline queries through the mirror fallback helper so
-      // one mirror being busy doesn't blow away the whole result set.
-      const [oilRes, gasRes] = await Promise.allSettled([
-        overpassQuery(oilQuery, 'Pipelines/oil', 180_000),
-        overpassQuery(gasQuery, 'Pipelines/gas', 180_000),
-      ]);
-
-      const records: PipelineRecord[] = [];
-
-      const processResult = (result: PromiseSettledResult<any>, substance: 'oil' | 'gas') => {
-        if (result.status !== 'fulfilled') {
-          console.warn(`[Pipelines] ${substance} query failed:`, result.reason?.message ?? result.reason);
-          return;
-        }
-        const elements = result.value?.elements ?? [];
-        for (const el of elements) {
-          if (!el.geometry?.length || el.geometry.length < 2) continue;
-          const coords: [number, number][] = el.geometry.map((pt: any) => [pt.lat, pt.lon]);
-          const tags = el.tags ?? {};
-          records.push({
-            id: `pipe-${el.id}`,
-            name: tags['name'] || tags['operator'] || `${substance} pipeline`,
-            substance,
-            coordinates: coords,
-          });
-        }
-      };
-
-      processResult(oilRes, 'oil');
-      processResult(gasRes, 'gas');
-
-      this.pipelinesCache = records;
-      this.pipelinesCacheTs = Date.now();
-      await this.persistence?.persistPipelines(records);
-      console.log(`[Pipelines] Loaded ${records.length} pipelines (oil+gas)`);
-      return records;
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[Pipelines] Failed: ${msg}`);
-      return this.pipelinesCache ?? [];
-    } finally {
-      this.pipelinesFetching = false;
-    }
-  }
 }

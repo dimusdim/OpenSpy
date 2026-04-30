@@ -373,11 +373,7 @@ export default function Globe() {
                         name: wcMeta.name,
                         id: pickedObject.id,
                         type: 'Webcam',
-                        url: wcMeta.url,
                         source: wcMeta.source,
-                        country: wcMeta.country,
-                        imageUrl: wcMeta.imageUrl,
-                        playerUrl: wcMeta.playerUrl,
                     });
                     return;
                 }
@@ -709,9 +705,10 @@ export default function Globe() {
     // PNG with PNG alpha — transparent where there are no clouds — so
     // ImageMaterialProperty + equirectangular projection on an ellipsoid
     // gets us a proper cloud shell with one HTTP fetch.
-    const showClouds = useTimelineStore(s => s.sources.clouds && s.visibility.clouds);
     const mode = useTimelineStore(s => s.mode);
     const playbackKind = useTimelineStore(s => s.playbackKind);
+    const cloudsEnabled = useTimelineStore(s => s.sources.clouds && s.visibility.clouds);
+    const showClouds = cloudsEnabled && !(mode === 'playback' && playbackKind === 'historical');
     const cloudPrimRef = useRef<Cesium.Primitive | null>(null);
 
     useEffect(() => {
@@ -769,14 +766,20 @@ export default function Globe() {
         console.log(`[Clouds] Shell primitive added (radii ${semiMajor}m, alt ${CLOUD_ALT}m, date ${cloudDate})`);
 
         // Track metric status for the Legend.
-        const metricsInterval = setInterval(() => {
+        const updateCloudMetric = () => {
             if (viewer.isDestroyed()) return;
+            const storeState = useTimelineStore.getState();
+            const historicalReplay = storeState.mode === 'playback' && storeState.playbackKind === 'historical';
+            const sourceVisible = storeState.sources.clouds && storeState.visibility.clouds;
+            const activeClouds = sourceVisible && !historicalReplay;
             useTimelineStore.getState().setStreamMetric('clouds', {
-                count: cloudPrim.show ? 1 : 0,
-                status: cloudPrim.show ? 'streaming' : 'connecting',
-                speed: cloudDate,
+                count: activeClouds ? 1 : 0,
+                status: historicalReplay || !sourceVisible ? 'disabled' : 'streaming',
+                speed: activeClouds ? cloudDate : '-',
             });
-        }, 5000);
+        };
+        updateCloudMetric();
+        const metricsInterval = setInterval(updateCloudMetric, 5000);
 
         return () => {
             clearInterval(metricsInterval);
@@ -790,9 +793,15 @@ export default function Globe() {
     useEffect(() => {
         if (cloudPrimRef.current && viewer) {
             cloudPrimRef.current.show = showClouds;
+            const cloudDate = new Date(Date.now() - 86400_000).toISOString().split('T')[0];
+            useTimelineStore.getState().setStreamMetric('clouds', {
+                count: showClouds ? 1 : 0,
+                status: showClouds ? 'streaming' : 'disabled',
+                speed: showClouds ? cloudDate : '-',
+            });
             viewer.scene.requestRender();
         }
-    }, [showClouds, viewer]);
+    }, [showClouds, cloudsEnabled, mode, playbackKind, viewer]);
 
     // --- Base globe imagery / 3D geometry: Google | OSM | MODIS ---
     // Google and OSM tilesets are loaded lazily on first selection and

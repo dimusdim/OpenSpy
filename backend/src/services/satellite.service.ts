@@ -5,8 +5,10 @@ import { SpectatorService } from './spectator.service';
 import { SourcePersistenceService } from './source-persistence.service';
 
 const CACHE_FILE = path.join(__dirname, '../../satellites_cache.json');
-const CACHE_TTL = 1000 * 60 * 60 * 24; // 24 hours
 const SATELLITE_CACHE_VERSION = 2;
+const SATELLITE_REFRESH_INTERVAL_MS = 60 * 60 * 1000;
+const SATELLITE_REFRESH_JITTER_MS = 5 * 60 * 1000;
+const SATELLITE_TLE_VALIDITY_MS = 14 * 24 * 60 * 60 * 1000;
 
 // TLE provider chain — tried in order until one succeeds.
 // 1. Space-Track.org  — US Space Command, primary source, needs login
@@ -48,6 +50,10 @@ export interface SatelliteRecord {
     name: string;
     tleLine1: string;
     tleLine2: string;
+    tleEpochAt?: string | null;
+    fetchedAt?: string | null;
+    provider?: string | null;
+    sourcePublicationAt?: string | null;
     type: 'military' | 'civilian' | 'commercial';
     classificationSource?: 'derived_name_heuristic';
     // NORAD catalog number — extracted from TLE line 1. Exposed to the
@@ -80,6 +86,66 @@ function extractNoradId(tleLine1: string): number {
     return match ? parseInt(match[1], 10) : -1;
 }
 
+function parseTleEpochAt(tleLine1: string): string | null {
+    if (!tleLine1 || tleLine1.length < 32) return null;
+    const yearRaw = tleLine1.slice(18, 20).trim();
+    const dayRaw = tleLine1.slice(20, 32).trim();
+    const epochYear = Number.parseInt(yearRaw, 10);
+    const dayOfYear = Number.parseFloat(dayRaw);
+    if (!Number.isFinite(epochYear) || !Number.isFinite(dayOfYear) || dayOfYear < 1) return null;
+
+    // TLE convention: 57-99 means 1957-1999, 00-56 means 2000-2056.
+    const fullYear = epochYear >= 57 ? 1900 + epochYear : 2000 + epochYear;
+    const epochMs = Date.UTC(fullYear, 0, 1, 0, 0, 0, 0) + (dayOfYear - 1) * 86_400_000;
+    const date = new Date(epochMs);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function cacheTtlForProvider(provider: string): number {
+    if (provider === 'space-track') return 55 * 60 * 1000;
+    if (provider === 'celestrak') return 2 * 60 * 60 * 1000;
+    if (provider === 'ivanstanojevic') return 24 * 60 * 60 * 1000;
+    return 60 * 60 * 1000;
+}
+
+function satelliteCatalogConfidence(records: SatelliteRecord[], nowMs = Date.now()): {
+    motionConfidence: 'nominal' | 'degraded' | 'unknown';
+    nominalCount: number;
+    degradedCount: number;
+    unknownCount: number;
+    maxTleAgeSec: number | null;
+    motionValiditySec: number;
+} {
+    let nominalCount = 0;
+    let degradedCount = 0;
+    let unknownCount = 0;
+    let maxAgeMs = 0;
+    for (const record of records) {
+        const tleEpochMs = record.tleEpochAt ? Date.parse(record.tleEpochAt) : Number.NaN;
+        if (!Number.isFinite(tleEpochMs)) {
+            unknownCount += 1;
+            continue;
+        }
+        const ageMs = Math.max(0, nowMs - tleEpochMs);
+        maxAgeMs = Math.max(maxAgeMs, ageMs);
+        if (ageMs > SATELLITE_TLE_VALIDITY_MS) degradedCount += 1;
+        else nominalCount += 1;
+    }
+    const motionConfidence = unknownCount >= records.length && records.length > 0
+        ? 'unknown'
+        : degradedCount > 0 || unknownCount > 0
+            ? 'degraded'
+            : 'nominal';
+    return {
+        motionConfidence,
+        nominalCount,
+        degradedCount,
+        unknownCount,
+        maxTleAgeSec: nominalCount + degradedCount > 0 ? Math.round(maxAgeMs / 1000) : null,
+        motionValiditySec: Math.round(SATELLITE_TLE_VALIDITY_MS / 1000),
+    };
+}
+
 /** Build a lookup map from NORAD ID to recon metadata */
 const RECON_BY_NORAD = new Map(RECON_SATELLITES.map(r => [r.noradId, r]));
 
@@ -88,6 +154,7 @@ export class SatelliteService {
     private health: 'streaming' | 'error' = 'streaming';
     private lastHealthNote: string | null = null;
     private lastProvider = 'unknown';
+    private refreshTimer: NodeJS.Timeout | null = null;
     // Timestamp of the Spectator catalog that was used the last time we
     // enriched `this.satellites`. When SpectatorService.getLastFetchTime()
     // returns a newer value (because a lazy TTL refresh landed between
@@ -105,6 +172,7 @@ export class SatelliteService {
 
     async init() {
         await this.loadSatellites();
+        this.scheduleRefresh();
         // Record the Spectator catalog version that matches the enrichment
         // already baked into `this.satellites` by loadSatellites(). Any
         // subsequent refresh bumps Spectator's lastFetch past this value
@@ -112,6 +180,19 @@ export class SatelliteService {
         if (this.spectator) {
             this.lastEnrichedSpectatorFetch = this.spectator.getLastFetchTime();
         }
+    }
+
+    private scheduleRefresh() {
+        if (this.refreshTimer) clearTimeout(this.refreshTimer);
+        const jitter = Math.floor(Math.random() * SATELLITE_REFRESH_JITTER_MS);
+        this.refreshTimer = setTimeout(() => {
+            void this.loadSatellites()
+                .catch((error) => {
+                    console.warn('[Satellites] scheduled refresh failed:', error?.message || error);
+                })
+                .finally(() => this.scheduleRefresh());
+        }, SATELLITE_REFRESH_INTERVAL_MS + jitter);
+        this.refreshTimer.unref?.();
     }
 
     /**
@@ -178,9 +259,9 @@ export class SatelliteService {
 
     /**
      * TLE provider chain: Space-Track → CelesTrak → ivanstanojevic.me
-     * Returns { text, provider } so the caller can tag the cache.
+     * Returns { text, provider, fetchedAt } so the caller can tag the cache.
      */
-    private async fetchTLEChain(): Promise<{ text: string; provider: string }> {
+    private async fetchTLEChain(): Promise<{ text: string; provider: string; fetchedAt: string }> {
         // 1. Space-Track.org (primary — US Space Command)
         const stEmail = process.env.SPACETRACK_EMAIL;
         const stPass = process.env.SPACETRACK_PASSWORD;
@@ -202,7 +283,7 @@ export class SatelliteService {
                         // Space-Track 3le prefixes names with "0 " — strip it
                         const cleaned = res.data.replace(/^0 /gm, '');
                         console.log('[Satellites] TLE from Space-Track.org');
-                        return { text: cleaned, provider: 'space-track' };
+                        return { text: cleaned, provider: 'space-track', fetchedAt: new Date().toISOString() };
                     }
                 }
             } catch (err: any) {
@@ -216,7 +297,7 @@ export class SatelliteService {
                 const res = await axios.get(url, { timeout: 30_000 });
                 if (res.data && typeof res.data === 'string' && res.data.includes('1 ')) {
                     console.log(`[Satellites] TLE from ${new URL(url).hostname}`);
-                    return { text: res.data, provider: 'celestrak' };
+                    return { text: res.data, provider: 'celestrak', fetchedAt: new Date().toISOString() };
                 }
             } catch (err: any) {
                 console.warn(`[Satellites] ${new URL(url).hostname} failed: ${err.message}`);
@@ -242,7 +323,7 @@ export class SatelliteService {
             }
             if (allLines.length > 0) {
                 console.log(`[Satellites] TLE from ivanstanojevic.me (${allLines.length / 3} sats)`);
-                return { text: allLines.join('\n'), provider: 'ivanstanojevic' };
+                return { text: allLines.join('\n'), provider: 'ivanstanojevic', fetchedAt: new Date().toISOString() };
             }
         } catch (err: any) {
             console.warn('[Satellites] ivanstanojevic.me failed:', err.message);
@@ -274,6 +355,7 @@ export class SatelliteService {
             }
 
             const noradId = extractNoradId(tleLine1);
+            const tleEpochAt = parseTleEpochAt(tleLine1);
             const reconMeta = RECON_BY_NORAD.get(noradId);
             const isRecon = !!reconMeta;
 
@@ -281,6 +363,7 @@ export class SatelliteService {
                 name,
                 tleLine1,
                 tleLine2,
+                tleEpochAt,
                 type,
                 classificationSource: 'derived_name_heuristic',
                 noradId,
@@ -294,28 +377,38 @@ export class SatelliteService {
     }
 
     /** Write cache with provider tag */
-    private writeCache(satellites: SatelliteRecord[], provider: string) {
+    private writeCache(satellites: SatelliteRecord[], provider: string, fetchedAt: string) {
         fs.writeFileSync(
             CACHE_FILE,
-            JSON.stringify({ provider, cacheVersion: SATELLITE_CACHE_VERSION, satellites }, null, 2),
+            JSON.stringify({ provider, fetchedAt, cacheVersion: SATELLITE_CACHE_VERSION, satellites }, null, 2),
         );
     }
 
     /** Read cache — returns { provider, satellites, fresh } or null */
-    private readCache(): { provider: string; satellites: SatelliteRecord[]; fresh: boolean; cacheVersion: number } | null {
+    private readCache(): { provider: string; satellites: SatelliteRecord[]; fresh: boolean; cacheVersion: number; fetchedAt: string } | null {
         try {
             if (!fs.existsSync(CACHE_FILE)) return null;
             const stat = fs.statSync(CACHE_FILE);
-            const fresh = Date.now() - stat.mtimeMs < CACHE_TTL;
             const raw = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8'));
+            const fileFetchedAt = new Date(stat.mtimeMs).toISOString();
             // Support old format (plain array) and new format ({ provider, satellites })
-            if (Array.isArray(raw)) return { provider: 'unknown', satellites: raw, fresh, cacheVersion: 0 };
+            if (Array.isArray(raw)) {
+                const provider = 'unknown';
+                const fresh = Date.now() - stat.mtimeMs < cacheTtlForProvider(provider);
+                return { provider, satellites: raw, fresh, cacheVersion: 0, fetchedAt: fileFetchedAt };
+            }
             if (raw.satellites && Array.isArray(raw.satellites)) {
+                const provider = raw.provider || 'unknown';
+                const fetchedAt = raw.fetchedAt || fileFetchedAt;
+                const fetchedMs = new Date(fetchedAt).getTime();
+                const ageMs = Number.isFinite(fetchedMs) ? Date.now() - fetchedMs : Date.now() - stat.mtimeMs;
+                const fresh = ageMs < cacheTtlForProvider(provider);
                 return {
-                    provider: raw.provider || 'unknown',
+                    provider,
                     satellites: raw.satellites,
                     fresh,
                     cacheVersion: Number(raw.cacheVersion) || 0,
+                    fetchedAt,
                 };
             }
             return null;
@@ -335,6 +428,7 @@ export class SatelliteService {
                 this.lastHealthNote = `cache:${cache.provider}`;
                 for (const rec of this.satellites) {
                     if (typeof rec.noradId !== 'number' || rec.noradId < 0) rec.noradId = extractNoradId(rec.tleLine1);
+                    if (!rec.tleEpochAt) rec.tleEpochAt = parseTleEpochAt(rec.tleLine1);
                     delete rec.sensor;
                     this.enrichWithSpectator(rec);
                 }
@@ -342,13 +436,14 @@ export class SatelliteService {
                 await this.persistence?.persistSatelliteCatalog(this.satellites, {
                     provider: cache.provider,
                     loadedFromCache: true,
+                    fetchedAt: cache.fetchedAt,
                 });
                 return;
             }
 
             // Cache is from a fallback or expired — try to fetch from a better source
             console.log('[Satellites] Fetching TLE data (Space-Track → CelesTrak → ivanstanojevic)...');
-            const { text: tleText, provider } = await this.fetchTLEChain();
+            const { text: tleText, provider, fetchedAt } = await this.fetchTLEChain();
             const parsed = this.parseTLE(tleText);
 
             // If we got data from a higher-priority source than cache, use it
@@ -361,6 +456,7 @@ export class SatelliteService {
                 this.satellites = cache.satellites;
                 for (const rec of this.satellites) {
                     if (typeof rec.noradId !== 'number' || rec.noradId < 0) rec.noradId = extractNoradId(rec.tleLine1);
+                    if (!rec.tleEpochAt) rec.tleEpochAt = parseTleEpochAt(rec.tleLine1);
                     delete rec.sensor;
                     this.enrichWithSpectator(rec);
                 }
@@ -368,6 +464,7 @@ export class SatelliteService {
                 await this.persistence?.persistSatelliteCatalog(this.satellites, {
                     provider: cache.provider,
                     loadedFromCache: true,
+                    fetchedAt: cache.fetchedAt,
                 });
                 return;
             }
@@ -377,11 +474,12 @@ export class SatelliteService {
             this.lastProvider = provider;
             this.health = 'streaming';
             this.lastHealthNote = `provider:${provider}`;
-            this.writeCache(parsed, provider);
+            this.writeCache(parsed, provider, fetchedAt);
             console.log(`[Satellites] ${this.satellites.length} from ${provider} (cached)`);
             await this.persistence?.persistSatelliteCatalog(this.satellites, {
                 provider,
                 loadedFromCache: false,
+                fetchedAt,
             });
         } catch (error) {
             console.error('Failed to load TLEs:', error);
@@ -392,10 +490,12 @@ export class SatelliteService {
     }
 
     getHealth() {
+        const confidence = satelliteCatalogConfidence(this.satellites);
         return {
             status: this.health,
-            note: `${this.lastHealthNote || `provider:${this.lastProvider}`}; type=derived_name_heuristic`,
+            note: `${this.lastHealthNote || `provider:${this.lastProvider}`}; type=derived_name_heuristic; tleConfidence=${confidence.motionConfidence}`,
             count: this.satellites.length,
+            ...confidence,
         };
     }
 
@@ -411,3 +511,8 @@ export class SatelliteService {
         return this.satellites.filter(s => s.recon === true);
     }
 }
+
+export const satelliteServiceTestHooks = {
+    parseTleEpochAt,
+    satelliteCatalogConfidence,
+};

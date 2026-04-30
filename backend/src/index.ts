@@ -58,6 +58,7 @@ import { LiveProjectionService } from './services/live-projection.service';
 import { ReplayQueryService } from './services/replay-query.service';
 import { ReplayTileBuilderService } from './services/replay-tile-builder.service';
 import { ReplayRenderBatchService } from './services/replay-render-batch.service';
+import { SOURCE_BINDINGS } from './services/source-bindings.service';
 
 // CORS origin whitelist — comma-separated list in ALLOWED_ORIGINS env var.
 // Defaults to localhost dev ports if unset.
@@ -72,6 +73,7 @@ const corsOptions: cors.CorsOptions = {
         if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
         callback(new Error(`CORS: origin ${origin} not allowed`));
     },
+    credentials: true,
     methods: ['GET', 'POST', 'DELETE'],
 };
 
@@ -189,6 +191,42 @@ async function collectStorageStatus(): Promise<StorageStatusPayload> {
         value,
     };
     return value;
+}
+
+async function collectSourceIngestStatus() {
+    const latest = await sourcePersistenceService.listLatestSourceIngestMetrics();
+    const latestByKey = new Map(latest.map((row) => [`${row.sourceId || ''}|${row.layerId || ''}`, row]));
+    const configured = Object.values(SOURCE_BINDINGS)
+        .slice()
+        .sort((left, right) => left.sourceId.localeCompare(right.sourceId));
+    return configured.map((binding) => {
+        const row = latestByKey.get(`${binding.sourceId}|${binding.layerId}`) || null;
+        return {
+            sourceId: binding.sourceId,
+            layerId: binding.layerId,
+            canonicalTarget: binding.canonicalTarget,
+            rawCaptureMode: binding.rawCaptureMode,
+            storagePolicyId: binding.storagePolicyId,
+            coverageScope: binding.coverageScope || null,
+            status: row?.status || 'unavailable',
+            completeness: row?.completeness || 'unavailable',
+            latestIngest: row ? {
+                ingestRunId: row.ingestRunId,
+                startedAt: row.startedAt,
+                completedAt: row.completedAt,
+                upstreamBytes: row.upstreamBytes,
+                rawCount: row.rawCount,
+                normalizedCount: row.normalizedCount,
+                changedCount: row.changedCount,
+                parseMs: row.parseMs,
+                dbWriteMs: row.dbWriteMs,
+                rawPersistMs: row.rawPersistMs,
+                totalMs: row.totalMs,
+                renderBatchBytes: row.renderBatchBytes,
+                errorMessage: row.errorMessage,
+            } : null,
+        };
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +371,14 @@ app.get('/api/catalog/layers/:layerId', async (req, res) => {
             return;
         }
         res.json(layer);
+    } catch (err: any) {
+        sendError(res, err);
+    }
+});
+
+app.get('/api/catalog/render-contracts', async (_req, res) => {
+    try {
+        res.json(await catalogReadService.listRenderContracts());
     } catch (err: any) {
         sendError(res, err);
     }
@@ -952,6 +998,34 @@ app.get('/api/live/snapshot', async (_req, res) => {
     }
 });
 
+app.get('/api/live/details/:layer/:id', async (req, res) => {
+    const layer = String(req.params.layer || '');
+    const id = String(req.params.id || '');
+    if (layer !== 'webcam' && layer !== 'pipeline' && !liveProjectionService.isReady()) {
+        res.status(503).json({ error: 'Query database is not ready' });
+        return;
+    }
+    try {
+        let details = layer === 'webcam'
+            ? webcamsService.getWebcamDetails(id)
+            : liveProjectionService.isReady()
+                ? await liveProjectionService.getLiveDetails(layer, id)
+                : null;
+        if (!details && layer === 'pipeline') {
+            details = await overtureService.getPipelineDetails(id);
+        }
+        if (!details) {
+            res.status(404).json({ error: 'Live feature not found' });
+            return;
+        }
+        res.setHeader('Cache-Control', 'no-store');
+        res.json(details);
+    } catch (err: any) {
+        console.error('[api/live/details] failed:', err?.message || err);
+        sendError(res, err);
+    }
+});
+
 app.post('/api/replay/render-chunks/prewarm', async (req, res) => {
     if (!replayQueryService.isReady()) {
         res.status(503).json({ error: 'Replay database is not ready' });
@@ -1213,6 +1287,11 @@ app.get('/api/replay/render-point-deltas', async (req, res) => {
         res.status(400).json({ error: 'Missing or invalid at timestamp' });
         return;
     }
+    const since = parseIsoDateOrNull(req.query.since as string | undefined);
+    if (req.query.since && !since) {
+        res.status(400).json({ error: 'Invalid since timestamp' });
+        return;
+    }
     const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
     if (req.query.bbox && !bbox) {
         res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
@@ -1240,6 +1319,7 @@ app.get('/api/replay/render-point-deltas', async (req, res) => {
                 'replay.at': at,
             }, async () => replayRenderBatchService.buildPointDeltaBinary({
                 at,
+                since: since || undefined,
                 layers,
                 bbox: bbox || undefined,
                 aggregateFires,
@@ -1269,6 +1349,7 @@ app.get('/api/replay/render-point-deltas', async (req, res) => {
             'replay.at': at,
         }, async () => replayRenderBatchService.buildPointDeltas({
             at,
+            since: since || undefined,
             layers,
             bbox: bbox || undefined,
             aggregateFires,
@@ -2241,6 +2322,13 @@ app.get('/api/outages', async (_req, res) => {
 // so 4 sq.deg (2°×2°) is loose enough for direct API callers without
 // exceeding the axios maxContentLength guard in the Overpass client.
 const MAX_BBOX_AREA_SQDEG = 4;
+const OVERPASS_PRIMARY_TIMEOUT_MS = 5000;
+const OVERPASS_SECONDARY_TIMEOUT_MS = 250;
+const POWER_INFRA_OVERPASS_TIMEOUT_MS = 5000;
+
+function overpassViewportBudgetMs(primaryRecords: readonly unknown[]): number {
+    return primaryRecords.length > 0 ? OVERPASS_SECONDARY_TIMEOUT_MS : OVERPASS_PRIMARY_TIMEOUT_MS;
+}
 
 function bboxArea(a: number, b: number, c: number, d: number): number {
     // parseBbox accepts either south,west,north,east or west,south,east,north.
@@ -2250,14 +2338,11 @@ function bboxArea(a: number, b: number, c: number, d: number): number {
 
 // Critical infrastructure — hybrid Overpass + Overture merge.
 //
-// Overpass is the canonical source (always runs). When OVERTURE_ENABLED
-// is set, Overture Maps runs in parallel via OvertureService and its
-// results are merged into the response. Overpass records that collide
-// spatially with an Overture record (same type, within ~555 m) are
-// dropped so the two sources don't render as duplicate billboards.
-// Overture stays off by default; `dedupAgainstOverture` is a safe
-// no-op on an empty Overture list so the fallback path matches the
-// previous behaviour exactly.
+// Overture is the fast local viewport source when enabled. Overpass is a
+// secondary enrichment source: if Overture already returned records, do not
+// hold the whole response for seconds waiting on public Overpass mirrors. The
+// response still carries `overpassTimedOut` so incomplete enrichment is visible
+// to diagnostics instead of being silently masked.
 app.get('/api/infrastructure', async (req, res) => {
     const parsed = parseBbox(req.query.bbox as string | undefined, 'swne');
     if (!parsed) {
@@ -2277,7 +2362,7 @@ app.get('/api/infrastructure', async (req, res) => {
         const overtureRecords = await overtureService.getInfrastructureInBbox(south, west, north, east);
         const tOv = Date.now() - tOv0;
 
-        const OVERPASS_FAST_TIMEOUT = 5000;
+        const overpassBudgetMs = overpassViewportBudgetMs(overtureRecords);
         let overpassRecords: any[] = [];
         let overpassTimedOut = false;
         const tOp0 = Date.now();
@@ -2285,7 +2370,7 @@ app.get('/api/infrastructure', async (req, res) => {
             overpassRecords = await Promise.race([
                 infrastructureService.getInfrastructure(south, west, north, east),
                 new Promise<any[]>((_, reject) =>
-                    setTimeout(() => reject(new Error('Overpass too slow')), OVERPASS_FAST_TIMEOUT)
+                    setTimeout(() => reject(new Error('Overpass too slow')), overpassBudgetMs)
                 ),
             ]);
         } catch {
@@ -2306,8 +2391,8 @@ app.get('/api/infrastructure', async (req, res) => {
         ];
         recordInfraFetch('infrastructure', 'overture', tOv, overtureRecords.length, false);
         recordInfraFetch('infrastructure', 'overpass', tOp, overpassRecords.length, overpassTimedOut);
-        logPerfEvent('infra.fetch', { source: 'backend', endpoint: 'infrastructure', overtureMs: tOv, overtureRecords: overtureRecords.length, overpassMs: tOp, overpassRecords: overpassRecords.length, overpassTimedOut, mergedRecords: merged.length, bboxAreaSq: Number(area.toFixed(2)) });
-        console.log(`[Infra] /api/infrastructure overture=${tOv}ms(${overtureRecords.length}) overpass=${tOp}ms(${overpassRecords.length}${overpassTimedOut ? ',timeout' : ''}) merged=${merged.length} bbox=${area.toFixed(1)}sq`);
+        logPerfEvent('infra.fetch', { source: 'backend', endpoint: 'infrastructure', overtureMs: tOv, overtureRecords: overtureRecords.length, overpassMs: tOp, overpassBudgetMs, overpassRecords: overpassRecords.length, overpassTimedOut, mergedRecords: merged.length, bboxAreaSq: Number(area.toFixed(2)) });
+        console.log(`[Infra] /api/infrastructure overture=${tOv}ms(${overtureRecords.length}) overpass=${tOp}ms/${overpassBudgetMs}ms(${overpassRecords.length}${overpassTimedOut ? ',timeout' : ''}) merged=${merged.length} bbox=${area.toFixed(1)}sq`);
         res.json({ data: merged, overpassTimedOut });
     } catch (err: any) {
         console.error('[Infrastructure] endpoint error:', err.message);
@@ -2340,27 +2425,42 @@ app.get('/api/power-infra', async (req, res) => {
         const overtureRecords = await overtureService.getPowerInfraInBbox(south, west, north, east);
         const tOv = Date.now() - tOv0;
 
-        const OVERPASS_FAST_TIMEOUT = 5000;
+        const overtureHasLineGeometry = overtureRecords.some((record) =>
+            record.type === 'power_line' &&
+            Array.isArray(record.coordinates) &&
+            record.coordinates.length >= 2
+        );
+        // If the local Overture cache already has transmission-line geometry,
+        // Overture is the source for this endpoint. Do not call public
+        // Overpass mirrors just to enrich a complete Overture power tile.
+        const overpassBudgetMs = overtureHasLineGeometry
+            ? 0
+            : POWER_INFRA_OVERPASS_TIMEOUT_MS;
         let overpassRecords: any[] = [];
         let overpassTimedOut = false;
         const tOp0 = Date.now();
-        try {
-            overpassRecords = await Promise.race([
-                infrastructureService.getPowerInfra(bbox),
-                new Promise<any[]>((_, reject) =>
-                    setTimeout(() => reject(new Error('Overpass too slow')), OVERPASS_FAST_TIMEOUT)
-                ),
-            ]);
-        } catch {
-            overpassTimedOut = true;
+        if (!overtureHasLineGeometry) {
+            try {
+                overpassRecords = await Promise.race([
+                    infrastructureService.getPowerInfra(bbox),
+                    new Promise<any[]>((_, reject) =>
+                        setTimeout(() => reject(new Error('Overpass too slow')), overpassBudgetMs)
+                    ),
+                ]);
+            } catch {
+                overpassTimedOut = true;
+            }
         }
         const tOp = Date.now() - tOp0;
         recordInfraFetch('power-infra', 'overture', tOv, overtureRecords.length, false);
         recordInfraFetch('power-infra', 'overpass', tOp, overpassRecords.length, overpassTimedOut);
-        logPerfEvent('infra.fetch', { source: 'backend', endpoint: 'power-infra', overtureMs: tOv, overtureRecords: overtureRecords.length, overpassMs: tOp, overpassRecords: overpassRecords.length, overpassTimedOut });
-        console.log(`[Infra] /api/power-infra overture=${tOv}ms(${overtureRecords.length}) overpass=${tOp}ms(${overpassRecords.length}${overpassTimedOut ? ',timeout' : ''})`);
+        logPerfEvent('infra.fetch', { source: 'backend', endpoint: 'power-infra', overtureMs: tOv, overtureRecords: overtureRecords.length, overpassMs: tOp, overpassBudgetMs, overpassRecords: overpassRecords.length, overpassTimedOut });
+        console.log(`[Infra] /api/power-infra overture=${tOv}ms(${overtureRecords.length}) overpass=${tOp}ms/${overpassBudgetMs}ms(${overpassRecords.length}${overpassTimedOut ? ',timeout' : ''})`);
 
-        const deduped = dedupAgainstOverture(overpassRecords, overtureRecords);
+        const overpassForMerge = overtureHasLineGeometry
+            ? overpassRecords.filter((record) => record?.type !== 'power_line')
+            : overpassRecords;
+        const deduped = dedupAgainstOverture(overpassForMerge, overtureRecords);
         const merged = [
             ...overtureRecords.map((r) => ({
                 id: r.id,
@@ -2369,7 +2469,8 @@ app.get('/api/power-infra', async (req, res) => {
                 name: r.name,
                 type: r.type,
                 source: 'overture',
-                voltage: '',
+                voltage: r.voltage || '',
+                operator: r.operator || null,
                 coordinates: r.coordinates,
             })),
             ...deduped,
@@ -2377,25 +2478,59 @@ app.get('/api/power-infra', async (req, res) => {
         res.json({ data: merged, overpassTimedOut });
     } catch (err: any) {
         console.error('[PowerInfra] endpoint error:', err.message);
-        res.status(502).json({ error: 'Failed to fetch power infrastructure data (upstream Overpass unavailable)' });
+        res.status(502).json({ error: 'Failed to fetch power infrastructure data' });
     }
 });
 
-// Oil & gas pipelines from OSM Overpass
-app.get('/api/pipelines', async (_req, res) => {
-    if (!liveProjectionService.isReady()) {
-        res.status(503).json({ error: 'Query database is not ready' });
+// Oil & gas pipeline centroids from the local Overture DuckDB cache.
+// Full Overture geometry/details are intentionally not part of the initial
+// viewport payload; those belong behind a feature-details endpoint.
+app.get('/api/pipelines', async (req, res) => {
+    const parsed = parseBbox(req.query.bbox as string | undefined, 'swne');
+    if (!parsed) {
+        res.status(400).json({ error: 'Missing or invalid bbox (expected south,west,north,east; lat ±90, lng ±180; south<north; west<east)' });
+        return;
+    }
+    const [south, west, north, east] = parsed;
+    const area = bboxArea(south, west, north, east);
+    if (area > MAX_BBOX_AREA_SQDEG) {
+        res.status(400).json({
+            error: `bbox too large: ${area.toFixed(1)} sq.deg (max ${MAX_BBOX_AREA_SQDEG}). Request smaller viewport tiles.`,
+        });
+        return;
+    }
+    if (!overtureService.isEnabled() || !overtureService.isReady()) {
+        res.status(503).json({ error: 'Overture cache is not ready for pipeline queries' });
         return;
     }
     try {
-        let rows = await liveProjectionService.getPipelines();
-        if (rows.length === 0) {
-            await infrastructureService.getPipelines();
-            rows = await liveProjectionService.getPipelines();
-        }
-        res.json(rows);
+        const t0 = Date.now();
+        const rows = await overtureService.getPipelinesInBbox(south, west, north, east);
+        const elapsedMs = Date.now() - t0;
+        logPerfEvent('infra.fetch', {
+            source: 'backend',
+            endpoint: 'pipelines',
+            provider: 'overture',
+            elapsedMs,
+            records: rows.length,
+            bboxAreaSq: Number(area.toFixed(2)),
+        });
+        res.json({
+            data: rows.map((row) => ({
+                id: row.id,
+                lat: row.lat,
+                lng: row.lng,
+                substance: row.substance,
+            })),
+            source: 'overture',
+            elapsedMs,
+        });
     } catch (err: any) {
         console.error('[Pipelines] endpoint error:', err.message);
+        if (String(err?.message || '').includes('pipeline cache schema')) {
+            res.status(503).json({ error: err.message });
+            return;
+        }
         sendError(res, err);
     }
 });
@@ -2711,17 +2846,34 @@ const adsbHealth = liveStreamService.getHealth();
         conflicts: acledService.getHealth(),
         gdelt: gdeltService.getHealth(),
         gfw: gfwService.getHealth(),
-        outages: { status: outagesStatus, note: outagesNote, count: outagesCount },
+        outages: {
+            status: outagesStatus,
+            note: outagesNote,
+            count: outagesCount,
+            cloudflare: cfH,
+            ioda: iodaH,
+            truncated: Boolean((cfH as any).truncated),
+            completeness: (cfH as any).truncated ? 'incomplete' : outagesStatus === 'auth-missing' ? 'unavailable' : 'complete',
+        },
         // Services without real health getters still fall back to env check
         traffic: { status: envCheck('TOMTOM_API_KEY') ? 'streaming' : 'auth-missing' },
         webcams: { status: webcamsStatus, note: webcamsNote },
         infrastructure: { status: infraStatus, note: infraNote },
         overture: os ?? { state: 'disabled' },
+        sources: await collectSourceIngestStatus(),
         storage: await collectStorageStatus(),
     };
 
     void runtimeStateRepository.persistSnapshot(statusPayload);
     res.json(statusPayload);
+});
+
+app.get('/api/status/sources', async (_req, res) => {
+    res.json({
+        version: 1,
+        updatedAt: new Date().toISOString(),
+        sources: await collectSourceIngestStatus(),
+    });
 });
 
 // Detailed Overture cache status for the frontend settings panel.

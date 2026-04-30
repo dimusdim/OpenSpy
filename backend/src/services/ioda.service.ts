@@ -15,7 +15,7 @@ export interface OutageRecord {
 // ~200 country centroids (ISO-3166-1 alpha-2 → [lat, lng]).
 // Generated from NaturalEarth centroids; covers all UN-recognised states + a
 // handful of territories that show up in IODA alerts.
-const COUNTRY_CENTROIDS: Record<string, [number, number]> = {
+export const COUNTRY_CENTROIDS: Record<string, [number, number]> = {
     AF: [33.9, 67.7], AL: [41.2, 20.2], DZ: [28.0, 1.7], AD: [42.5, 1.5],
     AO: [-11.2, 17.9], AG: [17.1, -61.8], AR: [-38.4, -63.6], AM: [40.1, 44.5],
     AU: [-25.3, 133.8], AT: [47.5, 14.6], AZ: [40.1, 47.6], BS: [25.0, -77.4],

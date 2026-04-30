@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { encode } from '@msgpack/msgpack';
 import { DatabaseService } from '../db/database.service';
 import { ReplayQueryService, type ReplayStateFilters, type ReplayWindowFilters } from './replay-query.service';
+import { getLayerRenderContract, normalizeLayerId as normalizeContractLayerId } from './render-contracts';
 
 type ReplayStateEntity = Awaited<ReturnType<ReplayQueryService['listEntityStateAt']>>[number];
 type ReplayStateEvent = Awaited<ReturnType<ReplayQueryService['listEventStateAt']>>[number];
@@ -85,8 +86,6 @@ type EnsureTileParams = {
 };
 
 const TILE_ROOT = path.resolve(__dirname, '../../var/replay-tiles');
-const DAY_SECONDS = 24 * 60 * 60;
-
 function tile2lon(x: number, z: number): number {
     return (x / 2 ** z) * 360 - 180;
 }
@@ -97,7 +96,7 @@ function tile2lat(y: number, z: number): number {
 }
 
 function normalizeLayerId(layerId: string): string {
-    return layerId === 'satellites' ? 'satellite' : layerId;
+    return normalizeContractLayerId(layerId);
 }
 
 function parseBboxKey(bbox?: [number, number, number, number]): string | null {
@@ -116,24 +115,7 @@ export class ReplayTileBuilderService {
     ) {}
 
     private getBucketSeconds(layerId: string): number {
-        switch (normalizeLayerId(layerId)) {
-            case 'aircraft':
-            case 'vessel':
-                return 10 * 60;
-            case 'conflict':
-            case 'disasters':
-            case 'outage':
-            case 'jamming':
-            case 'fire':
-            case 'gfw':
-                return 60 * 60;
-            case 'airspace':
-            case 'pipeline':
-            case 'cable':
-                return DAY_SECONDS;
-            default:
-                return 60 * 60;
-        }
+        return getLayerRenderContract(normalizeLayerId(layerId)).bucketSeconds;
     }
 
     private floorIsoToBucket(atIso: string, bucketSeconds: number): string {
@@ -150,24 +132,11 @@ export class ReplayTileBuilderService {
     // every manifest call. aircraft/vessel get tight 15s TTL because
     // their data turnover is seconds. Event layers sit at 60s.
     private getHotBucketTtlSeconds(layerId: string): number | null {
-        switch (normalizeLayerId(layerId)) {
-            case 'aircraft':
-            case 'vessel':
-                return 15;
-            case 'conflict':
-            case 'disasters':
-            case 'outage':
-            case 'jamming':
-            case 'fire':
-            case 'gfw':
-                return 60;
-            case 'airspace':
-            case 'pipeline':
-            case 'cable':
-                return null; // never hot — cache indefinitely
-            default:
-                return 60;
+        const contract = getLayerRenderContract(normalizeLayerId(layerId));
+        if (!Object.prototype.hasOwnProperty.call(contract, 'hotBucketTtlSeconds')) {
+            throw new Error(`Layer render contract missing hotBucketTtlSeconds: ${layerId}`);
         }
+        return contract.hotBucketTtlSeconds ?? null;
     }
 
     // True when bucket window is still open AND last rebuild (builtAtIso)

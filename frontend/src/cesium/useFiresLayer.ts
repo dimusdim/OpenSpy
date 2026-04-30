@@ -21,12 +21,7 @@ export interface FireMeta {
     lat: number;
     lng: number;
     frp: number;
-    brightness: number;
-    confidence: string;
     subtype: 'high' | 'medium' | 'low';
-    daynight: string;
-    acqTime: string;
-    fireType: number;
     aggregated?: boolean;
     count?: number;
 }
@@ -322,12 +317,7 @@ export function useFiresLayer(viewer: Cesium.Viewer | null) {
                         lat: fire.lat,
                         lng: fire.lng,
                         frp,
-                        brightness: fire.brightness || 0,
-                        confidence: fire.confidence || '',
                         subtype: (fire.subtype || frpSubtype(frp)) as 'high' | 'medium' | 'low',
-                        daynight: fire.daynight || '',
-                        acqTime: fire.acqTime || '',
-                        fireType: fire.fireType ?? 0,
                         aggregated: Boolean(fire.aggregated),
                         count: Number.isFinite(Number(fire.count)) ? Number(fire.count) : undefined,
                     } satisfies FireRecord;

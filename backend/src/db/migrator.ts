@@ -2,7 +2,18 @@ import fs from 'fs';
 import path from 'path';
 import type { Pool } from 'pg';
 
-const MIGRATIONS_DIR = path.resolve(__dirname, 'migrations');
+function resolveMigrationsDir(): string {
+    const candidates = [
+        path.resolve(__dirname, 'migrations'),
+        path.resolve(process.cwd(), 'dist/db/migrations'),
+        path.resolve(process.cwd(), 'src/db/migrations'),
+    ];
+    const found = candidates.find((dir) => fs.existsSync(dir) && fs.statSync(dir).isDirectory());
+    if (!found) {
+        throw new Error(`Migrations directory not found. Checked: ${candidates.join(', ')}`);
+    }
+    return found;
+}
 
 async function ensureMigrationsTable(pool: Pool) {
     await pool.query(`
@@ -23,7 +34,8 @@ export async function runMigrations(pool: Pool): Promise<string[]> {
     await ensureMigrationsTable(pool);
 
     const applied = await getAppliedMigrations(pool);
-    const files = fs.readdirSync(MIGRATIONS_DIR)
+    const migrationsDir = resolveMigrationsDir();
+    const files = fs.readdirSync(migrationsDir)
         .filter(name => name.endsWith('.sql'))
         .sort((a, b) => a.localeCompare(b));
 
@@ -31,7 +43,7 @@ export async function runMigrations(pool: Pool): Promise<string[]> {
     for (const file of files) {
         if (applied.has(file)) continue;
 
-        const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf-8');
+        const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf-8');
         const client = await pool.connect();
         try {
             await client.query('BEGIN');
@@ -52,4 +64,3 @@ export async function runMigrations(pool: Pool): Promise<string[]> {
 
     return ran;
 }
-

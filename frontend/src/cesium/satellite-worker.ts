@@ -57,6 +57,10 @@ let satOrder: number[] = []; // noradId in order, for position buffer mapping
 let positionsView: Float32Array | null = null;
 let motionView: Float32Array | null = null;
 let motionTracks: MotionTrack[] = [];
+let motionTrackRows: Uint32Array | null = null;
+let motionSampleAtMs: Float64Array | null = null;
+let motionSamplePositions: Float32Array | null = null;
+let motionGeneration = 0;
 
 const DEG = 180 / Math.PI;
 
@@ -104,6 +108,55 @@ function writeMotionPosition(index: number, value: [number, number, number] | nu
     motionView[offset] = value[0];
     motionView[offset + 1] = value[1];
     motionView[offset + 2] = value[2];
+}
+
+function writeInterpolatedMotionPosition(
+    outputIndex: number,
+    times: Float64Array,
+    positions: Float32Array,
+    sampleStart: number,
+    sampleCount: number,
+    atMs: number,
+    scratch: [number, number, number],
+) {
+    if (sampleCount <= 0) {
+        writeMotionPosition(outputIndex, null);
+        return;
+    }
+    if (sampleCount === 1 || atMs <= times[sampleStart]) {
+        const o = sampleStart * 3;
+        scratch[0] = positions[o];
+        scratch[1] = positions[o + 1];
+        scratch[2] = positions[o + 2];
+        writeMotionPosition(outputIndex, scratch);
+        return;
+    }
+    const last = sampleStart + sampleCount - 1;
+    if (atMs >= times[last]) {
+        const o = last * 3;
+        scratch[0] = positions[o];
+        scratch[1] = positions[o + 1];
+        scratch[2] = positions[o + 2];
+        writeMotionPosition(outputIndex, scratch);
+        return;
+    }
+    let lo = sampleStart;
+    let hi = last;
+    while (lo + 1 < hi) {
+        const mid = (lo + hi) >>> 1;
+        if (times[mid] <= atMs) lo = mid;
+        else hi = mid;
+    }
+    const tPrev = times[lo];
+    const tNext = times[lo + 1];
+    const denom = tNext - tPrev;
+    const t = denom > 0 ? (atMs - tPrev) / denom : 0;
+    const oPrev = lo * 3;
+    const oNext = (lo + 1) * 3;
+    scratch[0] = positions[oPrev] + (positions[oNext] - positions[oPrev]) * t;
+    scratch[1] = positions[oPrev + 1] + (positions[oNext + 1] - positions[oPrev + 1]) * t;
+    scratch[2] = positions[oPrev + 2] + (positions[oNext + 2] - positions[oPrev + 2]) * t;
+    writeMotionPosition(outputIndex, scratch);
 }
 
 self.onmessage = (e: MessageEvent) => {
@@ -175,60 +228,49 @@ self.onmessage = (e: MessageEvent) => {
     if (type === 'update-tracks') {
         const sab: SharedArrayBuffer | null | undefined = e.data.sab;
         motionView = sab ? new Float32Array(sab) : null;
-        motionTracks = Array.isArray(e.data.tracks) ? e.data.tracks : [];
+        motionTrackRows = e.data.trackRows instanceof Uint32Array ? e.data.trackRows : null;
+        motionSampleAtMs = e.data.sampleAtMs instanceof Float64Array ? e.data.sampleAtMs : null;
+        motionSamplePositions = e.data.samplePositions instanceof Float32Array ? e.data.samplePositions : null;
+        motionTracks = motionTrackRows ? [] : (Array.isArray(e.data.tracks) ? e.data.tracks : []);
+        motionGeneration = Number(e.data.generation) || 0;
         return;
     }
 
     if (type === 'motion-tick') {
+        const generation = Number(e.data.generation) || 0;
         const atMs = Number(e.data.atMs);
+        if (generation !== motionGeneration) {
+            (self as any).postMessage({ type: 'motion-positions-stale', epochMs: atMs, count: 0, generation });
+            return;
+        }
         if (!Number.isFinite(atMs)) {
-            (self as any).postMessage({ type: 'motion-positions', epochMs: Date.now(), count: 0 });
+            (self as any).postMessage({ type: 'motion-positions', epochMs: Date.now(), count: 0, generation });
             return;
         }
         const scratch: [number, number, number] = [0, 0, 0];
+        if (motionTrackRows && motionSampleAtMs && motionSamplePositions) {
+            const rowCount = motionTrackRows.length / 3;
+            for (let i = 0; i < rowCount; i += 1) {
+                const offset = i * 3;
+                writeInterpolatedMotionPosition(
+                    motionTrackRows[offset],
+                    motionSampleAtMs,
+                    motionSamplePositions,
+                    motionTrackRows[offset + 1],
+                    motionTrackRows[offset + 2],
+                    atMs,
+                    scratch,
+                );
+            }
+            (self as any).postMessage({ type: 'motion-positions', epochMs: atMs, count: rowCount, generation });
+            return;
+        }
         for (let i = 0; i < motionTracks.length; i += 1) {
             const track = motionTracks[i];
             const times = track.sampleAtMs;
             const pos = track.samplePositions;
-            const n = times.length;
-            if (n === 0) {
-                writeMotionPosition(track.index, null);
-                continue;
-            }
-            if (n === 1 || atMs <= times[0]) {
-                scratch[0] = pos[0];
-                scratch[1] = pos[1];
-                scratch[2] = pos[2];
-                writeMotionPosition(track.index, scratch);
-                continue;
-            }
-            if (atMs >= times[n - 1]) {
-                const o = (n - 1) * 3;
-                scratch[0] = pos[o];
-                scratch[1] = pos[o + 1];
-                scratch[2] = pos[o + 2];
-                writeMotionPosition(track.index, scratch);
-                continue;
-            }
-            // Binary search for the greatest index `lo` where times[lo] <= atMs.
-            let lo = 0;
-            let hi = n - 1;
-            while (lo + 1 < hi) {
-                const mid = (lo + hi) >>> 1;
-                if (times[mid] <= atMs) lo = mid;
-                else hi = mid;
-            }
-            const tPrev = times[lo];
-            const tNext = times[lo + 1];
-            const denom = tNext - tPrev;
-            const t = denom > 0 ? (atMs - tPrev) / denom : 0;
-            const oPrev = lo * 3;
-            const oNext = (lo + 1) * 3;
-            scratch[0] = pos[oPrev] + (pos[oNext] - pos[oPrev]) * t;
-            scratch[1] = pos[oPrev + 1] + (pos[oNext + 1] - pos[oPrev + 1]) * t;
-            scratch[2] = pos[oPrev + 2] + (pos[oNext + 2] - pos[oPrev + 2]) * t;
-            writeMotionPosition(track.index, scratch);
+            writeInterpolatedMotionPosition(track.index, times, pos, 0, times.length, atMs, scratch);
         }
-        (self as any).postMessage({ type: 'motion-positions', epochMs: atMs, count: motionTracks.length });
+        (self as any).postMessage({ type: 'motion-positions', epochMs: atMs, count: motionTracks.length, generation });
     }
 };

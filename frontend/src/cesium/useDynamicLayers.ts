@@ -32,8 +32,8 @@ const getShipSVG = getShipIcon;
 interface AircraftMeta {
     id: string;         // equals icao24 (primary key)
     icao24: string;
-    callsign: string;   // display name, can be empty or repeated across airframes
-    origin: string;
+    callsign?: string;  // loaded on demand for HUD/details
+    origin?: string;
     type: string;
     speed: number;
     heading: number;
@@ -41,10 +41,10 @@ interface AircraftMeta {
     lng: number;
     alt: number;
     // New fields from OpenSky state vector
-    squawk: string | null;
-    verticalRate: number | null;  // m/s
-    onGround: boolean;
-    lastContact: number | null;   // unix timestamp
+    squawk?: string | null;
+    verticalRate?: number | null; // m/s
+    onGround?: boolean;
+    lastContact?: number | null;  // unix timestamp
 }
 
 // Global registry so Globe.tsx picking can look up aircraft metadata by billboard.
@@ -53,7 +53,7 @@ export const aircraftMetaMap = new Map<string, AircraftMeta>();
 
 interface VesselMeta {
     id: string;
-    name: string;
+    name?: string | null;
     type: string;
     lat: number;
     lng: number;
@@ -416,18 +416,12 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                     aircraftMetaMap.set(ac.id, {
                         id: ac.id,
                         icao24: ac.icao24 || '',
-                        callsign: ac.callsign || ac.icao24 || '',
-                        origin: ac.origin || '',
                         type: ac.type,
                         speed: ac.speed,
                         heading: ac.heading,
                         lat: ac.lat,
                         lng: ac.lng,
                         alt: ac.alt,
-                        squawk: ac.squawk || null,
-                        verticalRate: ac.verticalRate ?? null,
-                        onGround: ac.onGround === true,
-                        lastContact: ac.lastContact || null,
                     });
                 }
             }
@@ -498,21 +492,12 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
 
                 vesselMetaMap.set(v.id, {
                     id: v.id,
-                    name: v.name || `Ship ${v.id}`,
+                    name: v.name || null,
                     type: v.type || 'unknown',
                     lat: v.lat,
                     lng: v.lng,
                     speed: v.speed || 0,
                     heading: v.heading || 0,
-                    callSign: v.callSign || null,
-                    imo: v.imo || null,
-                    navigationStatus: v.navigationStatus || null,
-                    destination: v.destination || null,
-                    eta: v.eta || null,
-                    rateOfTurn: v.rateOfTurn ?? null,
-                    draught: v.draught ?? null,
-                    vesselLength: v.length ?? null,
-                    beam: v.beam ?? null,
                     cog: v.cog ?? null,
                 });
             }

@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "bash ./scripts/dev-with-db.sh",
     "dev:raw": "ts-node src/index.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && mkdir -p dist/db/migrations && cp src/db/migrations/*.sql dist/db/migrations/",
     "start": "node dist/index.js",
     "test": "node ../tests/smoke-api.mjs",
     "db:migrate": "bash ./scripts/db-migrate.sh",
@@ -14,7 +14,8 @@
     "db:start": "bash ./scripts/db-start.sh",
     "db:stop": "bash ./scripts/db-stop.sh",
     "db:status": "bash ./scripts/db-status.sh",
-    "replay:rebuild-tiles": "ts-node src/scripts/rebuild-replay-tiles.ts"
+    "replay:rebuild-tiles": "ts-node src/scripts/rebuild-replay-tiles.ts",
+    "satellites:backfill-tle-history": "ts-node src/scripts/backfill-satellite-tle-history.ts"
   },
   "keywords": [],
   "author": "",

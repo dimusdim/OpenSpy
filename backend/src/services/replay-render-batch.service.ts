@@ -5,6 +5,8 @@ import * as satelliteJs from 'satellite.js';
 import { decode } from '@msgpack/msgpack';
 import { ReplayQueryService, type ReplaySatelliteTleRow, type ReplayStateFilters } from './replay-query.service';
 import { ReplayTileBuilderService, type ReplayTilePayload } from './replay-tile-builder.service';
+import { getLayerRenderContract, normalizeLayerId as normalizeContractLayerId, type LayerRenderContract } from './render-contracts';
+import { databaseService } from '../db/database.service';
 
 type RenderLayer = 'aircraft' | 'vessel' | 'satellite' | 'disasters' | 'fire' | 'outage' | 'jamming' | 'gfw' | 'conflict' | 'airspace' | 'pipeline' | 'cable' | string;
 
@@ -20,6 +22,7 @@ type BuildReplayRenderChunksParams = {
 
 type BuildReplayPointDeltasParams = {
     at: string;
+    since?: string;
     layers: string[];
     bbox?: [number, number, number, number];
     aggregateFires?: boolean;
@@ -42,6 +45,7 @@ type RenderFeatureRef = {
     displayAlt: number;
     speedMps?: number | null;
     headingDeg?: number | null;
+    extra?: Record<string, unknown>;
 };
 
 type RenderFeature = RenderFeatureRef & {
@@ -64,11 +68,31 @@ type MotionSample = {
     lng: number;
     lat: number;
     alt: number;
+    actualAtMs?: number;
 };
+
+type RenderFeatureSource = {
+    features: any[];
+    motionById: Map<string, MotionSample[]>;
+    sourceBytes: number;
+    sourceHash: string;
+    tBucket: string;
+    degraded?: Record<string, number | string | boolean>;
+};
+
+const SATELLITE_REPLAY_TRACK_HORIZON_SECONDS = 10 * 60;
+const SATELLITE_REPLAY_TRACK_STEP_SECONDS = 15;
+const SATELLITE_TLE_VALIDITY_SECONDS = 14 * 24 * 60 * 60;
+const MOVING_ENTITY_REPLAY_TRACK_HORIZON_SECONDS = 10 * 60;
 
 type SatelliteReplayItem = {
     row: ReplaySatelliteTleRow;
     satrec: any;
+};
+
+type SatelliteReplayItemsResult = {
+    items: SatelliteReplayItem[];
+    skippedMalformedTle: number;
 };
 
 type ReplayPointDeltaLayer = {
@@ -117,9 +141,9 @@ type PackedRenderGeometry = {
     featureProperties: Float32Array;
     pointPositions: Float32Array;
     pointFeatureIndices: Uint32Array;
-    linePositions: Float32Array;
+    linePositions: Float64Array;
     lineFeatureIndices: Uint32Array;
-    fillPositions: Float32Array;
+    fillPositions: Float64Array;
     fillIndices: Uint32Array;
     fillFeatureIndices: Uint32Array;
     trackRows: Uint32Array;
@@ -142,6 +166,7 @@ type RenderChunkFiles = {
 export type ReplayRenderChunkManifest = {
     format: 'AWVBIN1';
     version: 1;
+    cacheKeyVersion: string;
     mode: 'replay';
     chunkId: string;
     layerId: string;
@@ -184,6 +209,11 @@ export type ReplayRenderChunkManifest = {
     styles: Record<string, RenderStyle>;
     footprints: RenderFootprint[];
     timingsMs: Record<string, number>;
+    degraded?: Record<string, number | string | boolean>;
+    checksums?: {
+        binary: string;
+        details: string;
+    };
     cache?: {
         key: string;
         at: string;
@@ -197,6 +227,7 @@ export type ReplayRenderChunkManifest = {
 export type ReplayRenderChunksResponse = {
     format: 'AWVBIN1';
     version: 1;
+    cacheKeyVersion: string;
     mode: 'replay';
     at: string;
     from: string;
@@ -204,40 +235,21 @@ export type ReplayRenderChunksResponse = {
     layers: Record<string, ReplayRenderChunkManifest[]>;
 };
 
-const RENDER_ROOT = path.resolve(__dirname, '../../var/render-chunks');
+const RENDER_ROOT = path.resolve(process.env.RENDER_CACHE_DIR || path.resolve(__dirname, '../../var/render-chunks'));
+const RENDER_CHUNK_CACHE_KEY_VERSION = 'v13-render-cache-key';
 const MAGIC = 'AWVBIN1\0';
 const HEADER_BYTES = 64;
 const FEATURE_ROW_UINTS = 12;
-const DAY_SECONDS = 24 * 60 * 60;
 const WGS84_A = 6378137;
 const WGS84_E2 = 6.69437999014e-3;
 const DEG = 180 / Math.PI;
 
 function normalizeLayerId(layerId: string): string {
-    return layerId === 'satellites' ? 'satellite' : layerId;
+    return normalizeContractLayerId(layerId);
 }
 
 function getBucketSeconds(layerId: string): number {
-    switch (normalizeLayerId(layerId)) {
-        case 'aircraft':
-        case 'vessel':
-            return 10 * 60;
-        case 'conflict':
-        case 'disasters':
-        case 'outage':
-        case 'jamming':
-        case 'fire':
-        case 'gfw':
-            return 60 * 60;
-        case 'airspace':
-        case 'pipeline':
-        case 'cable':
-            return DAY_SECONDS;
-        case 'satellite':
-            return 5 * 60;
-        default:
-            return 60 * 60;
-    }
+    return getLayerRenderContract(layerId).bucketSeconds;
 }
 
 function floorIsoToBucket(atIso: string, bucketSeconds: number): string {
@@ -252,16 +264,22 @@ function floorIsoToSecond(atIso: string): string {
 }
 
 function getRenderChunkCacheAt(layerId: string, atIso: string): string {
-    switch (normalizeLayerId(layerId)) {
-        case 'airspace':
-        case 'pipeline':
-        case 'cable':
-            return floorIsoToBucket(atIso, DAY_SECONDS);
-        default:
-            // Keep moving snapshots exact to the visible playback second while
-            // avoiding millisecond-level cache misses from timeline UI timestamps.
-            return floorIsoToSecond(atIso);
+    const normalizedLayerId = normalizeLayerId(layerId);
+    const contract = getLayerRenderContract(normalizedLayerId);
+    if (contract.staticAsset) {
+        return floorIsoToBucket(atIso, contract.bucketSeconds);
     }
+    // Keep moving snapshots exact to the visible playback second while avoiding
+    // millisecond-level cache misses from timeline UI timestamps.
+    return floorIsoToSecond(atIso);
+}
+
+function isStaticAssetLayer(layerId: string): boolean {
+    return getLayerRenderContract(layerId).staticAsset;
+}
+
+function isObservedFixesMotionLayer(layerId: string): boolean {
+    return getLayerRenderContract(normalizeLayerId(layerId)).motionModel === 'observed_fixes';
 }
 
 function stableHash32(input: unknown): number {
@@ -275,7 +293,7 @@ function stableHash32(input: unknown): number {
 }
 
 function contentHash(input: Buffer | string): string {
-    return crypto.createHash('sha1').update(input).digest('hex').slice(0, 16);
+    return crypto.createHash('sha1').update(input).digest('hex').slice(0, 24);
 }
 
 function toEcef(lng: number, lat: number, alt = 0): [number, number, number] {
@@ -321,18 +339,18 @@ function propagateSatrecEcef(satrec: any, atIso: string): { lng: number; lat: nu
     }
 }
 
-function propagateTleSamples(tleLine1: string, tleLine2: string, fromIso: string, toIso: string, stepSeconds: number): MotionSample[] {
+function propagateSatrecSamples(satrec: satelliteJs.SatRec, fromIso: string, toIso: string, stepSeconds: number): MotionSample[] {
     const fromMs = new Date(fromIso).getTime();
     const toMs = new Date(toIso).getTime();
     if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs < fromMs) return [];
     const out: MotionSample[] = [];
     for (let sampleMs = fromMs; sampleMs <= toMs; sampleMs += stepSeconds * 1000) {
-        const position = propagateTleEcef(tleLine1, tleLine2, new Date(sampleMs).toISOString());
+        const position = propagateSatrecEcef(satrec, new Date(sampleMs).toISOString());
         if (!position) continue;
         out.push({ atMs: sampleMs, lng: position.lng, lat: position.lat, alt: position.alt });
     }
     if (out.length === 0 || out[out.length - 1].atMs !== toMs) {
-        const position = propagateTleEcef(tleLine1, tleLine2, new Date(toMs).toISOString());
+        const position = propagateSatrecEcef(satrec, new Date(toMs).toISOString());
         if (position) out.push({ atMs: toMs, lng: position.lng, lat: position.lat, alt: position.alt });
     }
     return out;
@@ -407,6 +425,38 @@ function featureId(feature: any, index: number): string {
     return String(feature?.entity_id || feature?.event_id || feature?.asset_id || feature?.id || `${feature?.layer_id || 'feature'}:${index}`);
 }
 
+function featureLayerId(feature: any): string {
+    const rawLayerId = typeof feature?.layer_id === 'string' ? feature.layer_id.trim() : '';
+    if (!rawLayerId) {
+        throw new Error(`Render feature is missing required layer_id for feature_id=${featureId(feature, -1)}`);
+    }
+    const layerId = normalizeLayerId(rawLayerId);
+    getLayerRenderContract(layerId);
+    return layerId;
+}
+
+function featureSortKey(feature: any, index: number): string {
+    const rawId = feature?.entity_id || feature?.event_id || feature?.asset_id || feature?.id;
+    return [
+        featureLayerId(feature),
+        featureFamily(feature),
+        String(rawId || '').toLowerCase(),
+        String(feature?.source_id || '').toLowerCase(),
+        String(feature?.subtype || '').toLowerCase(),
+        rawId ? '' : String(index).padStart(8, '0'),
+    ].join('|');
+}
+
+function sortRenderFeatures<T>(features: T[]): T[] {
+    return features
+        .map((feature, index) => ({
+            feature,
+            key: featureSortKey(feature, index),
+        }))
+        .sort((left, right) => left.key.localeCompare(right.key))
+        .map((entry) => entry.feature);
+}
+
 function featureName(feature: any, fallbackId: string): string {
     const props = feature?.properties || feature?.entity_properties || feature?.position_properties || {};
     if (feature?.layer_id === 'fire' && props?.aggregated) {
@@ -440,10 +490,15 @@ function makeRenderFeatureRef(feature: any, index: number, bbox: [number, number
     const alt = Number(feature?.altitude_m ?? 0) || 0;
     const bboxLng = Number.isFinite(lng) ? lng : (bbox[0] + bbox[2]) / 2;
     const bboxLat = Number.isFinite(lat) ? lat : (bbox[1] + bbox[3]) / 2;
+    const props = feature?.properties || feature?.entity_properties || feature?.position_properties || {};
+    const extra: Record<string, unknown> = {};
+    if (props?.motionConfidence) extra.motionConfidence = props.motionConfidence;
+    if (Number.isFinite(Number(props?.motionAgeSec))) extra.motionAgeSec = Number(props.motionAgeSec);
+    if (Number.isFinite(Number(props?.motionValiditySec))) extra.motionValiditySec = Number(props.motionValiditySec);
     return {
         featureIndex: index,
         id,
-        layerId: normalizeLayerId(String(feature?.layer_id || 'unknown')),
+        layerId: featureLayerId(feature),
         family: featureFamily(feature),
         sourceId: feature?.source_id || null,
         subtype: feature?.subtype || null,
@@ -452,6 +507,86 @@ function makeRenderFeatureRef(feature: any, index: number, bbox: [number, number
         displayAlt: alt,
         speedMps: Number.isFinite(Number(feature?.speed_mps)) ? Number(feature.speed_mps) : null,
         headingDeg: Number.isFinite(Number(feature?.heading_deg)) ? Number(feature.heading_deg) : null,
+        ...(Object.keys(extra).length > 0 ? { extra } : {}),
+    };
+}
+
+function interpolateMotionSample(left: MotionSample, right: MotionSample, atMs: number): MotionSample {
+    const span = right.atMs - left.atMs;
+    if (!Number.isFinite(span) || span <= 0) return { ...left, atMs };
+    const t = Math.min(1, Math.max(0, (atMs - left.atMs) / span));
+    return {
+        atMs,
+        lng: left.lng + (right.lng - left.lng) * t,
+        lat: left.lat + (right.lat - left.lat) * t,
+        alt: left.alt + (right.alt - left.alt) * t,
+    };
+}
+
+function groundDistanceMeters(left: MotionSample, right: MotionSample): number {
+    const lat1 = left.lat * Math.PI / 180;
+    const lat2 = right.lat * Math.PI / 180;
+    const dLat = lat2 - lat1;
+    const dLng = (right.lng - left.lng) * Math.PI / 180;
+    const sinLat = Math.sin(dLat / 2);
+    const sinLng = Math.sin(dLng / 2);
+    const a = sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLng * sinLng;
+    return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a)));
+}
+
+function sanitizeMotionTrack(samples: MotionSample[], maxGapMs: number, atMs: number, maxSpeedMps = Number.POSITIVE_INFINITY): MotionSample[] {
+    const ordered = Array.from(new Map(samples.map((sample) => [sample.atMs, sample])).values())
+        .filter((sample) => Number.isFinite(sample.atMs) && Number.isFinite(sample.lng) && Number.isFinite(sample.lat))
+        .sort((left, right) => left.atMs - right.atMs);
+    if (ordered.length === 0) return [];
+    const current = ordered[0];
+    const result: MotionSample[] = [current];
+    let previousActualAtMs = Number.isFinite(Number((current as any).actualAtMs))
+        ? Number((current as any).actualAtMs)
+        : current.atMs;
+    let previousActualSample = current;
+    for (let i = 1; i < ordered.length; i += 1) {
+        const next = ordered[i];
+        const gap = next.atMs - previousActualAtMs;
+        if (!Number.isFinite(gap) || gap <= 0) continue;
+        if (gap > maxGapMs) break;
+        if (Number.isFinite(maxSpeedMps) && maxSpeedMps > 0) {
+            const speedMps = groundDistanceMeters(previousActualSample, next) / Math.max(1, gap / 1000);
+            if (speedMps > maxSpeedMps) continue;
+        }
+        if (result.length === 1 && current.atMs === atMs && previousActualAtMs < atMs) {
+            result[0] = interpolateMotionSample(
+                { ...current, atMs: previousActualAtMs },
+                next,
+                atMs,
+            );
+        }
+        result.push(next);
+        previousActualAtMs = next.atMs;
+        previousActualSample = next;
+    }
+    return result;
+}
+
+function satelliteMotionQuality(at: string, orbitalObservedAt: string | null | undefined): {
+    motionConfidence: 'nominal' | 'degraded' | 'unknown';
+    motionAgeSec: number | null;
+    motionValiditySec: number;
+} {
+    const atMs = new Date(at).getTime();
+    const orbitalMs = orbitalObservedAt ? new Date(orbitalObservedAt).getTime() : Number.NaN;
+    if (!Number.isFinite(atMs) || !Number.isFinite(orbitalMs)) {
+        return {
+            motionConfidence: 'unknown',
+            motionAgeSec: null,
+            motionValiditySec: SATELLITE_TLE_VALIDITY_SECONDS,
+        };
+    }
+    const ageSec = Math.max(0, Math.round((atMs - orbitalMs) / 1000));
+    return {
+        motionConfidence: ageSec > SATELLITE_TLE_VALIDITY_SECONDS ? 'degraded' : 'nominal',
+        motionAgeSec: ageSec,
+        motionValiditySec: SATELLITE_TLE_VALIDITY_SECONDS,
     };
 }
 
@@ -466,7 +601,7 @@ function makeRenderFeature(feature: any, index: number, bbox: [number, number, n
 }
 
 function styleVariant(feature: any): string | null {
-    const layerId = normalizeLayerId(String(feature?.layer_id || ''));
+    const layerId = featureLayerId(feature);
     const props = feature?.properties || feature?.entity_properties || feature?.position_properties || {};
     if (layerId === 'satellite') {
         if (feature?.subtype === 'recon' || props?.recon || props?.reconMeta) return 'recon';
@@ -486,7 +621,7 @@ function styleVariant(feature: any): string | null {
 
 function styleKey(feature: any): string {
     return [
-        normalizeLayerId(String(feature?.layer_id || 'unknown')),
+        featureLayerId(feature),
         feature?.subtype || '',
         feature?.source_id || '',
         styleVariant(feature) || '',
@@ -577,7 +712,7 @@ function pushPolygon(state: any, featureIndex: number, bbox: [number, number, nu
 }
 
 function featureExtrusionHeight(feature: any): number {
-    if (normalizeLayerId(String(feature?.layer_id || '')) !== 'jamming') return 0;
+    if (featureLayerId(feature) !== 'jamming') return 0;
     const props = feature?.properties || feature?.entity_properties || {};
     const intensity = String(feature?.subtype || props?.intensity || '').toLowerCase();
     if (intensity === 'high') return 80_000;
@@ -658,7 +793,7 @@ function motionSamplesFromPayloads(payloads: ReplayTilePayload[], atIso: string)
     };
     for (const payload of validSnapshots) {
         for (const entity of payload.snapshot?.entities || []) {
-            if ((entity as any).layer_id !== 'aircraft' && (entity as any).layer_id !== 'vessel') continue;
+            if (!isObservedFixesMotionLayer((entity as any).layer_id)) continue;
             const sampleAtMs = (entity as any).position_observed_at ? new Date((entity as any).position_observed_at).getTime() : Number.NaN;
             const lng = Number((entity as any).display_lng);
             const lat = Number((entity as any).display_lat);
@@ -672,7 +807,7 @@ function motionSamplesFromPayloads(payloads: ReplayTilePayload[], atIso: string)
         for (const item of payload.items || []) {
             const raw = item as any;
             if (raw.family !== 'entity' || raw.op !== 'upsert') continue;
-            if (raw.layer_id !== 'aircraft' && raw.layer_id !== 'vessel') continue;
+            if (!isObservedFixesMotionLayer(raw.layer_id)) continue;
             const entity = raw.item;
             const sampleAtMs = entity?.position_observed_at ? new Date(entity.position_observed_at).getTime() : new Date(raw.at).getTime();
             const lng = Number(entity?.display_lng);
@@ -802,7 +937,7 @@ function packGeometry(
         if (!state.styles[String(styleId)]) {
             state.styles[String(styleId)] = {
                 styleId,
-                layerId: normalizeLayerId(String(feature?.layer_id || 'unknown')),
+                layerId: featureLayerId(feature),
                 subtype: feature?.subtype || null,
                 sourceId: feature?.source_id || null,
                 variant: styleVariant(feature),
@@ -861,9 +996,9 @@ function packGeometry(
         featureProperties: Float32Array.from(state.featureProperties),
         pointPositions: Float32Array.from(state.pointPositions),
         pointFeatureIndices: Uint32Array.from(state.pointFeatureIndices),
-        linePositions: Float32Array.from(state.linePositions),
+        linePositions: Float64Array.from(state.linePositions),
         lineFeatureIndices: Uint32Array.from(state.lineFeatureIndices),
-        fillPositions: Float32Array.from(state.fillPositions),
+        fillPositions: Float64Array.from(state.fillPositions),
         fillIndices: Uint32Array.from(state.fillIndices),
         fillFeatureIndices: Uint32Array.from(state.fillFeatureIndices),
         trackRows: Uint32Array.from(state.trackRows),
@@ -880,6 +1015,10 @@ function packGeometry(
 
 function typedBuffer(array: Uint32Array | Float32Array | Float64Array): Buffer {
     return Buffer.from(array.buffer, array.byteOffset, array.byteLength);
+}
+
+function alignByteOffset(byteOffset: number, alignment: number): number {
+    return Math.ceil(byteOffset / alignment) * alignment;
 }
 
 function buildBinary(packed: PackedRenderGeometry, layerId: string): { buffer: Buffer; sections: ReplayRenderChunkManifest['sections'] } {
@@ -900,9 +1039,9 @@ function buildBinary(packed: PackedRenderGeometry, layerId: string): { buffer: B
         ['featureProperties', 'float32', 4, packed.featureProperties],
         ['pointPositions', 'float32', 3, packed.pointPositions],
         ['pointFeatureIndices', 'uint32', 1, packed.pointFeatureIndices],
-        ['linePositions', 'float32', 3, packed.linePositions],
+        ['linePositions', 'float64', 3, packed.linePositions],
         ['lineFeatureIndices', 'uint32', 1, packed.lineFeatureIndices],
-        ['fillPositions', 'float32', 3, packed.fillPositions],
+        ['fillPositions', 'float64', 3, packed.fillPositions],
         ['fillIndices', 'uint32', 1, packed.fillIndices],
         ['fillFeatureIndices', 'uint32', 1, packed.fillFeatureIndices],
         ['trackRows', 'uint32', 4, packed.trackRows],
@@ -913,6 +1052,14 @@ function buildBinary(packed: PackedRenderGeometry, layerId: string): { buffer: B
     const sections: ReplayRenderChunkManifest['sections'] = {};
     const buffers: Uint8Array[] = [header];
     for (const [name, type, itemSize, array] of sectionSpecs) {
+        if (type === 'float64') {
+            const alignedOffset = alignByteOffset(byteOffset, 8);
+            const paddingBytes = alignedOffset - byteOffset;
+            if (paddingBytes > 0) {
+                buffers.push(Buffer.alloc(paddingBytes));
+                byteOffset = alignedOffset;
+            }
+        }
         const buffer = typedBuffer(array);
         sections[String(name)] = {
             type,
@@ -930,17 +1077,67 @@ function buildBinary(packed: PackedRenderGeometry, layerId: string): { buffer: B
     };
 }
 
+function featureSourceObservedAt(feature: any, fallbackAt: string): string {
+    const layerId = featureLayerId(feature);
+    const props = feature?.properties || feature?.entity_properties || feature?.position_properties || {};
+    const candidates = layerId === 'satellite'
+        ? [
+            props?.orbital_observed_at,
+            feature?.entity_observed_at,
+            feature?.position_observed_at,
+            feature?.observed_at,
+            feature?.last_observed_at,
+            feature?.updated_at,
+            fallbackAt,
+        ]
+        : [
+            feature?.position_observed_at,
+            feature?.observed_at,
+            feature?.entity_observed_at,
+            feature?.valid_from,
+            feature?.last_observed_at,
+            feature?.updated_at,
+            fallbackAt,
+        ];
+    for (const candidate of candidates) {
+        const ms = candidate ? new Date(candidate).getTime() : Number.NaN;
+        if (Number.isFinite(ms)) return new Date(ms).toISOString();
+    }
+    return new Date(fallbackAt).toISOString();
+}
+
 function roundMs(value: number): number {
     return Math.round(value * 100) / 100;
 }
 
+function requireObservedFixesMotionNumber(
+    contract: LayerRenderContract,
+    field: 'motionMaxGapFallbackSec' | 'maxSpeedMps',
+): number {
+    const value = Number(contract[field]);
+    if (!Number.isFinite(value) || value <= 0) {
+        throw new Error(`Layer ${contract.layerId} motionModel=observed_fixes requires positive render.${field} in layer-contracts.json`);
+    }
+    return value;
+}
+
+export const replayRenderBatchTestHooks = {
+    buildBinary,
+    getRenderChunkCacheAt,
+    satelliteMotionQuality,
+};
+
 export class ReplayRenderBatchService {
-    private readonly satelliteReplayCache = new Map<string, { builtAt: number; items: SatelliteReplayItem[] }>();
+    private readonly satelliteReplayCache = new Map<string, { builtAt: number } & SatelliteReplayItemsResult>();
 
     constructor(
         private readonly replayQueryService: ReplayQueryService,
         private readonly replayTileBuilderService: ReplayTileBuilderService,
-    ) {}
+    ) {
+        this.pruneStaleRenderChunkCache().catch((error: any) => {
+            console.warn('[ReplayRenderBatch] stale render chunk cache prune failed', { message: error?.message || String(error) });
+        });
+    }
 
     private getFiles(chunkId: string): RenderChunkFiles {
         const dir = path.join(RENDER_ROOT, chunkId.slice(0, 2), chunkId);
@@ -959,36 +1156,152 @@ export class ReplayRenderBatchService {
         return `/api/replay/render-chunks/${chunkId}/features`;
     }
 
+    private async readFeatureMetadataCache(
+        family: RenderFeatureRef['family'],
+        featureId: string,
+        layerId: string,
+        at: string,
+    ): Promise<RenderFeature | null> {
+        if (!databaseService.isReady() || !featureId) return null;
+        const result = await databaseService.query<{ metadata: RenderFeature }>(
+            `
+                SELECT metadata
+                FROM app.feature_metadata_cache
+                WHERE feature_kind = $1
+                  AND feature_id = $2
+                  AND layer_id = $3
+                  AND as_of = $4::timestamptz
+                  AND (expires_at IS NULL OR expires_at > now())
+                LIMIT 1
+            `,
+            [family, featureId, layerId, at],
+        );
+        return result?.rows[0]?.metadata || null;
+    }
+
+    private async writeFeatureMetadataCache(
+        family: RenderFeatureRef['family'],
+        featureId: string,
+        layerId: string,
+        at: string,
+        metadata: RenderFeature,
+        sourceObservedAt: string,
+    ): Promise<void> {
+        if (!databaseService.isReady() || !featureId) return;
+        const serialized = JSON.stringify(metadata);
+        await databaseService.query(
+            `
+                SELECT app.upsert_feature_metadata_cache(
+                    $1::text,
+                    $2::text,
+                    $3::text,
+                    $4::timestamptz,
+                    $5::jsonb,
+                    $6::timestamptz,
+                    $7::text,
+                    NULL::timestamptz
+                )
+            `,
+            [family, featureId, layerId, at, serialized, sourceObservedAt, contentHash(serialized)],
+        );
+    }
+
     private async readCachedManifest(chunkId: string): Promise<ReplayRenderChunkManifest | null> {
         const files = this.getFiles(chunkId);
         if (!fs.existsSync(files.manifestPath) || !fs.existsSync(files.dataPath) || !fs.existsSync(files.detailsPath)) return null;
         try {
-            return JSON.parse(await fs.promises.readFile(files.manifestPath, 'utf8')) as ReplayRenderChunkManifest;
-        } catch {
+            const manifest = JSON.parse(await fs.promises.readFile(files.manifestPath, 'utf8')) as ReplayRenderChunkManifest;
+            if (manifest.cacheKeyVersion !== RENDER_CHUNK_CACHE_KEY_VERSION) {
+                return null;
+            }
+            if (manifest.checksums?.binary) {
+                const binary = await fs.promises.readFile(files.dataPath);
+                const actual = contentHash(binary);
+                if (actual !== manifest.checksums.binary) {
+                    console.warn('[ReplayRenderBatch] render chunk binary checksum mismatch', { chunkId, expected: manifest.checksums.binary, actual });
+                    return null;
+                }
+            }
+            if (manifest.checksums?.details) {
+                const details = await fs.promises.readFile(files.detailsPath);
+                const actual = contentHash(details);
+                if (actual !== manifest.checksums.details) {
+                    console.warn('[ReplayRenderBatch] render chunk details checksum mismatch', { chunkId, expected: manifest.checksums.details, actual });
+                    return null;
+                }
+            }
+            return manifest;
+        } catch (error: any) {
+            console.warn('[ReplayRenderBatch] render chunk cache read failed', { chunkId, message: error?.message || String(error) });
             return null;
+        }
+    }
+
+    private async pruneStaleRenderChunkCache(): Promise<void> {
+        if (!fs.existsSync(RENDER_ROOT)) return;
+        let removed = 0;
+        const shards = await fs.promises.readdir(RENDER_ROOT, { withFileTypes: true });
+        for (const shard of shards) {
+            if (!shard.isDirectory()) continue;
+            const shardPath = path.join(RENDER_ROOT, shard.name);
+            const chunkDirs = await fs.promises.readdir(shardPath, { withFileTypes: true }).catch(() => []);
+            for (const chunkDir of chunkDirs) {
+                if (!chunkDir.isDirectory()) continue;
+                const chunkPath = path.join(shardPath, chunkDir.name);
+                const manifestPath = path.join(chunkPath, 'manifest.json');
+                try {
+                    const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8')) as Partial<ReplayRenderChunkManifest>;
+                    if (manifest.cacheKeyVersion === RENDER_CHUNK_CACHE_KEY_VERSION) continue;
+                } catch {
+                    // Corrupt/incomplete cache entries are equivalent to stale entries.
+                }
+                await fs.promises.rm(chunkPath, { recursive: true, force: true });
+                removed += 1;
+            }
+        }
+        if (removed > 0) {
+            console.log(`[ReplayRenderBatch] pruned ${removed} stale render chunk cache entries (${RENDER_CHUNK_CACHE_KEY_VERSION})`);
         }
     }
 
     private async writeChunk(chunkId: string, manifest: ReplayRenderChunkManifest, binary: Buffer, details: RenderFeatureRef[]): Promise<void> {
         const files = this.getFiles(chunkId);
         await fs.promises.mkdir(path.dirname(files.manifestPath), { recursive: true });
+        const detailsBody = Buffer.from(`${JSON.stringify({ chunkId, features: details })}\n`);
+        const manifestBody = Buffer.from(`${JSON.stringify({
+            ...manifest,
+            checksums: {
+                binary: contentHash(binary),
+                details: contentHash(detailsBody),
+            },
+        })}\n`);
+        const tmpSuffix = `${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`;
+        const dataTmp = `${files.dataPath}.${tmpSuffix}.tmp`;
+        const detailsTmp = `${files.detailsPath}.${tmpSuffix}.tmp`;
+        const manifestTmp = `${files.manifestPath}.${tmpSuffix}.tmp`;
         await Promise.all([
-            fs.promises.writeFile(files.dataPath, binary),
-            fs.promises.writeFile(files.detailsPath, `${JSON.stringify({ chunkId, features: details })}\n`),
-            fs.promises.writeFile(files.manifestPath, `${JSON.stringify(manifest)}\n`),
+            fs.promises.writeFile(dataTmp, binary),
+            fs.promises.writeFile(detailsTmp, detailsBody),
+            fs.promises.writeFile(manifestTmp, manifestBody),
         ]);
+        await fs.promises.rename(dataTmp, files.dataPath);
+        await fs.promises.rename(detailsTmp, files.detailsPath);
+        await fs.promises.rename(manifestTmp, files.manifestPath);
     }
 
-    private async getSatelliteReplayItems(at: string): Promise<SatelliteReplayItem[]> {
+    private async getSatelliteReplayItems(at: string): Promise<SatelliteReplayItemsResult> {
         const cacheKey = floorIsoToBucket(at, getBucketSeconds('satellite'));
         const cached = this.satelliteReplayCache.get(cacheKey);
-        if (cached && performance.now() - cached.builtAt < 10 * 60 * 1000) return cached.items;
+        if (cached && performance.now() - cached.builtAt < 10 * 60 * 1000) {
+            return { items: cached.items, skippedMalformedTle: cached.skippedMalformedTle };
+        }
 
         const rows = await this.replayQueryService.listSatelliteTleAt({
             at,
             layerId: 'satellite',
         });
         const items: SatelliteReplayItem[] = [];
+        let skippedMalformedTle = 0;
         for (const row of rows) {
             if (!row.tle_line1 || !row.tle_line2) continue;
             try {
@@ -996,25 +1309,34 @@ export class ReplayRenderBatchService {
                     row,
                     satrec: satelliteJs.twoline2satrec(row.tle_line1, row.tle_line2),
                 });
-            } catch {
-                // Skip malformed TLEs; they cannot be rendered or delta-updated.
+            } catch (error: any) {
+                skippedMalformedTle += 1;
+                console.warn('[ReplayRenderBatch] malformed satellite TLE skipped', {
+                    entityId: row.entity_id,
+                    observedAt: row.orbital_observed_at,
+                    message: error?.message || String(error),
+                });
             }
         }
-        this.satelliteReplayCache.set(cacheKey, { builtAt: performance.now(), items });
+        this.satelliteReplayCache.set(cacheKey, { builtAt: performance.now(), items, skippedMalformedTle });
         if (this.satelliteReplayCache.size > 16) {
             const oldest = Array.from(this.satelliteReplayCache.entries())
                 .sort((a, b) => a[1].builtAt - b[1].builtAt)[0]?.[0];
             if (oldest) this.satelliteReplayCache.delete(oldest);
         }
-        return items;
+        return { items, skippedMalformedTle };
     }
 
     private async buildSatelliteFeatures(
         at: string,
         bbox?: [number, number, number, number],
-    ): Promise<{ features: any[]; motionById: Map<string, MotionSample[]>; sourceBytes: number; sourceHash: string; tBucket: string }> {
-        const rows = await this.getSatelliteReplayItems(at);
+    ): Promise<RenderFeatureSource> {
+        const satelliteItems = await this.getSatelliteReplayItems(at);
+        const rows = satelliteItems.items;
         const entities: any[] = [];
+        const motionById = new Map<string, MotionSample[]>();
+        const trackFrom = at;
+        const trackTo = new Date(new Date(at).getTime() + SATELLITE_REPLAY_TRACK_HORIZON_SECONDS * 1000).toISOString();
         for (const item of rows) {
             const row = item.row as any;
             const position = propagateSatrecEcef(item.satrec, at);
@@ -1049,56 +1371,145 @@ export class ReplayRenderBatchService {
                     replay_basis: 'propagated_from_tle',
                     orbital_observed_at: row.orbital_observed_at,
                     ...(row.orbital_properties || {}),
+                    ...satelliteMotionQuality(at, row.orbital_observed_at),
                 },
                 orbital_properties: row.orbital_properties,
             });
+            if (row.tle_line1 && row.tle_line2) {
+                const samples = propagateSatrecSamples(
+                    item.satrec,
+                    trackFrom,
+                    trackTo,
+                    SATELLITE_REPLAY_TRACK_STEP_SECONDS,
+                );
+                if (samples.length > 0) motionById.set(row.entity_id, samples);
+            }
         }
+        const features = sortRenderFeatures(entities);
         const source = JSON.stringify({
             at,
             layerId: 'satellite',
-            count: entities.length,
-            ids: entities.map((row: any) => row.entity_id),
+            count: features.length,
+            trackHorizonSeconds: SATELLITE_REPLAY_TRACK_HORIZON_SECONDS,
+            trackStepSeconds: SATELLITE_REPLAY_TRACK_STEP_SECONDS,
+            ids: features.map((row: any, index) => featureId(row, index)),
+            degraded: {
+                skippedMalformedTle: satelliteItems.skippedMalformedTle,
+            },
         });
         return {
-            features: entities,
-            motionById: new Map(),
+            features,
+            motionById,
             sourceBytes: Buffer.byteLength(source),
             sourceHash: contentHash(source),
             tBucket: floorIsoToBucket(at, getBucketSeconds('satellite')),
+            degraded: satelliteItems.skippedMalformedTle > 0
+                ? { skippedMalformedTle: satelliteItems.skippedMalformedTle }
+                : undefined,
         };
     }
 
-    private async buildDbStateFeatures(layerId: string, at: string, bbox: [number, number, number, number] | undefined, aggregateFires: boolean): Promise<{ features: any[]; motionById: Map<string, MotionSample[]>; sourceBytes: number; sourceHash: string; tBucket: string }> {
+    private async buildDbStateFeatures(layerId: string, at: string, bbox: [number, number, number, number] | undefined, aggregateFires: boolean): Promise<RenderFeatureSource> {
+        const contract = getLayerRenderContract(layerId);
         const filters: ReplayStateFilters = {
             at,
             layerId,
             bbox,
             aggregateFires,
-            minimal: layerId === 'aircraft' || layerId === 'vessel',
+            minimal: contract.minimalRenderProperties,
+            simplifyGeometry: contract.simplifiedRenderGeometry,
         };
         const [entities, events, assets] = await Promise.all([
             this.replayQueryService.listEntityStateAt(filters),
             this.replayQueryService.listEventStateAt(filters),
             this.replayQueryService.listAssetStateAt(filters),
         ]);
-        const features = [...assets, ...events, ...entities];
+        const features = sortRenderFeatures([...assets, ...events, ...entities]);
+        const motionById = new Map<string, MotionSample[]>();
+        let motionSampleCount = 0;
+        if (contract.motionModel === 'observed_fixes') {
+            const atMs = new Date(at).getTime();
+            const toIso = new Date(atMs + MOVING_ENTITY_REPLAY_TRACK_HORIZON_SECONDS * 1000).toISOString();
+            const maxGapSeconds = await this.replayQueryService.getSourceMotionMaxGapSeconds(
+                contract.motionSourceId || layerId,
+                requireObservedFixesMotionNumber(contract, 'motionMaxGapFallbackSec'),
+            );
+            const maxGapMs = maxGapSeconds * 1000;
+            const maxSpeedMps = requireObservedFixesMotionNumber(contract, 'maxSpeedMps');
+            const movingEntities = entities
+                .filter((row: any) => row?.entity_id && Number.isFinite(Number(row.display_lng)) && Number.isFinite(Number(row.display_lat)))
+                .sort((a: any, b: any) => String(a.entity_id).localeCompare(String(b.entity_id)));
+            const movingEntityById = new Map(movingEntities.map((row: any) => [String(row.entity_id), row]));
+            for (const row of movingEntities) {
+                const observedMs = row.position_observed_at ? new Date(row.position_observed_at).getTime() : atMs;
+                motionById.set(String(row.entity_id), [{
+                    atMs,
+                    lng: Number(row.display_lng),
+                    lat: Number(row.display_lat),
+                    alt: Number(row.altitude_m ?? 0) || 0,
+                    actualAtMs: Number.isFinite(observedMs) ? observedMs : atMs,
+                } as MotionSample]);
+            }
+            const futureSamples = await this.replayQueryService.listPositionFixSamplesForEntities({
+                layerId,
+                entityIds: movingEntities.map((row: any) => String(row.entity_id)),
+                fromExclusive: at,
+                toInclusive: toIso,
+            });
+            for (const sample of futureSamples) {
+                if (!Number.isFinite(Number(sample.display_lng)) || !Number.isFinite(Number(sample.display_lat))) continue;
+                const atSampleMs = new Date(sample.observed_at).getTime();
+                if (!Number.isFinite(atSampleMs)) continue;
+                const list = motionById.get(sample.entity_id);
+                if (!list) continue;
+                list.push({
+                    atMs: atSampleMs,
+                    lng: Number(sample.display_lng),
+                    lat: Number(sample.display_lat),
+                    alt: Number(sample.altitude_m ?? 0) || 0,
+                });
+            }
+            motionById.forEach((samples, entityId) => {
+                const bounded = sanitizeMotionTrack(
+                    samples,
+                    maxGapMs,
+                    atMs,
+                    maxSpeedMps,
+                );
+                const current = bounded[0];
+                const row = movingEntityById.get(entityId) as any;
+                if (row && current && current.atMs === atMs) {
+                    row.display_lng = current.lng;
+                    row.display_lat = current.lat;
+                    row.altitude_m = current.alt;
+                    row.geometry = {
+                        type: 'Point',
+                        coordinates: [current.lng, current.lat, current.alt],
+                    };
+                }
+                motionSampleCount += bounded.length;
+                motionById.set(entityId, bounded);
+            });
+        }
         const source = JSON.stringify({
             at,
             layerId,
             aggregateFires,
             counts: [entities.length, events.length, assets.length],
+            motionTracks: motionById.size,
+            motionSampleCount,
             ids: features.map((row: any, index) => featureId(row, index)),
         });
         return {
             features,
-            motionById: new Map(),
+            motionById,
             sourceBytes: Buffer.byteLength(source),
             sourceHash: contentHash(source),
             tBucket: floorIsoToBucket(at, getBucketSeconds(layerId)),
         };
     }
 
-    private async buildTileBackedFeatures(layerId: string, at: string, from: string, to: string, z: number, bbox?: [number, number, number, number]): Promise<{ features: any[]; motionById: Map<string, MotionSample[]>; sourceBytes: number; sourceHash: string; tBucket: string }> {
+    private async buildTileBackedFeatures(layerId: string, at: string, from: string, to: string, z: number, bbox?: [number, number, number, number]): Promise<RenderFeatureSource> {
         const manifest = await this.replayTileBuilderService.buildManifest({
             from,
             to,
@@ -1135,7 +1546,13 @@ export class ReplayRenderBatchService {
     private async buildLayerChunk(params: BuildReplayRenderChunksParams, rawLayerId: string): Promise<ReplayRenderChunkManifest> {
         const layerId = normalizeLayerId(rawLayerId);
         const at = new Date(params.at).toISOString();
-        const cacheAt = getRenderChunkCacheAt(layerId, at);
+        const cacheAt = isStaticAssetLayer(layerId)
+            ? (await this.replayQueryService.getAssetLayerStateVersion({
+                at,
+                layerId,
+                bbox: params.bbox,
+            }) || floorIsoToBucket(at, getBucketSeconds(layerId)))
+            : getRenderChunkCacheAt(layerId, at);
         // Render chunks are exact snapshots. Historical windows/items belong
         // to the legacy replay-tile path, not to the batch that paints the
         // current frame.
@@ -1145,7 +1562,7 @@ export class ReplayRenderBatchService {
         const t0 = performance.now();
         const timingsMs: Record<string, number> = {};
         const chunkHashInput = [
-            'v8-render-cache-key',
+            RENDER_CHUNK_CACHE_KEY_VERSION,
             layerId,
             cacheAt,
             z,
@@ -1197,6 +1614,7 @@ export class ReplayRenderBatchService {
         const manifest: ReplayRenderChunkManifest = {
             format: 'AWVBIN1',
             version: 1,
+            cacheKeyVersion: RENDER_CHUNK_CACHE_KEY_VERSION,
             mode: 'replay',
             chunkId,
             layerId,
@@ -1233,6 +1651,7 @@ export class ReplayRenderBatchService {
             styles: packed.styles,
             footprints: packed.footprints,
             timingsMs,
+            ...(source.degraded ? { degraded: source.degraded } : {}),
             cache: {
                 key: chunkId,
                 at: cacheAt,
@@ -1263,6 +1682,7 @@ export class ReplayRenderBatchService {
         return {
             format: 'AWVBIN1',
             version: 1,
+            cacheKeyVersion: RENDER_CHUNK_CACHE_KEY_VERSION,
             mode: 'replay',
             at,
             from,
@@ -1343,8 +1763,10 @@ export class ReplayRenderBatchService {
     private async buildSatellitePointDelta(layerId: string, at: string, bbox?: [number, number, number, number]): Promise<ReplayPointDeltaLayer> {
         const timingsMs: Record<string, number> = {};
         const sourceStart = performance.now();
-        const items = await this.getSatelliteReplayItems(at);
+        const satelliteItems = await this.getSatelliteReplayItems(at);
+        const items = satelliteItems.items;
         timingsMs.source = roundMs(performance.now() - sourceStart);
+        if (satelliteItems.skippedMalformedTle > 0) timingsMs.skippedMalformedTle = satelliteItems.skippedMalformedTle;
 
         const packStart = performance.now();
         const ids: string[] = [];
@@ -1366,7 +1788,33 @@ export class ReplayRenderBatchService {
                 const [south, west, north, east] = bbox;
                 if (position.lat < south || position.lat > north || position.lng < west || position.lng > east) continue;
             }
+            const feature = { ...row, layer_id: row?.layer_id || layerId };
+            const id = featureId(feature, ids.length);
+            const styleId = styleIdFor(styleKey(feature));
+            if (!styles[String(styleId)]) {
+                styles[String(styleId)] = {
+                    styleId,
+                    layerId,
+                    subtype: feature?.subtype || null,
+                    sourceId: feature?.source_id || null,
+                    variant: styleVariant(feature),
+                    kindMask: 1,
+                };
+            }
+            ids.push(id);
+            hashes.push(stableHash32(id));
+            styleIds.push(styleId);
+            familyCodes.push(featureFamilyCode('entity'));
+            sourceIds.push(feature?.source_id || null);
+            subtypes.push(feature?.subtype || null);
             positions.push(position.position[0], position.position[1], position.position[2]);
+            cartographic.push(position.lng, position.lat, position.alt);
+            properties.push(
+                Number.NaN,
+                Number.NaN,
+                position.alt,
+                0,
+            );
         }
         timingsMs.pack = roundMs(performance.now() - packStart);
 
@@ -1388,16 +1836,25 @@ export class ReplayRenderBatchService {
         };
     }
 
-    private async buildEntityPointDelta(layerId: string, at: string, bbox?: [number, number, number, number]): Promise<ReplayPointDeltaLayer> {
+    private async buildEntityPointDelta(layerId: string, at: string, bbox?: [number, number, number, number], since?: string): Promise<ReplayPointDeltaLayer> {
         const timingsMs: Record<string, number> = {};
         const sourceStart = performance.now();
-        const rows = await this.replayQueryService.listEntityStateAt({
-            at,
-            layerId,
-            bbox,
-            minimal: true,
-        });
+        const rows = since && new Date(since).getTime() < new Date(at).getTime()
+            ? await this.replayQueryService.listMovingEntityChangedStateBetween({
+                since,
+                at,
+                layerId,
+                bbox,
+                minimal: true,
+            })
+            : await this.replayQueryService.listEntityStateAt({
+                at,
+                layerId,
+                bbox,
+                minimal: true,
+            });
         timingsMs.source = roundMs(performance.now() - sourceStart);
+        if (since) timingsMs.partial = 1;
 
         const packStart = performance.now();
         const ids: string[] = [];
@@ -1410,8 +1867,13 @@ export class ReplayRenderBatchService {
         const positions: number[] = [];
         const cartographic: number[] = [];
         const properties: number[] = [];
+        const changedHashes = new Set<number>();
+        let liveCount = 0;
 
-        for (const row of rows as any[]) {
+        const sortedRows = [...(rows as any[])].sort((left, right) =>
+            String(left?.entity_id || '').localeCompare(String(right?.entity_id || '')),
+        );
+        for (const row of sortedRows) {
             const geometry = geometryForFeature(row);
             if (!geometry || geometry.type !== 'Point' || !isValidLonLat(geometry.coordinates)) continue;
             const lng = Number(geometry.coordinates[0]);
@@ -1431,23 +1893,56 @@ export class ReplayRenderBatchService {
                     kindMask: 1,
                 };
             }
-            hashes.push(stableHash32(id));
+            const hash = stableHash32(id);
+            ids.push(id);
+            hashes.push(hash);
+            changedHashes.add(hash);
             styleIds.push(styleId);
             familyCodes.push(featureFamilyCode('entity'));
+            sourceIds.push(styleFeature?.source_id || null);
+            subtypes.push(styleFeature?.subtype || null);
             positions.push(position[0], position[1], position[2]);
+            cartographic.push(lng, lat, alt);
             properties.push(
                 finiteOrNaN(row?.heading_deg),
                 finiteOrNaN(row?.speed_mps),
                 alt,
                 0,
             );
+            liveCount += 1;
+        }
+        if (since) {
+            const expiredRows = await this.replayQueryService.listMovingEntityExpiredBetween({
+                since,
+                at,
+                layerId,
+                bbox,
+                minimal: true,
+            });
+            timingsMs.expired = roundMs(performance.now() - sourceStart - timingsMs.source);
+            const sortedExpiredRows = [...(expiredRows as any[])].sort((left, right) =>
+                String(left?.entity_id || '').localeCompare(String(right?.entity_id || '')),
+            );
+            for (const row of sortedExpiredRows) {
+                const hash = stableHash32(row.entity_id);
+                if (changedHashes.has(hash)) continue;
+                ids.push(row.entity_id);
+                hashes.push(hash);
+                styleIds.push(0);
+                familyCodes.push(featureFamilyCode('entity'));
+                sourceIds.push(null);
+                subtypes.push(null);
+                positions.push(Number.NaN, Number.NaN, Number.NaN);
+                cartographic.push(Number.NaN, Number.NaN, Number.NaN);
+                properties.push(Number.NaN, Number.NaN, Number.NaN, 1);
+            }
         }
         timingsMs.pack = roundMs(performance.now() - packStart);
 
         return {
             layerId,
             at,
-            count: positions.length / 3,
+            count: liveCount,
             ids,
             hashes,
             styleIds,
@@ -1501,10 +1996,14 @@ export class ReplayRenderBatchService {
                     kindMask: 1,
                 };
             }
+            ids.push(id);
             hashes.push(stableHash32(id));
             styleIds.push(styleId);
             familyCodes.push(featureFamilyCode(featureFamily(feature)));
+            sourceIds.push(feature?.source_id || null);
+            subtypes.push(feature?.subtype || null);
             positions.push(position[0], position[1], position[2]);
+            cartographic.push(lng, lat, alt);
             properties.push(
                 finiteOrNaN(feature?.heading_deg),
                 finiteOrNaN(feature?.speed_mps),
@@ -1535,13 +2034,13 @@ export class ReplayRenderBatchService {
     async buildPointDeltas(params: BuildReplayPointDeltasParams): Promise<ReplayPointDeltasResponse> {
         const at = new Date(params.at).toISOString();
         const normalizedLayers = Array.from(new Set(params.layers.map(normalizeLayerId).filter(Boolean)));
-        const pointDbLayers = new Set(['disasters', 'fire', 'outage', 'conflict']);
-        const supported = normalizedLayers.filter((layerId) => layerId === 'aircraft' || layerId === 'vessel' || layerId === 'satellite' || pointDbLayers.has(layerId));
+        const supported = normalizedLayers.filter((layerId) => getLayerRenderContract(layerId).pointDeltaMode !== false);
         const entries = await Promise.all(supported.map(async (layerId) => {
-            const layer = layerId === 'satellite'
+            const contract = getLayerRenderContract(layerId);
+            const layer = contract.pointDeltaMode === 'satellite'
                 ? await this.buildSatellitePointDelta(layerId, at, params.bbox)
-                : (layerId === 'aircraft' || layerId === 'vessel')
-                    ? await this.buildEntityPointDelta(layerId, at, params.bbox)
+                : contract.pointDeltaMode === 'entity'
+                    ? await this.buildEntityPointDelta(layerId, at, params.bbox, params.since)
                     : await this.buildDbPointDelta(layerId, at, params.bbox, params.aggregateFires !== false);
             return [layerId, layer] as const;
         }));
@@ -1677,9 +2176,13 @@ export class ReplayRenderBatchService {
                 Number.isFinite(lng) ? lng : 0,
                 Number.isFinite(lat) ? lat : 0,
             ];
-            return makeRenderFeature({ ...matched, layer_id: matched?.layer_id || layerId }, 0, bbox);
+            const feature = makeRenderFeature({ ...matched, layer_id: matched?.layer_id || layerId }, 0, bbox);
+            await this.writeFeatureMetadataCache(params.family, feature.id, layerId, at, feature, featureSourceObservedAt(matched, at)).catch(() => undefined);
+            return feature;
         }
         if (!params.id) return null;
+        const cached = await this.readFeatureMetadataCache(params.family, params.id, layerId, at).catch(() => null);
+        if (cached) return cached;
         const ref: RenderFeatureRef = {
             featureIndex: 0,
             id: params.id,
@@ -1701,7 +2204,9 @@ export class ReplayRenderBatchService {
             Number.isFinite(lng) ? lng : 0,
             Number.isFinite(lat) ? lat : 0,
         ];
-        return makeRenderFeature(detail, 0, bbox);
+        const feature = makeRenderFeature(detail, 0, bbox);
+        await this.writeFeatureMetadataCache(params.family, params.id, layerId, at, feature, featureSourceObservedAt(detail, at)).catch(() => undefined);
+        return feature;
     }
 
     private async loadFeatureDetails(ref: RenderFeatureRef, at: string): Promise<any | null> {
@@ -1746,6 +2251,8 @@ export class ReplayRenderBatchService {
         const parsed = JSON.parse(await fs.promises.readFile(files.detailsPath, 'utf8')) as { features?: RenderFeatureRef[] };
         const ref = parsed.features?.[featureIndex] || null;
         if (!ref) return null;
+        const cached = await this.readFeatureMetadataCache(ref.family, ref.id, ref.layerId, manifest.at).catch(() => null);
+        if (cached) return cached;
         const detail = await this.loadFeatureDetails(ref, manifest.at).catch(() => null);
         if (!detail) {
             return {
@@ -1765,6 +2272,15 @@ export class ReplayRenderBatchService {
             ref.displayLng ?? 0,
             ref.displayLat ?? 0,
         ];
-        return makeRenderFeature(detail, ref.featureIndex, enrichedBbox);
+        const feature = makeRenderFeature(detail, ref.featureIndex, enrichedBbox);
+        await this.writeFeatureMetadataCache(
+            ref.family,
+            ref.id,
+            ref.layerId,
+            manifest.at,
+            feature,
+            featureSourceObservedAt(detail, manifest.at),
+        ).catch(() => undefined);
+        return feature;
     }
 }
