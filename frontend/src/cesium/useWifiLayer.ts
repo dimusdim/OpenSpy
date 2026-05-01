@@ -137,6 +137,16 @@ function setWifiDebug(patch: Record<string, unknown>): void {
     };
 }
 
+function viewerScene(viewer: Cesium.Viewer | null | undefined): Cesium.Scene | null {
+    if (!viewer) return null;
+    try {
+        if (viewer.isDestroyed()) return null;
+        return viewer.scene ?? null;
+    } catch {
+        return null;
+    }
+}
+
 export function useWifiLayer(viewer: Cesium.Viewer | null) {
     const gateReleased = useSecondaryLoadGate();
     const isSourceOn = useTimelineStore((s) => s.sources.wifi);
@@ -180,9 +190,8 @@ export function useWifiLayer(viewer: Cesium.Viewer | null) {
         const v = targetViewer || viewer;
         const tile = tilesRef.current.get(key);
         if (!tile) return;
-        if (v && !v.isDestroyed()) {
-            v.scene.primitives.remove(tile.collection);
-        }
+        const scene = viewerScene(v);
+        scene?.primitives.remove(tile.collection);
         for (const id of tile.ids) {
             const meta = wifiMetaMap.get(id);
             if (meta) aggregateCountsRef.current[meta.security] = Math.max(0, aggregateCountsRef.current[meta.security] - 1);
@@ -193,11 +202,9 @@ export function useWifiLayer(viewer: Cesium.Viewer | null) {
     }, [clearRefreshTimer, viewer]);
 
     const clearTiles = useCallback((targetViewer?: Cesium.Viewer | null) => {
+        const scene = viewerScene(targetViewer || viewer);
         for (const tile of Array.from(tilesRef.current.values())) {
-            const v = targetViewer || viewer;
-            if (v && !v.isDestroyed()) {
-                v.scene.primitives.remove(tile.collection);
-            }
+            scene?.primitives.remove(tile.collection);
             for (const id of tile.ids) {
                 wifiMetaMap.delete(id);
             }
@@ -541,13 +548,15 @@ export function useWifiLayer(viewer: Cesium.Viewer | null) {
         if (!viewer) return;
         activeRef.current = true;
         const moveEnd = () => scheduleViewportLoad();
-        viewer.camera.moveEnd.addEventListener(moveEnd);
+        const subscribedViewer = viewer;
+        const moveEndEvent = subscribedViewer.camera?.moveEnd;
+        moveEndEvent?.addEventListener(moveEnd);
         scheduleViewportLoad();
         return () => {
             activeRef.current = false;
-            viewer.camera.moveEnd.removeEventListener(moveEnd);
+            moveEndEvent?.removeEventListener(moveEnd);
             if (debounceRef.current) clearTimeout(debounceRef.current);
-            clearTiles(viewer);
+            clearTiles(subscribedViewer);
         };
     }, [clearTiles, scheduleViewportLoad, viewer]);
 

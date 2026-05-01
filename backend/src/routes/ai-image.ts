@@ -1,5 +1,6 @@
 import express from 'express';
 import { AIImageService } from '../services/ai-image.service';
+import { AIPresetsService, PresetsPayload } from '../services/ai-presets.service';
 
 /**
  * Register AI Image generation routes on the Express app.
@@ -10,9 +11,11 @@ import { AIImageService } from '../services/ai-image.service';
  */
 export function setupAIImageRoutes(app: express.Express): AIImageService {
     const service = new AIImageService();
+    const presetsService = new AIPresetsService();
 
     // JSON body parser scoped to AI Image routes (large base64 payloads).
     const jsonParser = express.json({ limit: '100mb' });
+    const presetsJsonParser = express.json({ limit: '1mb' });
 
     // -----------------------------------------------------------------------
     // POST /api/ai-image/generate
@@ -20,7 +23,7 @@ export function setupAIImageRoutes(app: express.Express): AIImageService {
     // -----------------------------------------------------------------------
     app.post('/api/ai-image/generate', jsonParser, async (req: express.Request, res: express.Response) => {
         const bodySize = req.headers['content-length'] || 'unknown';
-        const { screenshot, viewport, prompt, model, presetName } = req.body ?? {};
+        const { screenshot, viewport, prompt, model, presetName, contextSnapshot } = req.body ?? {};
         const screenshotKB = screenshot ? Math.round(screenshot.length / 1024) : 0;
         console.log(`[AIImage] POST /generate  body=${bodySize}  screenshot=${screenshotKB}KB  model=${model || 'default'}`);
 
@@ -33,7 +36,7 @@ export function setupAIImageRoutes(app: express.Express): AIImageService {
 
         try {
             const record = await service.generate(
-                screenshot, viewport, prompt, model, presetName,
+                screenshot, viewport, prompt, model, presetName, contextSnapshot,
             );
             res.json(record);
         } catch (err: any) {
@@ -47,6 +50,42 @@ export function setupAIImageRoutes(app: express.Express): AIImageService {
     // -----------------------------------------------------------------------
     app.get('/api/ai-image/gallery', (_req: express.Request, res: express.Response) => {
         res.json(service.getGallery());
+    });
+
+    // -----------------------------------------------------------------------
+    // GET /api/ai-image/presets
+    // -----------------------------------------------------------------------
+    app.get('/api/ai-image/presets', (_req: express.Request, res: express.Response) => {
+        res.json(presetsService.load());
+    });
+
+    // -----------------------------------------------------------------------
+    // PUT /api/ai-image/presets
+    // Body: { schemaVersion?, presets[] } | presets[]
+    // -----------------------------------------------------------------------
+    app.put('/api/ai-image/presets', presetsJsonParser, (req: express.Request, res: express.Response) => {
+        const body = req.body;
+        let payload: PresetsPayload;
+        if (Array.isArray(body)) {
+            payload = { schemaVersion: 1, presets: body };
+        } else if (body && Array.isArray(body.presets)) {
+            payload = {
+                schemaVersion: typeof body.schemaVersion === 'number' ? body.schemaVersion : 1,
+                presets: body.presets,
+            };
+        } else {
+            res.status(400).json({ error: 'Body must be presets array or { schemaVersion?, presets[] }' });
+            return;
+        }
+
+        try {
+            presetsService.save(payload);
+            res.json({ success: true, count: payload.presets.length });
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            console.error('[AIPresets] save error:', message);
+            res.status(500).json({ error: message || 'Failed to save presets' });
+        }
     });
 
     // -----------------------------------------------------------------------

@@ -1,10 +1,13 @@
 'use client';
 
-import { useEffect, useRef, useCallback, useState } from 'react';
+import { useEffect, useMemo, useRef, useCallback, useState } from 'react';
 import {
     useAIImageStore,
     GalleryEntry,
     Preset,
+    AI_CONTEXT_DEFAULTS,
+    type AIContextObject,
+    type AIContextSnapshot,
 } from '../store/useAIImageStore';
 import { useTimelineStore } from '../store/useTimelineStore';
 import {
@@ -27,10 +30,57 @@ import {
     Pencil,
     Maximize2,
     AlertCircle,
+    RotateCcw,
+    Crosshair,
+    Target,
+    SlidersHorizontal,
 } from 'lucide-react';
 import * as Cesium from 'cesium';
+import {
+    useAIImageNearbyContext,
+    type AIContextLookupResult,
+} from '../cesium/useAIImageNearbyContext';
+import {
+    AI_CONTEXT_PLACEHOLDERS,
+    formatContextObjectCard,
+    resolveAIImagePrompt,
+    type AIImageCameraContext,
+} from '../lib/ai-prompt-context';
+import { formatDistance } from '../lib/ai-context-sources';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3055';
+const GLOBAL_CONTEXT_PRESET_ID = '__ai_vision_global_context__';
+
+type ViewerWindow = Window & {
+    viewerContext?: Cesium.Viewer;
+};
+
+type GalleryApiRecord = {
+    id: string;
+    timestamp: string;
+    presetName?: string;
+    prompt?: string;
+    model?: string;
+    viewport: GalleryEntry['viewport'];
+    originalFile?: string;
+    generatedFile?: string;
+    contextSnapshot?: AIContextSnapshot;
+};
+
+type GenerateApiRecord = {
+    id: string;
+    originalFile: string;
+    generatedFile: string;
+    contextSnapshot?: AIContextSnapshot;
+};
+
+function getGlobalViewer(): Cesium.Viewer | undefined {
+    return (window as ViewerWindow).viewerContext;
+}
+
+function errorMessage(err: unknown, fallback: string): string {
+    return err instanceof Error ? err.message : fallback;
+}
 
 // ===========================================================================
 // Toggle button (always visible in right column)
@@ -57,12 +107,10 @@ export function AIImageToggle() {
 }
 
 // ===========================================================================
-// Before / After comparison slider (fullscreen)
+// Generated-over-source fullscreen overlay
 // ===========================================================================
 
-const OPACITY_OPTIONS = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
-
-function ComparisonSlider({
+function ImageOverlayComparison({
     beforeSrc,
     afterSrc,
     onClose,
@@ -71,118 +119,70 @@ function ComparisonSlider({
     afterSrc: string;
     onClose: () => void;
 }) {
-    const [pos, setPos] = useState(5); // start near left → mostly showing generated
-    const dragging = useRef(false);
-    const containerRef = useRef<HTMLDivElement>(null);
     const overlayOpacity = useAIImageStore((s) => s.overlayOpacity);
     const setOverlayOpacity = useAIImageStore((s) => s.setOverlayOpacity);
 
-    const handlePointerMove = useCallback((clientX: number) => {
-        if (!containerRef.current || !dragging.current) return;
-        const rect = containerRef.current.getBoundingClientRect();
-        const pct = Math.max(0, Math.min(100, ((clientX - rect.left) / rect.width) * 100));
-        setPos(pct);
-    }, []);
-
     useEffect(() => {
-        const onMove = (e: MouseEvent) => handlePointerMove(e.clientX);
-        const onUp = () => { dragging.current = false; };
-        const onTouchMove = (e: TouchEvent) => {
-            if (e.touches.length === 1) handlePointerMove(e.touches[0].clientX);
-        };
         const onKey = (e: KeyboardEvent) => {
             if (e.key === 'Escape') onClose();
         };
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('mouseup', onUp);
-        document.addEventListener('touchmove', onTouchMove);
-        document.addEventListener('touchend', onUp);
         document.addEventListener('keydown', onKey);
         return () => {
-            document.removeEventListener('mousemove', onMove);
-            document.removeEventListener('mouseup', onUp);
-            document.removeEventListener('touchmove', onTouchMove);
-            document.removeEventListener('touchend', onUp);
             document.removeEventListener('keydown', onKey);
         };
-    }, [handlePointerMove, onClose]);
+    }, [onClose]);
 
     const opacityFraction = overlayOpacity / 100;
 
     return (
-        <div
-            ref={containerRef}
-            className="fixed inset-0 z-[9500] bg-black cursor-col-resize select-none"
-            onMouseDown={() => { dragging.current = true; }}
-            onTouchStart={() => { dragging.current = true; }}
-        >
-            {/* Source (base layer — always fully visible) */}
+        <div className="fixed inset-0 z-[9500] bg-black select-none">
             <img
                 src={beforeSrc}
                 alt="Source"
                 className="absolute inset-0 w-full h-full object-cover"
                 draggable={false}
             />
-
-            {/* Generated (overlay with adjustable opacity) — clipped by slider */}
-            <div
-                className="absolute inset-0 overflow-hidden"
-                style={{ clipPath: `inset(0 0 0 ${pos}%)` }}
-            >
-                <img
-                    src={afterSrc}
-                    alt="Generated"
-                    className="absolute inset-0 w-full h-full object-cover"
-                    style={{ opacity: opacityFraction }}
-                    draggable={false}
-                />
-            </div>
-
-            {/* Divider line */}
-            <div
-                className="absolute top-0 bottom-0 w-px bg-white/70 pointer-events-none"
-                style={{ left: `${pos}%` }}
-            >
-                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-black/40 backdrop-blur-sm border-2 border-white/60 flex items-center justify-center pointer-events-none">
-                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                        <path d="M5 8H2M2 8L4 6M2 8L4 10" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                        <path d="M11 8H14M14 8L12 6M14 8L12 10" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                </div>
-            </div>
+            <img
+                src={afterSrc}
+                alt="Generated"
+                className="absolute inset-0 w-full h-full object-cover"
+                style={{ opacity: opacityFraction }}
+                draggable={false}
+            />
 
             {/* Labels */}
             <span className="absolute top-4 left-4 px-2 py-1 text-[11px] font-mono text-white/70 bg-black/50 rounded pointer-events-none">
                 Source
             </span>
+            <span className="absolute top-4 left-20 px-2 py-1 text-[11px] font-mono text-purple-200/80 bg-purple-950/60 rounded pointer-events-none">
+                Result {overlayOpacity}%
+            </span>
 
-            {/* Top-right controls: opacity + close */}
-            <div
-                className="absolute top-4 right-4 flex items-center gap-2 z-10"
-                onMouseDown={(e) => e.stopPropagation()}
+            <button
+                onClick={(e) => { e.stopPropagation(); onClose(); }}
+                className="absolute top-4 right-4 flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-mono text-zinc-300 bg-black/70 hover:bg-black/90 rounded-lg border border-zinc-700 transition-colors cursor-pointer"
             >
-                {/* Opacity dropdown */}
-                <select
-                    value={overlayOpacity}
-                    onChange={(e) => setOverlayOpacity(Number(e.target.value))}
-                    className="px-2 py-1.5 text-[11px] font-mono text-zinc-300 bg-black/70 hover:bg-black/90 border border-zinc-700 rounded-lg cursor-pointer focus:outline-none appearance-none"
-                    title="Generated layer opacity"
-                >
-                    {OPACITY_OPTIONS.map((v) => (
-                        <option key={v} value={v}>
-                            Opacity {v}%
-                        </option>
-                    ))}
-                </select>
+                <X size={14} />
+                Close
+            </button>
 
-                {/* Close */}
-                <button
-                    onClick={(e) => { e.stopPropagation(); onClose(); }}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-mono text-zinc-300 bg-black/70 hover:bg-black/90 rounded-lg border border-zinc-700 transition-colors cursor-pointer"
-                >
-                    <X size={14} />
-                    Close
-                </button>
+            <div className="absolute bottom-5 left-1/2 -translate-x-1/2 w-[min(520px,calc(100vw-32px))] rounded-lg border border-zinc-700 bg-black/75 backdrop-blur-xl px-3 py-2">
+                <div className="flex items-center gap-3">
+                    <SlidersHorizontal size={14} className="text-purple-300 shrink-0" />
+                    <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        step={1}
+                        value={overlayOpacity}
+                        onChange={(e) => setOverlayOpacity(Number(e.target.value))}
+                        className="w-full accent-purple-500"
+                        aria-label="Generated image opacity"
+                    />
+                    <span className="w-10 text-right text-[11px] font-mono text-zinc-300">
+                        {overlayOpacity}%
+                    </span>
+                </div>
             </div>
         </div>
     );
@@ -219,7 +219,7 @@ function FullscreenOverlay() {
     // Both available → comparison slider
     if (originalSrc && generatedSrc) {
         return (
-            <ComparisonSlider
+            <ImageOverlayComparison
                 beforeSrc={originalSrc}
                 afterSrc={generatedSrc}
                 onClose={() => setEntry(null)}
@@ -474,6 +474,11 @@ function GalleryItem({
                         <span className="text-zinc-800 ml-1">
                             {(entry.viewport.height / 1000).toFixed(0)}km
                         </span>
+                        {entry.contextSnapshot && (
+                            <span className="text-purple-500/60 ml-1">
+                                ctx {entry.contextSnapshot.selected.length}
+                            </span>
+                        )}
                     </span>
                     <button
                         onClick={(e) => { e.stopPropagation(); flyToViewport(entry.viewport as ViewportSnapshot); }}
@@ -489,30 +494,274 @@ function GalleryItem({
 }
 
 // ===========================================================================
+// Nearby context UI for AI Vision presets
+// ===========================================================================
+
+function ContextStatusBadge({
+    nearby,
+    radiusM,
+    required,
+}: {
+    nearby: AIContextLookupResult;
+    radiusM: number;
+    required: boolean;
+}) {
+    if (nearby.status === 'inactive') return null;
+    if (nearby.refreshing) {
+        const pending = nearby.pendingSourceLabels.length > 0
+            ? nearby.pendingSourceLabels.join(', ')
+            : 'camera';
+        return (
+            <span
+                title={`Updating context: ${pending}`}
+                className="inline-flex items-center gap-1 text-[9px] font-mono text-purple-300/90"
+            >
+                <Loader2 size={9} className="animate-spin" /> updating
+            </span>
+        );
+    }
+    if (nearby.status === 'noTarget') {
+        return (
+            <span className="inline-flex items-center gap-1 text-[9px] font-mono text-amber-400/80">
+                <AlertCircle size={9} /> no target
+            </span>
+        );
+    }
+    if (nearby.status === 'empty') {
+        return (
+            <span className={`inline-flex items-center gap-1 text-[9px] font-mono ${required ? 'text-red-400/80' : 'text-zinc-500'}`}>
+                <Crosshair size={9} /> 0 in {formatDistance(radiusM)}
+            </span>
+        );
+    }
+    return (
+        <span className="inline-flex items-center gap-1 text-[9px] font-mono text-emerald-400/90">
+            <Target size={9} /> {nearby.selected.length}/{nearby.candidates.length} in {formatDistance(radiusM)}
+        </span>
+    );
+}
+
+function ContextObjectChip({
+    object,
+    excluded,
+    primary,
+    includeSource,
+    onToggle,
+}: {
+    object: AIContextObject;
+    excluded: boolean;
+    primary: boolean;
+    includeSource: boolean;
+    onToggle: () => void;
+}) {
+    const title = useMemo(
+        () => formatContextObjectCard(object, includeSource),
+        [object, includeSource],
+    );
+    return (
+        <button
+            type="button"
+            onClick={onToggle}
+            title={title}
+            className={`group inline-flex items-center gap-1 max-w-[130px] px-1.5 py-0.5 text-[9px] font-mono rounded border transition-colors ${
+                excluded
+                    ? 'bg-zinc-900/60 text-zinc-500 border-zinc-800 line-through hover:text-zinc-400'
+                    : primary
+                        ? 'bg-emerald-500/15 text-emerald-300 border-emerald-600/45 hover:bg-emerald-500/25'
+                        : 'bg-purple-600/15 text-purple-300 border-purple-700/40 hover:bg-purple-600/25'
+            }`}
+        >
+            <span className="truncate">{object.name}</span>
+            <X size={8} className={excluded ? 'opacity-50' : 'opacity-70 group-hover:opacity-100'} />
+        </button>
+    );
+}
+
+function ContextChipStrip({
+    presetId,
+    nearby,
+    includeSource,
+}: {
+    presetId: string;
+    nearby: AIContextLookupResult;
+    includeSource: boolean;
+}) {
+    const excludedMap = useAIImageStore((s) => s.excludedContextObjects[presetId]) ?? {};
+    const toggleExcluded = useAIImageStore((s) => s.toggleExcludedContextObject);
+    const clearExcluded = useAIImageStore((s) => s.clearExcludedContextObjects);
+    const activeCandidates = nearby.selected.filter((object) => !excludedMap[object.id]);
+    const hasExcluded = Object.keys(excludedMap).length > 0;
+    if (nearby.candidates.length === 0) return null;
+
+    return (
+        <div className="flex flex-wrap items-center gap-1 max-h-24 overflow-y-auto">
+            {activeCandidates.map((object, index) => (
+                <ContextObjectChip
+                    key={`${presetId}-${object.id}`}
+                    object={object}
+                    excluded={false}
+                    primary={index === 0}
+                    includeSource={includeSource}
+                    onToggle={() => toggleExcluded(presetId, object.id, object.sourceId)}
+                />
+            ))}
+            {hasExcluded && (
+                <button
+                    type="button"
+                    onClick={() => clearExcluded(presetId)}
+                    title="Clear removed objects"
+                    className="inline-flex items-center gap-0.5 text-[9px] font-mono text-zinc-500 hover:text-zinc-300"
+                >
+                    <RotateCcw size={9} /> reset
+                </button>
+            )}
+        </div>
+    );
+}
+
+function GlobalContextPanel({
+    nearby,
+}: {
+    nearby: AIContextLookupResult;
+}) {
+    return (
+        <div className="px-3 py-2 border-b border-zinc-800 shrink-0 space-y-1">
+            <div className="flex items-center justify-between">
+                <span className="inline-flex items-center gap-1.5 text-[10px] font-mono text-zinc-400">
+                    <Target size={11} className="text-purple-400" />
+                    Prompt context
+                </span>
+                <ContextStatusBadge
+                    nearby={nearby}
+                    radiusM={AI_CONTEXT_DEFAULTS.searchRadiusM}
+                    required={false}
+                />
+            </div>
+            <ContextChipStrip
+                presetId={GLOBAL_CONTEXT_PRESET_ID}
+                nearby={nearby}
+                includeSource={AI_CONTEXT_DEFAULTS.includeSourceInContext}
+            />
+        </div>
+    );
+}
+
+function PromptEditor({
+    preset,
+    onUpdate,
+}: {
+    preset: Preset;
+    onUpdate: (updates: Partial<Omit<Preset, 'id'>>) => void;
+}) {
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+    const insertToken = useCallback((token: string) => {
+        const textarea = textareaRef.current;
+        const current = preset.prompt ?? '';
+        if (!textarea) {
+            onUpdate({ prompt: `${current}${token}` });
+            return;
+        }
+        const start = textarea.selectionStart ?? current.length;
+        const end = textarea.selectionEnd ?? current.length;
+        const next = `${current.slice(0, start)}${token}${current.slice(end)}`;
+        onUpdate({ prompt: next });
+        requestAnimationFrame(() => {
+            if (!textareaRef.current) return;
+            textareaRef.current.focus();
+            const pos = start + token.length;
+            textareaRef.current.setSelectionRange(pos, pos);
+        });
+    }, [onUpdate, preset.prompt]);
+
+    return (
+        <label className="block">
+            <span className="text-[9px] font-mono text-zinc-600">Prompt</span>
+            <textarea
+                ref={textareaRef}
+                value={preset.prompt}
+                onChange={(e) => onUpdate({ prompt: e.target.value })}
+                rows={4}
+                className="w-full bg-zinc-900 border border-zinc-700 rounded text-[10px] font-mono text-zinc-300 px-1.5 py-1 resize-none focus:outline-none focus:border-purple-600/50"
+            />
+            <div className="mt-1 flex flex-wrap gap-1">
+                <span className="text-[9px] font-mono text-zinc-600">Insert:</span>
+                {AI_CONTEXT_PLACEHOLDERS.map((placeholder) => (
+                    <button
+                        key={placeholder.token}
+                        type="button"
+                        onClick={() => insertToken(placeholder.token)}
+                        title={`${placeholder.description}: ${placeholder.token}`}
+                        className="text-[9px] font-mono text-purple-300/80 hover:text-purple-200 bg-purple-600/10 hover:bg-purple-600/20 border border-purple-700/30 rounded px-1 py-0.5"
+                    >
+                        {placeholder.label}
+                    </button>
+                ))}
+            </div>
+        </label>
+    );
+}
+
+// ===========================================================================
 // Preset row — capture button + inline edit
 // ===========================================================================
 
 function PresetRow({
     preset,
+    viewer,
+    contextSnapshot,
     onCapture,
 }: {
     preset: Preset;
-    onCapture: () => void;
+    viewer: Cesium.Viewer | null;
+    contextSnapshot: AIContextSnapshot | null;
+    onCapture: (resolvedPrompt: string, contextSnapshot: AIContextSnapshot | null) => void;
 }) {
     const updatePreset = useAIImageStore((s) => s.updatePreset);
     const removePreset = useAIImageStore((s) => s.removePreset);
     const [editing, setEditing] = useState(false);
 
+    const promptUsesContext = /\{\{ctx\.[\w.]+\}\}/.test(preset.prompt);
+
+    const buildPrompt = useCallback(() => {
+        const camera = getCameraContext(viewer);
+        return resolveAIImagePrompt(
+            preset.prompt,
+            contextSnapshot,
+            camera,
+            {
+                includeSource: AI_CONTEXT_DEFAULTS.includeSourceInContext,
+                injectCamera: AI_CONTEXT_DEFAULTS.injectCameraContext,
+            },
+        ).resolvedPrompt;
+    }, [viewer, preset.prompt, contextSnapshot]);
+
+    const previewPrompt = useMemo(() => buildPrompt(), [buildPrompt]);
+
     return (
         <div>
             <div className="flex items-center gap-1">
                 <button
-                    onClick={onCapture}
-                    title={preset.prompt.slice(0, 120)}
+                    onClick={() => {
+                        onCapture(buildPrompt(), promptUsesContext ? contextSnapshot : null);
+                    }}
+                    title={previewPrompt.slice(0, 900)}
                     className="flex-1 flex items-center gap-1.5 px-2.5 py-2 text-[11px] font-mono text-purple-300 bg-purple-600/15 hover:bg-purple-600/25 active:bg-purple-600/35 border border-purple-700/40 rounded-md transition-colors truncate"
                 >
                     <Camera size={12} className="shrink-0" />
                     <span className="truncate">{preset.name}</span>
+                    {promptUsesContext && contextSnapshot?.selected.length ? (
+                        <span className="ml-auto text-[9px] text-purple-300/70">
+                            ctx
+                        </span>
+                    ) : null}
+                </button>
+                <button
+                    type="button"
+                    title={previewPrompt}
+                    className="p-1.5 rounded-md border border-zinc-800 text-zinc-600 hover:text-zinc-400 hover:border-zinc-700 transition-colors"
+                >
+                    <Eye size={11} />
                 </button>
                 <button
                     onClick={() => setEditing(!editing)}
@@ -553,15 +802,7 @@ function PresetRow({
                             </datalist>
                         </div>
                     </label>
-                    <label className="block">
-                        <span className="text-[9px] font-mono text-zinc-600">Prompt</span>
-                        <textarea
-                            value={preset.prompt}
-                            onChange={(e) => updatePreset(preset.id, { prompt: e.target.value })}
-                            rows={3}
-                            className="w-full bg-zinc-900 border border-zinc-700 rounded text-[10px] font-mono text-zinc-300 px-1.5 py-1 resize-none focus:outline-none focus:border-purple-600/50"
-                        />
-                    </label>
+                    <PromptEditor preset={preset} onUpdate={(updates) => updatePreset(preset.id, updates)} />
                     <button
                         onClick={() => removePreset(preset.id)}
                         className="flex items-center gap-1 text-[9px] font-mono text-red-500/70 hover:text-red-400 transition-colors"
@@ -573,6 +814,20 @@ function PresetRow({
             )}
         </div>
     );
+}
+
+function getCameraContext(viewer: Cesium.Viewer | null): AIImageCameraContext {
+    if (!viewer || viewer.isDestroyed()) {
+        return { lat: 0, lng: 0, height: 0, heading: 0, pitch: 0 };
+    }
+    const cart = viewer.camera.positionCartographic;
+    return {
+        lat: Cesium.Math.toDegrees(cart.latitude),
+        lng: Cesium.Math.toDegrees(cart.longitude),
+        height: cart.height,
+        heading: Cesium.Math.toDegrees(viewer.camera.heading),
+        pitch: Cesium.Math.toDegrees(viewer.camera.pitch),
+    };
 }
 
 // ===========================================================================
@@ -601,10 +856,35 @@ export default function AIImagePanel() {
         y: number;
         entry: GalleryEntry;
     } | null>(null);
+    const [viewer, setViewer] = useState<Cesium.Viewer | null>(null);
 
     const savedShowStates = useRef<Map<string, boolean>>(new Map());
     const savedPrimStates = useRef<Map<number, boolean>>(new Map());
     const savedGroundPrimStates = useRef<Map<number, boolean>>(new Map());
+    const contextPreset = useMemo<Preset>(() => ({
+        id: GLOBAL_CONTEXT_PRESET_ID,
+        name: 'Prompt Context',
+        prompt: '',
+        model: '',
+        ...AI_CONTEXT_DEFAULTS,
+    }), []);
+    const nearbyContext = useAIImageNearbyContext(contextPreset, viewer);
+
+    useEffect(() => {
+        if (!isActive) {
+            setViewer(null);
+            return;
+        }
+        const grabViewer = () => {
+            const candidate = getGlobalViewer();
+            if (candidate && !candidate.isDestroyed()) {
+                setViewer((prev) => (prev === candidate ? prev : candidate));
+            }
+        };
+        grabViewer();
+        const timer = setInterval(grabViewer, 500);
+        return () => clearInterval(timer);
+    }, [isActive]);
 
     // --- Load gallery from backend on activation ---
     useEffect(() => {
@@ -616,7 +896,7 @@ export default function AIImagePanel() {
             })
             .then((data) => {
                 if (!Array.isArray(data)) return;
-                const entries: GalleryEntry[] = data.map((rec: any) => ({
+                const entries: GalleryEntry[] = (data as GalleryApiRecord[]).map((rec) => ({
                     id: rec.id,
                     serverId: rec.id,
                     timestamp: rec.timestamp,
@@ -627,6 +907,7 @@ export default function AIImagePanel() {
                     status: 'completed' as const,
                     originalFile: rec.originalFile,
                     generatedFile: rec.generatedFile,
+                    contextSnapshot: rec.contextSnapshot,
                 }));
                 const pending = useAIImageStore
                     .getState()
@@ -695,7 +976,7 @@ export default function AIImagePanel() {
     }, []);
 
     useEffect(() => {
-        const viewer = (window as any).viewerContext as Cesium.Viewer | undefined;
+        const viewer = getGlobalViewer();
         if (!viewer || viewer.isDestroyed()) return;
         if (hideObjects && isActive) {
             hideAll(viewer);
@@ -707,23 +988,27 @@ export default function AIImagePanel() {
     // --- Restore on deactivate ---
     useEffect(() => {
         if (isActive) return;
-        const viewer = (window as any).viewerContext as Cesium.Viewer | undefined;
+        const viewer = getGlobalViewer();
         if (!viewer || viewer.isDestroyed()) return;
         restoreAll(viewer);
     }, [isActive, restoreAll]);
 
     // --- Capture with a preset (fire-and-forget, parallel) ---
     const captureWithPreset = useCallback(
-        async (preset: Preset) => {
+        async (
+            preset: Preset,
+            resolvedPrompt: string,
+            contextSnapshot: AIContextSnapshot | null,
+        ) => {
             const clientId = `cap_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
 
             let screenshot: string;
-            let viewport: any;
+            let viewport: ViewportSnapshot;
             try {
                 const result = await captureScreenshot();
                 screenshot = result.dataUrl;
                 viewport = result.viewport;
-            } catch (err: any) {
+            } catch (err: unknown) {
                 console.error('[AIImage] Screenshot failed:', err);
                 return;
             }
@@ -732,11 +1017,12 @@ export default function AIImagePanel() {
                 id: clientId,
                 timestamp: new Date().toISOString(),
                 presetName: preset.name,
-                prompt: preset.prompt,
+                prompt: resolvedPrompt,
                 model: preset.model,
                 viewport: { ...viewport, tileMode },
                 status: 'pending',
                 localScreenshot: screenshot,
+                contextSnapshot: contextSnapshot ?? undefined,
             };
             addPending(entry);
 
@@ -749,19 +1035,20 @@ export default function AIImagePanel() {
                         body: JSON.stringify({
                             screenshot,
                             viewport: { ...viewport, tileMode },
-                            prompt: preset.prompt,
+                            prompt: resolvedPrompt,
                             model: preset.model,
                             presetName: preset.name,
+                            contextSnapshot,
                         }),
                     },
                 );
 
                 if (!response.ok) {
-                    const body = await response.json().catch(() => ({}));
-                    throw new Error((body as any).error || `HTTP ${response.status}`);
+                    const body = await response.json().catch(() => ({})) as { error?: unknown };
+                    throw new Error(typeof body.error === 'string' ? body.error : `HTTP ${response.status}`);
                 }
 
-                const record = await response.json();
+                const record = await response.json() as GenerateApiRecord;
                 completeEntry(clientId, record);
 
                 // Auto-fullscreen: show comparison slider
@@ -772,14 +1059,15 @@ export default function AIImagePanel() {
                         serverId: record.id,
                         originalFile: record.originalFile,
                         generatedFile: record.generatedFile,
+                        contextSnapshot: record.contextSnapshot ?? contextSnapshot ?? undefined,
                         status: 'completed',
                         localScreenshot: undefined,
                     };
                     setFullscreenEntry(completed);
                 }
-            } catch (err: any) {
+            } catch (err: unknown) {
                 console.error('[AIImage] Generate failed:', err);
-                failEntry(clientId, err.message || 'Generation failed');
+                failEntry(clientId, errorMessage(err, 'Generation failed'));
             }
         },
         [tileMode, addPending, completeEntry, failEntry, setFullscreenEntry],
@@ -823,13 +1111,19 @@ export default function AIImagePanel() {
                     </button>
                 </div>
 
+                <GlobalContextPanel nearby={nearbyContext} />
+
                 {/* Preset buttons — vertical stack with edit icons */}
                 <div className="px-3 py-2 border-b border-zinc-800 shrink-0 space-y-1.5">
                     {presets.map((preset) => (
                         <PresetRow
                             key={preset.id}
                             preset={preset}
-                            onCapture={() => captureWithPreset(preset)}
+                            viewer={viewer}
+                            contextSnapshot={nearbyContext.snapshot}
+                            onCapture={(resolvedPrompt, contextSnapshot) =>
+                                captureWithPreset(preset, resolvedPrompt, contextSnapshot)
+                            }
                         />
                     ))}
                     <button

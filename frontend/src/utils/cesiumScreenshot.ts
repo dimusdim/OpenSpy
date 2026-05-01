@@ -87,10 +87,17 @@ export function captureScreenshot(maxWidth = 2048): Promise<{
 // Fly-to
 // ---------------------------------------------------------------------------
 
+function requestAIContextRefresh(reason: string): void {
+    document.dispatchEvent(new CustomEvent('openspy:ai-context-refresh', {
+        detail: { reason, at: Date.now() },
+    }));
+}
+
 export function flyToViewport(viewport: Pick<ViewportSnapshot, 'longitude' | 'latitude' | 'height' | 'heading' | 'pitch' | 'roll'>): void {
     const viewer = (window as any).viewerContext as Cesium.Viewer | undefined;
     if (!viewer || viewer.isDestroyed()) return;
 
+    requestAIContextRefresh('fly-to-start');
     viewer.camera.flyTo({
         destination: Cesium.Cartesian3.fromDegrees(
             viewport.longitude,
@@ -103,5 +110,7 @@ export function flyToViewport(viewport: Pick<ViewportSnapshot, 'longitude' | 'la
             roll: Cesium.Math.toRadians(viewport.roll),
         },
         duration: 1.5,
+        complete: () => requestAIContextRefresh('fly-to-complete'),
+        cancel: () => requestAIContextRefresh('fly-to-cancel'),
     });
 }

@@ -668,9 +668,18 @@ export default function Globe() {
 
         const handleFlyTo = (e: Event) => {
             const detail = (e as CustomEvent).detail;
+            document.dispatchEvent(new CustomEvent('openspy:ai-context-refresh', {
+                detail: { reason: 'document-fly-to-start', at: Date.now() },
+            }));
             v.camera.flyTo({
                 destination: Cesium.Cartesian3.fromDegrees(detail.lng, detail.lat, detail.height || 15000),
                 duration: 2.0,
+                complete: () => document.dispatchEvent(new CustomEvent('openspy:ai-context-refresh', {
+                    detail: { reason: 'document-fly-to-complete', at: Date.now() },
+                })),
+                cancel: () => document.dispatchEvent(new CustomEvent('openspy:ai-context-refresh', {
+                    detail: { reason: 'document-fly-to-cancel', at: Date.now() },
+                })),
             });
         };
         document.addEventListener('fly-to', handleFlyTo);
