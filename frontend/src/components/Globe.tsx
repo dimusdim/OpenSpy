@@ -19,6 +19,7 @@ import { useTrafficLayer } from '../cesium/useTrafficLayer';
 import { useConflictsLayer } from '../cesium/useConflictsLayer';
 import { useAirspaceLayer, airspaceMetaMap, airspaceInstanceToLogical } from '../cesium/useAirspaceLayer';
 import { useGFWLayer } from '../cesium/useGFWLayer';
+import { useWifiLayer, wifiMetaMap } from '../cesium/useWifiLayer';
 import { replayMetaMap, useReplayOverlay } from '../cesium/useReplayOverlay';
 import { fetchReplayRenderBatchMetadata, isReplayRenderBatchId, replayRenderBatchMetaMap } from '../cesium/replayRenderBatch';
 import { API_URL } from '../lib/config';
@@ -486,6 +487,16 @@ export default function Globe() {
                         name: infraMeta.name,
                         id: infraLogicalId,
                         type: 'Infrastructure',
+                    });
+                    return;
+                }
+
+                const wifiMeta = wifiMetaMap.get(pickedObject.id);
+                if (wifiMeta) {
+                    useTimelineStore.getState().setSelectedEntityId(pickedObject.id, {
+                        name: wifiMeta.name,
+                        id: pickedObject.id,
+                        type: 'Wi-Fi Network',
                     });
                     return;
                 }
@@ -1128,6 +1139,7 @@ export default function Globe() {
     useConflictsLayer(viewer);
     useAirspaceLayer(viewer);
     useGFWLayer(viewer);
+    useWifiLayer(viewer);
     useReplayOverlay(viewer);
 
     return (

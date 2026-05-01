@@ -33,6 +33,7 @@ interface LayerFlags {
   infrastructure: boolean;
   pipelines: boolean;
   outages: boolean;
+  wifi: boolean;
   clouds: boolean;
   satellite_imagery: boolean;
   traffic: boolean;
@@ -71,6 +72,7 @@ const ALL_LAYER_SUBTYPES: Record<string, string[]> = {
   infrastructure: ['power_plant', 'power_substation', 'power_line', 'refinery', 'dam', 'desalination', 'military', 'aerodrome', 'communication_tower'],
   pipelines: ['oil', 'gas', 'water', 'other'],
   outages: ['critical', 'warning'],
+  wifi: ['open', 'encrypted', 'unknown'],
   jamming: ['high', 'medium', 'low'],
   airspace: ['restricted', 'danger', 'prohibited', 'alert', 'warning'],
 };
@@ -103,7 +105,7 @@ export const MISSION_PRESETS: MissionPreset[] = [
     visibility: {
       aviation: true, maritime: true, satellites: true, satelliteFootprints: true,
       conflicts: true, jamming: true, airspace: true, gfw: true,
-      disasters: false, fires: false, cables: false, webcams: false,
+      disasters: false, fires: false, cables: false, webcams: false, wifi: false,
       infrastructure: true, pipelines: false, outages: false, clouds: false,
       satellite_imagery: false, traffic: false, labels: true,
     },
@@ -124,7 +126,7 @@ export const MISSION_PRESETS: MissionPreset[] = [
       maritime: true, gfw: true, cables: true, outages: true,
       aviation: false, satellites: false, satelliteFootprints: false,
       disasters: false, jamming: false, fires: false, webcams: false,
-      infrastructure: false, pipelines: false, clouds: false,
+      infrastructure: false, pipelines: false, wifi: false, clouds: false,
       satellite_imagery: false, traffic: false, conflicts: false,
       airspace: false, labels: true,
     },
@@ -140,7 +142,7 @@ export const MISSION_PRESETS: MissionPreset[] = [
       disasters: true, fires: true, outages: true, webcams: true,
       aviation: false, maritime: false, satellites: false, satelliteFootprints: false,
       jamming: false, cables: false, infrastructure: false, pipelines: false,
-      clouds: true, satellite_imagery: true, traffic: false, conflicts: false,
+      wifi: false, clouds: true, satellite_imagery: true, traffic: false, conflicts: false,
       airspace: false, gfw: false, labels: true,
     },
     subtypeVisibility: onlySubtypes({
@@ -156,7 +158,7 @@ export const MISSION_PRESETS: MissionPreset[] = [
       infrastructure: true, pipelines: true, cables: true,
       aviation: false, maritime: false, satellites: false, satelliteFootprints: false,
       disasters: false, jamming: false, fires: false, webcams: false,
-      outages: true, clouds: false, satellite_imagery: false,
+      outages: true, wifi: false, clouds: false, satellite_imagery: false,
       traffic: false, conflicts: false, airspace: false, gfw: false, labels: true,
     },
     subtypeVisibility: onlySubtypes({
@@ -172,7 +174,7 @@ export const MISSION_PRESETS: MissionPreset[] = [
       satellites: true, satelliteFootprints: true, aviation: true, maritime: true,
       disasters: true, jamming: true, labels: true, fires: true, cables: true,
       webcams: true, infrastructure: true, pipelines: true, outages: true,
-      clouds: true, satellite_imagery: true, traffic: true, conflicts: true,
+      wifi: true, clouds: true, satellite_imagery: true, traffic: true, conflicts: true,
       airspace: true, gfw: true,
     },
     subtypeVisibility: allSubtypesOn(),
@@ -385,6 +387,7 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
     infrastructure: true,
     pipelines: true,
     outages: true,
+    wifi: true,
     clouds: true,
     satellite_imagery: true,
     traffic: true,
@@ -410,6 +413,7 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
     infrastructure: true,
     pipelines: true,
     outages: true,
+    wifi: true,
     clouds: true,
     satellite_imagery: true,
     traffic: true,
@@ -466,6 +470,7 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
       infrastructure: { label: 'Critical Infrastructure', source: 'OpenStreetMap + Overture Maps', type: 'Viewport APIs', count: 0, speed: '-', status: 'connecting', poll: 'on viewport', upstream: '1h / release cache' },
       pipelines: { label: 'Utility Pipelines', source: 'Overture Maps', type: 'DuckDB viewport geometry', count: 0, speed: '-', status: 'connecting', poll: 'on viewport', upstream: 'release cache' },
       outages:   { label: 'Internet Outages', source: 'IODA + Cloudflare Radar', type: 'REST Polling', count: 0, speed: '-', status: 'connecting', poll: '5m', upstream: '10m alerts' },
+      wifi: { label: 'Wi-Fi Observations', source: 'WiGLE', type: 'Viewport API', count: 0, speed: '-', status: 'auth-missing', poll: 'on viewport', upstream: 'crowdsourced observations' },
       clouds:   { label: 'Satellite Clouds', source: 'NASA GIBS', type: 'WMTS imagery overlay', count: 0, speed: 'daily snapshot', status: 'streaming', poll: 'daily', upstream: 'daily MODIS' },
       satellite_imagery: { label: 'Satellite Imagery', source: 'NASA GIBS MODIS', type: 'WMTS imagery overlay', count: 0, speed: 'daily snapshot', status: 'streaming', poll: 'daily', upstream: 'daily MODIS' },
       traffic: { label: 'Traffic Flow', source: 'TomTom', type: 'Raster tile overlay', count: 0, speed: '-', status: 'connecting', poll: 'on demand', upstream: 'real-time (~1 min)' },

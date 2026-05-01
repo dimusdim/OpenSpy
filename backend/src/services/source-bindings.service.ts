@@ -82,6 +82,7 @@ export const TRANSFORMER_REGISTRY: Record<string, SourceTransformerDefinition> =
     'gdacs-disaster-event': { transformerId: 'gdacs-disaster-event', outputKind: 'events' },
     'usgs-earthquake-event': { transformerId: 'usgs-earthquake-event', outputKind: 'events' },
     'eonet-natural-event': { transformerId: 'eonet-natural-event', outputKind: 'events' },
+    'wigle-wifi-observation': { transformerId: 'wigle-wifi-observation', outputKind: 'observations' },
 };
 
 export const WRITER_REGISTRY: Record<string, SourceWriterDefinition> = {
@@ -89,6 +90,7 @@ export const WRITER_REGISTRY: Record<string, SourceWriterDefinition> = {
     'event-snapshot': { writerId: 'event-snapshot', canonicalTarget: 'events' },
     'orbital-elements-entity': { writerId: 'orbital-elements-entity', canonicalTarget: 'orbital_elements' },
     'asset-snapshot': { writerId: 'asset-snapshot', canonicalTarget: 'assets' },
+    'observation-state': { writerId: 'observation-state', canonicalTarget: 'observations' },
 };
 
 export const STORAGE_POLICY_REGISTRY: Record<string, SourceStoragePolicyDefinition> = {
@@ -98,6 +100,7 @@ export const STORAGE_POLICY_REGISTRY: Record<string, SourceStoragePolicyDefiniti
     'event-snapshots-high-volume': { storagePolicyId: 'event-snapshots-high-volume', canonicalTarget: 'events' },
     'orbital-elements-history': { storagePolicyId: 'orbital-elements-history', canonicalTarget: 'orbital_elements' },
     'versioned-assets': { storagePolicyId: 'versioned-assets', canonicalTarget: 'assets' },
+    'observation-state-history': { storagePolicyId: 'observation-state-history', canonicalTarget: 'observations' },
 };
 
 function readSourceBindingsDoc(): SourceBindingsDoc {

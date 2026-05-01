@@ -1097,6 +1097,69 @@
       }
     },
     {
+      "id": "wigle",
+      "name": "WiGLE — Wi-Fi Observations",
+      "provider": "WiGLE",
+      "category": "connectivity",
+      "layer": "Wifi",
+      "status": "LIVE",
+      "type": "viewport observations",
+      "refresh": "on street-level viewport below 300 m AGL; backend cache TTL 12h by default",
+      "live_contract": {
+        "delivery_mode": "viewport-cache",
+        "stale_after_sec": 43200,
+        "remove_after_sec": null,
+        "completeness": "backend-managed offset pagination with persisted tile status; frontend refreshes partial tiles"
+      },
+      "endpoints": [
+        "https://api.wigle.net/api/v2/network/search"
+      ],
+      "auth": {
+        "required": true,
+        "method": "Basic auth API name + API token",
+        "env_keys": ["WIGLE_API_NAME", "WIGLE_API_TOKEN"],
+        "limits": "free account with provider-side per-account limits; commercial use requires WiGLE commercial license"
+      },
+      "legend": {
+        "subtypes": ["open", "encrypted", "unknown"],
+        "colors": {
+          "open": "green",
+          "encrypted": "blue",
+          "unknown": "zinc"
+        }
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "lat/lng": "billboard position",
+          "security": "icon color/type only",
+          "lastSeen": "render metadata for freshness"
+        },
+        "hud": {
+          "ssid": "loaded on click from /api/live/details/wifi/:id",
+          "bssidMasked": "loaded on click; raw BSSID is not returned to the browser",
+          "encryption": "loaded on click",
+          "channel": "loaded on click"
+        }
+      },
+      "fields_loaded_not_displayed": {
+        "raw_bssid": "not sent to frontend; backend stores only masked BSSID for details",
+        "password": "not fetched, stored, or displayed"
+      },
+      "privacy": {
+        "not_collected": ["passwords", "raw BSSID in frontend render payload"],
+        "render_payload": "hashed id, lat/lng, security subtype and lastSeen only; backend does not hide cached observations by lastSeen age",
+        "details_payload": "SSID, masked BSSID, channel/encryption and timestamps only on click"
+      },
+      "fields_available_not_loaded": {
+        "pagination": "WiGLE documents searchAfter, but local validation repeated the first page; backend stores provider cursor for diagnostics and advances with first=<cached count>, with persisted tile completeness and provider cooldown",
+        "bluetooth/cell": "WiGLE also has non-Wi-Fi observation classes; not enabled in this layer"
+      },
+      "api_capabilities_not_used": {
+        "global_crawl": "not supported by product policy; WiGLE is queried only for small street-level viewport tiles",
+        "ssid_search": "could be added as an investigation/search workflow separate from passive map rendering"
+      }
+    },
+    {
       "id": "osm_overpass",
       "name": "OpenStreetMap Overpass — Critical Infrastructure",
       "provider": "OpenStreetMap Foundation (via Overpass API mirrors)",
@@ -2365,6 +2428,31 @@
           "line_color": "Cesium.Color.DEEPSKYBLUE.withAlpha(0.4)",
           "line_width_px": 2.0,
           "no_subtype_filtering": true
+        }
+      }
+    },
+
+    "Wi-Fi Observations": {
+      "sources": ["wigle"],
+      "render_method": "BillboardCollection viewport tiles (0.001° cells, visible below 300 m above ground level; markers clamped to ground with bottom-origin billboard anchoring)",
+      "code_ref": "frontend/src/cesium/useWifiLayer.ts",
+      "refresh_interval": "on viewport; backend persists tile cursor/completeness and resumes WiGLE pages under cooldown",
+      "details": "SSID, masked BSSID, channel and encryption load through /api/live/details/wifi/:id after selection",
+      "subtypes": {
+        "open": {
+          "icon": "green Wi-Fi glyph",
+          "icon_fill": "#22c55e",
+          "legend_color": "text-green-400"
+        },
+        "encrypted": {
+          "icon": "blue Wi-Fi glyph with lock",
+          "icon_fill": "#3b82f6",
+          "legend_color": "text-blue-400"
+        },
+        "unknown": {
+          "icon": "zinc Wi-Fi glyph with question mark",
+          "icon_fill": "#a1a1aa",
+          "legend_color": "text-zinc-400"
         }
       }
     },

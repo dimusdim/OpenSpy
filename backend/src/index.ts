@@ -42,6 +42,7 @@ import { GFWService } from './services/gfw.service';
 import { CloudflareService } from './services/cloudflare.service';
 import { WindyService } from './services/windy.service';
 import { GDELTService } from './services/gdelt.service';
+import { WigleService } from './services/wigle.service';
 import { setupAIImageRoutes } from './routes/ai-image';
 import { databaseService } from './db/database.service';
 import { ViewStateRepository } from './repositories/view-state.repository';
@@ -604,6 +605,7 @@ const API_KEY_DEFS: Record<string, { label: string; envVars: string[] }> = {
     airspace: { label: 'OpenAIP', envVars: ['OPENAIP_API_KEY'] },
     gfw: { label: 'Global Fishing Watch', envVars: ['GFW_TOKEN'] },
     outages: { label: 'Cloudflare Radar', envVars: ['CLOUDFLARE_API_TOKEN'] },
+    wifi: { label: 'WiGLE', envVars: ['WIGLE_API_NAME', 'WIGLE_API_TOKEN'] },
 };
 
 app.get('/api/keys', (_req, res) => {
@@ -872,6 +874,7 @@ const gdeltService = new GDELTService(sourcePersistenceService);
 const airspaceService = new AirspaceService(sourcePersistenceService);
 const gfwService = new GFWService(sourcePersistenceService);
 const cloudflareService = new CloudflareService(sourcePersistenceService);
+const wigleService = new WigleService(databaseService);
 
 // AI Vision — image generation via OpenRouter Gemini Flash Image
 setupAIImageRoutes(app);
@@ -1001,13 +1004,15 @@ app.get('/api/live/snapshot', async (_req, res) => {
 app.get('/api/live/details/:layer/:id', async (req, res) => {
     const layer = String(req.params.layer || '');
     const id = String(req.params.id || '');
-    if (layer !== 'webcam' && layer !== 'pipeline' && !liveProjectionService.isReady()) {
+    if (layer !== 'webcam' && layer !== 'pipeline' && layer !== 'wifi' && !liveProjectionService.isReady()) {
         res.status(503).json({ error: 'Query database is not ready' });
         return;
     }
     try {
         let details = layer === 'webcam'
             ? webcamsService.getWebcamDetails(id)
+            : layer === 'wifi'
+                ? await wigleService.getWifiDetails(id)
             : liveProjectionService.isReady()
                 ? await liveProjectionService.getLiveDetails(layer, id)
                 : null;
@@ -2325,6 +2330,7 @@ const MAX_BBOX_AREA_SQDEG = 4;
 const OVERPASS_PRIMARY_TIMEOUT_MS = 5000;
 const OVERPASS_SECONDARY_TIMEOUT_MS = 250;
 const POWER_INFRA_OVERPASS_TIMEOUT_MS = 5000;
+const WIFI_MAX_BBOX_AREA_SQDEG = Number(process.env.WIFI_MAX_BBOX_AREA_SQDEG || 0.0001);
 
 function overpassViewportBudgetMs(primaryRecords: readonly unknown[]): number {
     return primaryRecords.length > 0 ? OVERPASS_SECONDARY_TIMEOUT_MS : OVERPASS_PRIMARY_TIMEOUT_MS;
@@ -2346,7 +2352,7 @@ function bboxArea(a: number, b: number, c: number, d: number): number {
 app.get('/api/infrastructure', async (req, res) => {
     const parsed = parseBbox(req.query.bbox as string | undefined, 'swne');
     if (!parsed) {
-        res.status(400).json({ error: 'Missing or invalid bbox (expected south,west,north,east; lat ±90, lng ±180; south<north; west<east)' });
+        res.status(400).json({ error: 'Missing or invalid bbox (expected south,west,north,east; lat +/-90, lng +/-180; south<north; west<east)' });
         return;
     }
     const [south, west, north, east] = parsed;
@@ -2488,7 +2494,7 @@ app.get('/api/power-infra', async (req, res) => {
 app.get('/api/pipelines', async (req, res) => {
     const parsed = parseBbox(req.query.bbox as string | undefined, 'swne');
     if (!parsed) {
-        res.status(400).json({ error: 'Missing or invalid bbox (expected south,west,north,east; lat ±90, lng ±180; south<north; west<east)' });
+        res.status(400).json({ error: 'Missing or invalid bbox (expected south,west,north,east; lat +/-90, lng +/-180; south<north; west<east)' });
         return;
     }
     const [south, west, north, east] = parsed;
@@ -2533,6 +2539,57 @@ app.get('/api/pipelines', async (req, res) => {
             return;
         }
         sendError(res, err);
+    }
+});
+
+// Wi-Fi observations from WiGLE. Viewport-only by design: WiGLE is rate-limited
+// per account and the layer must not become a global crawler. Response payload
+// is render-only; SSID/channel/encryption detail is loaded through
+// /api/live/details/wifi/:id after the user selects an observation.
+app.get('/api/wifi', async (req, res) => {
+    const parsed = parseBbox(req.query.bbox as string | undefined, 'swne');
+    if (!parsed) {
+        res.status(400).json({ error: 'Missing or invalid bbox (expected south,west,north,east; lat +/-90, lng +/-180; south<north; west<east)' });
+        return;
+    }
+    const [south, west, north, east] = parsed;
+    const area = bboxArea(south, west, north, east);
+    if (area > WIFI_MAX_BBOX_AREA_SQDEG) {
+        res.status(400).json({
+            error: `bbox too large: ${area.toFixed(3)} sq.deg (max ${WIFI_MAX_BBOX_AREA_SQDEG}). Request smaller Wi-Fi viewport tiles.`,
+        });
+        return;
+    }
+    try {
+        const payload = await wigleService.searchBbox(south, west, north, east);
+        logPerfEvent('wifi.fetch', {
+            source: 'backend',
+            endpoint: 'wifi',
+            provider: 'wigle',
+            elapsedMs: payload.elapsedMs,
+            records: payload.data.length,
+            totalResults: payload.totalResults,
+            truncated: payload.truncated,
+            cached: payload.cached,
+            bboxAreaSq: Number(area.toFixed(6)),
+        });
+        res.json(payload);
+    } catch (err: any) {
+        const status = Number(err?.status || err?.response?.status || 0);
+        if (status === 401 || status === 403) {
+            res.status(503).json({ error: 'WiGLE credentials rejected' });
+            return;
+        }
+        if (status === 429) {
+            res.status(429).json({ error: 'WiGLE rate limit reached' });
+            return;
+        }
+        if (status === 503) {
+            res.status(503).json({ error: err.message || 'WiGLE provider unavailable' });
+            return;
+        }
+        console.error('[WiFi] endpoint error:', err?.message || err);
+        res.status(502).json({ error: 'Failed to fetch Wi-Fi observations from WiGLE' });
     }
 });
 
@@ -2860,6 +2917,7 @@ const adsbHealth = liveStreamService.getHealth();
         traffic: { status: envCheck('TOMTOM_API_KEY') ? 'streaming' : 'auth-missing' },
         webcams: { status: webcamsStatus, note: webcamsNote },
         infrastructure: { status: infraStatus, note: infraNote },
+        wifi: wigleService.getHealth(),
         overture: os ?? { state: 'disabled' },
         sources: await collectSourceIngestStatus(),
         storage: await collectStorageStatus(),

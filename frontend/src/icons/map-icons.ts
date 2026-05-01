@@ -632,6 +632,32 @@ export function getOutageIcon(severity: string): string {
   return OUTAGE_ICON_WARNING;
 }
 
+// ========================= Wi-Fi icons ======================================
+// 32x32 output, 24x24 viewBox. Subtypes map to open, encrypted, unknown.
+
+export const WIFI_ICONS: Record<string, string> = {
+  open: infraSvgUri(
+    `<circle cx="12" cy="12" r="10" fill="#22c55e" fill-opacity="0.88" stroke="#000" stroke-width="1"/>` +
+    `<path d="M5 10.5 C9 7.5 15 7.5 19 10.5" stroke="#fff" stroke-width="2" fill="none"/>` +
+    `<path d="M8 14 C10.5 12 13.5 12 16 14" stroke="#fff" stroke-width="2" fill="none"/>` +
+    `<circle cx="12" cy="17" r="1.6" fill="#fff" stroke="none"/>`,
+  ),
+  encrypted: infraSvgUri(
+    `<circle cx="12" cy="12" r="10" fill="#3b82f6" fill-opacity="0.88" stroke="#000" stroke-width="1"/>` +
+    `<path d="M5 9.5 C9 6.5 15 6.5 19 9.5" stroke="#fff" stroke-width="1.8" fill="none"/>` +
+    `<path d="M8 12.5 C10.5 10.8 13.5 10.8 16 12.5" stroke="#fff" stroke-width="1.8" fill="none"/>` +
+    `<rect x="9" y="14" width="6" height="4.5" rx="1" fill="#fff" stroke="none"/>` +
+    `<path d="M10 14 V12.5 C10 11.2 11 10.3 12 10.3 C13 10.3 14 11.2 14 12.5 V14" stroke="#fff" stroke-width="1.4" fill="none"/>` +
+    `<circle cx="12" cy="16.2" r="0.6" fill="#1e3a8a" stroke="none"/>`,
+  ),
+  unknown: infraSvgUri(
+    `<circle cx="12" cy="12" r="10" fill="#a1a1aa" fill-opacity="0.86" stroke="#000" stroke-width="1"/>` +
+    `<path d="M5 10.5 C9 7.5 15 7.5 19 10.5" stroke="#fff" stroke-width="2" fill="none"/>` +
+    `<path d="M8 14 C10.5 12 13.5 12 16 14" stroke="#fff" stroke-width="2" fill="none"/>` +
+    `<text x="12" y="19" text-anchor="middle" font-size="7" fill="#111827" font-family="sans-serif" font-weight="bold">?</text>`,
+  ),
+};
+
 // ========================== GFW icon ========================================
 // 36×36, 48×48 viewBox — no-fishing sign
 
@@ -744,6 +770,10 @@ export function getMapIcon(layer: string, subtype: string): string | undefined {
     case 'outages':
       return getOutageIcon(subtype);
 
+    // --- Wi-Fi ---
+    case 'wifi':
+      return WIFI_ICONS[subtype] ?? WIFI_ICONS.unknown;
+
     // --- GFW ---
     case 'gfw':
       return GFW_ICON;
@@ -794,6 +824,7 @@ export const DEFAULT_SET: IconSet = {
     critical: OUTAGE_ICON_CRITICAL,
     warning: OUTAGE_ICON_WARNING,
   },
+  wifi: WIFI_ICONS,
   gfw: { default: GFW_ICON },
   webcams: { default: WEBCAM_ICON },
   fires: {

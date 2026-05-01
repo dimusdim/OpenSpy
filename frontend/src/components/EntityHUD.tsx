@@ -14,6 +14,7 @@ import { cableMetaMap } from '../cesium/useCablesLayer';
 import { pipelineMetaMap } from '../cesium/usePipelinesLayer';
 import { airspaceMetaMap } from '../cesium/useAirspaceLayer';
 import { infraMetaMap } from '../cesium/useInfrastructureLayer';
+import { wifiMetaMap } from '../cesium/useWifiLayer';
 import { satelliteMetaMap } from '../cesium/useSatellitesLayer';
 import { replayMetaMap } from '../cesium/useReplayOverlay';
 import { replayRenderBatchMetaMap } from '../cesium/replayRenderBatch';
@@ -33,6 +34,7 @@ const LIVE_DETAILS_LAYER_BY_TYPE: Record<string, string> = {
     'AIS Signal Lost': 'gfw',
     Jamming: 'jamming',
     Outage: 'outage',
+    'Wi-Fi Network': 'wifi',
 };
 
 // Squawk code interpretation
@@ -90,7 +92,7 @@ const LAYER_TO_DOMAIN: Record<string, string> = {
     Aircraft: 'Air', Vessel: 'Sea', 'AIS Signal Lost': 'Sea', GFW: 'Sea',
     Satellite: 'Space', Conflict: 'Ground', Disaster: 'Ground', Fire: 'Ground',
     Infrastructure: 'Infrastructure', Cable: 'Infrastructure', Pipeline: 'Infrastructure',
-    Outage: 'Connectivity', Webcam: 'Context', Airspace: 'Air', Jamming: 'Air',
+    Outage: 'Connectivity', 'Wi-Fi Network': 'Connectivity', Webcam: 'Context', Airspace: 'Air', Jamming: 'Air',
 };
 
 // HUD that locks onto whatever entity the user clicked. Continuously projects
@@ -399,6 +401,35 @@ export default function EntityHUD() {
                     subtype: infraMeta.subtype,
                     source: infraMeta.source,
                     description: infraMeta.description,
+                });
+                requestAnimationFrame(update);
+                return;
+            }
+
+            const wifiMeta = wifiMetaMap.get(selectedEntityId);
+            if (wifiMeta) {
+                const details = liveDetails?.layerId === 'wifi' ? liveDetails : null;
+                const pos = Cesium.Cartesian3.fromDegrees(wifiMeta.lng, wifiMeta.lat, 8);
+                const canvasPos = Cesium.SceneTransforms.worldToWindowCoordinates(cesViewer.scene, pos);
+                setScreenPos(canvasPos ? { x: canvasPos.x, y: canvasPos.y } : null);
+                setLive({
+                    lat: wifiMeta.lat,
+                    lng: wifiMeta.lng,
+                    alt: 0,
+                    layer: wifiMeta.layer,
+                    subtype: wifiMeta.security,
+                    source: wifiMeta.source,
+                    description: details?.name || wifiMeta.description,
+                    extra: details ? {
+                        ssid: details.ssid,
+                        bssidMasked: details.bssidMasked,
+                        encryption: details.encryption,
+                        channel: details.channel,
+                        firstSeen: details.firstSeen,
+                        lastSeen: details.lastSeen,
+                        providerUpdatedAt: details.providerUpdatedAt,
+                        quality: details.quality,
+                    } : undefined,
                 });
                 requestAnimationFrame(update);
                 return;
@@ -930,6 +961,44 @@ export default function EntityHUD() {
                                     <div className="text-zinc-300 text-sm font-mono">{live.extra.vesselMmsi}</div>
                                 </div>
                             )}
+                        </div>
+                    )}
+
+                    {/* ---- Wi-Fi enrichment ---- */}
+                    {live?.layer === 'Wi-Fi Network' && live.extra && (
+                        <div className="space-y-2">
+                            {live.extra.ssid && (
+                                <div>
+                                    <div className="text-[10px] text-zinc-500 font-mono">SSID</div>
+                                    <div className="text-zinc-300 text-sm">{live.extra.ssid}</div>
+                                </div>
+                            )}
+                            <div className="grid grid-cols-2 gap-2">
+                                {live.extra.encryption && (
+                                    <div>
+                                        <div className="text-[10px] text-zinc-500 font-mono">ENCRYPTION</div>
+                                        <div className="text-zinc-300 text-xs font-mono">{live.extra.encryption}</div>
+                                    </div>
+                                )}
+                                {live.extra.channel != null && (
+                                    <div>
+                                        <div className="text-[10px] text-zinc-500 font-mono">CHANNEL</div>
+                                        <div className="text-zinc-300 text-xs font-mono">{live.extra.channel}</div>
+                                    </div>
+                                )}
+                                {live.extra.bssidMasked && (
+                                    <div>
+                                        <div className="text-[10px] text-zinc-500 font-mono">BSSID</div>
+                                        <div className="text-zinc-300 text-xs font-mono">{live.extra.bssidMasked}</div>
+                                    </div>
+                                )}
+                                {live.extra.lastSeen && (
+                                    <div>
+                                        <div className="text-[10px] text-zinc-500 font-mono">LAST SEEN</div>
+                                        <div className="text-zinc-300 text-xs font-mono">{String(live.extra.lastSeen).slice(0, 10)}</div>
+                                    </div>
+                                )}
+                            </div>
                         </div>
                     )}
 

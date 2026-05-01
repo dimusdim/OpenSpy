@@ -444,6 +444,31 @@
       "icon": "wifi-off",
       "children": [
         {
+          "id": "wifi",
+          "title": "Wi-Fi Observations",
+          "catalog_layer": "Wifi",
+          "enabled_by_default": true,
+          "live_only": true,
+          "sources": [
+            {
+              "source_id": "wigle",
+              "title": "WiGLE",
+              "data_type": "viewport observations",
+              "refresh": "on viewport below 300 m AGL",
+              "auth": [
+                { "key": "WIGLE_API_NAME", "label": "API Name", "type": "text", "required": true, "signup_url": "https://wigle.net/account" },
+                { "key": "WIGLE_API_TOKEN", "label": "API Token", "type": "password", "required": true, "signup_url": "https://wigle.net/account" }
+              ]
+            }
+          ],
+          "subtypes": [
+            { "id": "open", "title": "Open", "enabled": true, "color": "#22c55e" },
+            { "id": "encrypted", "title": "Encrypted", "enabled": true, "color": "#3b82f6" },
+            { "id": "unknown", "title": "Unknown", "enabled": true, "color": "#a1a1aa" }
+          ],
+          "privacy_note": "Render payload excludes raw BSSID and descriptive details; details load on click with masked BSSID. Passwords are not collected."
+        },
+        {
           "id": "outages",
           "title": "Internet Outages",
           "catalog_layer": "Outage",

@@ -18,6 +18,8 @@
     "webcams": "webcam",
     "clouds": "imagery-overlay",
     "satellite_imagery": "imagery-overlay",
+    "wi-fi-observations": "wifi",
+    "wifi": "wifi",
     "labels": "border"
   },
   "layers": [
@@ -194,6 +196,31 @@
         "color": "#f97316",
         "pointIcon": "fire",
         "pointScale": 1.1
+      }
+    },
+    {
+      "layerId": "wifi",
+      "displayName": "Wi-Fi Observations",
+      "render": {
+        "family": "entity",
+        "replayScope": "live_only_context",
+        "motionModel": "none",
+        "historyMode": "none",
+        "coverageScope": "viewport",
+        "bucketSeconds": 86400,
+        "replayBlocking": false,
+        "detailsOnDemand": true,
+        "minimalRenderProperties": true,
+        "simplifiedRenderGeometry": false,
+        "staticAsset": false,
+        "renderBatch": false,
+        "pointDeltaMode": false
+      },
+      "style": {
+        "hudName": "Wi-Fi Network",
+        "color": "#22c55e",
+        "pointIcon": "wifi",
+        "pointScale": 0.85
       }
     },
     {

@@ -4,7 +4,7 @@ import {
     Plane, Ship, Satellite, Flame, Waves, Mountain, CircleDot, Radio,
     ShieldAlert, ChevronDown, ChevronRight, PanelRightClose, PanelRight,
     Camera, Zap, Factory, Droplets, Shield, Fuel, WifiOff, Car, Ban,
-    Bomb, Swords, Search, X, Globe2, Target, List,
+    Bomb, Swords, Search, X, Globe2, Target, List, Wifi,
     Anchor, Eye, EyeOff, Skull,
 } from 'lucide-react';
 import { useTimelineStore, MISSION_PRESETS } from '../store/useTimelineStore';
@@ -204,6 +204,15 @@ const DOMAIN_TREE: DomainNode[] = [
         domain: 'connectivity', label: 'Connectivity', icon: WifiOff, color: 'text-orange-400',
         children: [
             {
+                layer: 'wifi', label: 'Wi-Fi Observations', icon: Wifi,
+                subtypes: [
+                    { key: 'open', label: 'Open', icon: Wifi, color: 'text-green-400' },
+                    { key: 'encrypted', label: 'Encrypted', icon: Wifi, color: 'text-blue-400' },
+                    { key: 'unknown', label: 'Unknown', icon: Wifi, color: 'text-zinc-400' },
+                ],
+                scope: 'live-only',
+            },
+            {
                 layer: 'outages', label: 'Outages', icon: WifiOff,
                 sources: COMPOSITE_LAYER_SOURCES.outages,
                 subtypes: [
@@ -225,7 +234,7 @@ const DOMAIN_TREE: DomainNode[] = [
     },
 ];
 
-const LIVE_ONLY_LAYERS = new Set<LayerName>(['traffic', 'webcams', 'clouds', 'satellite_imagery']);
+const LIVE_ONLY_LAYERS = new Set<LayerName>(['traffic', 'webcams', 'clouds', 'satellite_imagery', 'wifi']);
 
 // Flat list of all subtypes for the "All" tab search
 const ALL_SUBTYPES: { layer: LayerName; subtypeKey: string; label: string; parentLabel: string; icon: LucideIcon; color: string }[] = [];

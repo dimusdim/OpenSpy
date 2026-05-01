@@ -105,6 +105,19 @@
       "notes": "Cloudflare Radar outage annotations."
     },
     {
+      "sourceId": "wigle",
+      "layerId": "wifi",
+      "canonicalTarget": "observations",
+      "recordKind": "wifi_access_point",
+      "transformerId": "wigle-wifi-observation",
+      "writerId": "observation-state",
+      "storagePolicyId": "observation-state-history",
+      "rawCaptureMode": "none",
+      "rawFormat": "json",
+      "coverageScope": "viewport",
+      "notes": "WiGLE viewport Wi-Fi observations. Render payload contains only coordinates, security class, source and last-seen; SSID/channel/encryption details are loaded on demand."
+    },
+    {
       "sourceId": "gfw",
       "layerId": "gfw",
       "canonicalTarget": "events",

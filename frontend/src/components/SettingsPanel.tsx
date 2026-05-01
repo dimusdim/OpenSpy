@@ -88,6 +88,7 @@ const PROVIDERS: ProviderDef[] = [
     // Outages
     { id: 'ioda', name: 'IODA', description: 'Internet Outage Detection & Analysis. BGP + active probing.', url: 'ioda.inetintel.cc.gatech.edu', type: 'REST', poll: '5m', layers: ['outages'], free: true },
     { id: 'cloudflare', name: 'Cloudflare Radar', description: 'Internet outage detection from Cloudflare edge network.', url: 'radar.cloudflare.com', type: 'REST', poll: '5m', layers: ['outages'], envVars: ['CLOUDFLARE_API_TOKEN'], registrationUrl: 'https://dash.cloudflare.com/profile/api-tokens', registrationLabel: 'Cloudflare' },
+    { id: 'wigle', name: 'WiGLE', description: 'Crowdsourced Wi-Fi access point observations. Viewport-only queries; passwords are never fetched or displayed.', url: 'api.wigle.net', type: 'REST viewport', poll: 'on viewport', layers: ['wifi'], envVars: ['WIGLE_API_NAME', 'WIGLE_API_TOKEN'], registrationUrl: 'https://wigle.net/account', registrationLabel: 'WiGLE' },
     // Traffic
     { id: 'tomtom', name: 'TomTom Traffic', description: 'Real-time traffic flow raster tiles.', url: 'developer.tomtom.com', type: 'Raster tiles', poll: 'on demand', layers: ['traffic'], envVars: ['TOMTOM_API_KEY'], registrationUrl: 'https://developer.tomtom.com/', registrationLabel: 'TomTom Developer' },
     // Airspace
