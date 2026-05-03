@@ -612,7 +612,7 @@ function buildAgentRequestContext(): Record<string, any> {
             selectedEntityId: timeline.selectedEntityId,
         },
     };
-    if (!viewer) return context;
+    if (!viewer?.camera || !viewer?.scene?.canvas || !viewer?.scene?.globe?.ellipsoid) return context;
 
     const cameraCarto = viewer.camera.positionCartographic;
     const canvas = viewer.scene.canvas;
@@ -1870,6 +1870,16 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
             const lat = Number(payload.lat ?? payload.latitude);
             const lng = Number(payload.lng ?? payload.lon ?? payload.longitude);
             if (Number.isFinite(lat) && Number.isFinite(lng)) {
+                const viewer = getViewer();
+                if (viewer && payload.draw_marker !== false && payload.show_marker !== false) {
+                    drawPointOrLabel(
+                        viewer,
+                        { ...payload, lat, lng, pixelSize: payload.pixelSize || 10 },
+                        String(action.label || payload.label || payload.name || payload.display_name || entityId),
+                        colorFromPayload(payload.color, Cesium.Color.YELLOW),
+                    );
+                    viewer.scene.requestRender();
+                }
                 document.dispatchEvent(new CustomEvent('fly-to', {
                     detail: { lat, lng, height: Number(payload.height || 15000) },
                 }));
@@ -2069,6 +2079,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         setError(null);
         cancelPendingHistoricalPlayback();
         const actionErrors: string[] = [];
+        let replayWindowRequested = false;
         try {
             for (const action of actions) {
                 if (activeSessionIdRef.current !== sessionId) {
@@ -2076,11 +2087,16 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                 }
                 try {
                     await applyAction(action, sessionId);
+                    if (action.type === 'replay.play_window') replayWindowRequested = true;
+                    if (replayWindowRequested && (action.type === 'replay.seek' || action.type === 'object.open' || action.type === 'object.focus' || action.type === 'entity.open')) {
+                        startHistoricalPlaybackWhenReady();
+                    }
                 } catch (err) {
                     actionErrors.push(`${formatActionType(action.type)}: ${err instanceof Error ? err.message : 'failed'}`);
                 }
                 await sleep(presentationDelayForAction(action));
             }
+            if (replayWindowRequested) startHistoricalPlaybackWhenReady();
             if (actionErrors.length > 0) {
                 setError(`Presentation finished with ${actionErrors.length} skipped step(s)`);
             }
