@@ -44,6 +44,27 @@ export class GPSJamService {
         };
     }
 
+    async fetchDate(dateStr: string, options: { persist?: boolean } = {}): Promise<{ date: string; zones: JammingZone[]; rawBytes: number }> {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+            throw new Error('GPSJam fetchDate requires date in YYYY-MM-DD format');
+        }
+        const url = `https://gpsjam.org/data/${dateStr}-h3_4.csv`;
+        const { data } = await axios.get<string>(url, {
+            timeout: 30_000,
+            responseType: 'text',
+            headers: { 'Accept-Encoding': 'gzip' },
+        });
+        const zones = this.parseCSV(data);
+        this.zones = zones;
+        this.lastDate = dateStr;
+        this.health = 'streaming';
+        this.lastError = null;
+        if (options.persist !== false) {
+            await this.persistence?.persistJamming(zones, dateStr, { rawCsv: data });
+        }
+        return { date: dateStr, zones, rawBytes: Buffer.byteLength(data, 'utf8') };
+    }
+
     private async fetchLatest(): Promise<void> {
         try {
             // Try today first, then yesterday (data may not be ready yet)
@@ -58,22 +79,10 @@ export class GPSJamService {
                     return;
                 }
 
-                const url = `https://gpsjam.org/data/${dateStr}-h3_4.csv`;
                 try {
-                    const { data } = await axios.get<string>(url, {
-                        timeout: 30_000,
-                        responseType: 'text',
-                        headers: { 'Accept-Encoding': 'gzip' },
-                    });
-
-                    const zones = this.parseCSV(data);
+                    const { zones, rawBytes } = await this.fetchDate(dateStr);
                     if (zones.length > 0) {
-                        this.zones = zones;
-                        this.lastDate = dateStr;
-                        this.health = 'streaming';
-                        this.lastError = null;
-                        await this.persistence?.persistJamming(zones, dateStr, { rawCsv: data });
-                        console.log(`[GPSJam] Loaded ${zones.length} jamming zones for ${dateStr} (of which ${zones.filter(z => z.intensity === 'high').length} high)`);
+                        console.log(`[GPSJam] Loaded ${zones.length} jamming zones for ${dateStr} (${rawBytes} raw bytes, ${zones.filter(z => z.intensity === 'high').length} high)`);
                         return;
                     }
                 } catch (err: any) {

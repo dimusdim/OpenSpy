@@ -92,12 +92,26 @@ export class GFWService {
         };
     }
 
-    private async fetchEvents() {
+    async fetchEventsWindow(input: { startDate?: string; endDate?: string; persist?: boolean } = {}): Promise<{
+        records: GFWEvent[];
+        rawCount: number;
+        rawPages: number;
+        metadata: Record<string, any>;
+    }> {
         const token = process.env.GFW_TOKEN;
-        if (!token) return;
+        if (!token) throw new Error('GFW_TOKEN is required for Global Fishing Watch source fetch');
 
         try {
-            const window = await this.resolveFetchWindow(new Date());
+            const window = input.startDate && input.endDate
+                ? {
+                    startDate: input.startDate,
+                    endDate: input.endDate,
+                    latestObservedAt: null,
+                    bootstrap: false,
+                    overlapHours: 0,
+                    windowDays: Math.max(1, Math.ceil((new Date(input.endDate).getTime() - new Date(input.startDate).getTime()) / (24 * 60 * 60 * 1000))),
+                }
+                : await this.resolveFetchWindow(new Date());
             const { startDate, endDate } = window;
 
             // Paginate through all pages. The v3 API caps a single call
@@ -204,18 +218,35 @@ export class GFWService {
                 : hitPageLimit
                     ? `Pagination cap hit at ${rawPages.length} pages`
                     : null;
-            await this.persistence?.persistGfwEvents(records, {
-                rawPayload: rawPages,
-                metadata: ingestMetadata,
-                rawPayloadMetadata: ingestMetadata,
-            });
+            if (input.persist !== false) {
+                await this.persistence?.persistGfwEvents(records, {
+                    rawPayload: rawPages,
+                    metadata: ingestMetadata,
+                    rawPayloadMetadata: ingestMetadata,
+                });
+            }
             console.log(`[GFW] ${records.length} AIS gap events loaded (${entries.length} raw across ${rawPages.length} pages)`);
+            return {
+                records,
+                rawCount: entries.length,
+                rawPages: rawPages.length,
+                metadata: ingestMetadata,
+            };
         } catch (err: any) {
             const body = err.response?.data;
             const detail = body ? JSON.stringify(body) : err.message;
             console.error('[GFW] Fetch failed:', detail);
             this.health = 'error';
             this.lastError = detail;
+            throw err;
+        }
+    }
+
+    private async fetchEvents() {
+        try {
+            await this.fetchEventsWindow();
+        } catch {
+            // fetchEventsWindow already updates health and logs provider details.
         }
     }
 }

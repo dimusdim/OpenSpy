@@ -13,6 +13,7 @@ import SettingsPanel from '../components/SettingsPanel';
 import SystemStorageStatus from '../components/SystemStorageStatus';
 import RenderPerfStatus from '../components/RenderPerfStatus';
 import AIImagePanel, { AIImageToggle } from '../components/AIImagePanel';
+import AgentPanel, { AgentToggle } from '../components/AgentPanel';
 import { useAIImageStore } from '../store/useAIImageStore';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { useStatusPoller } from '../hooks/useStatusPoller';
@@ -25,6 +26,7 @@ const GlobeDynamic = dynamic(() => import('../components/Globe'), {
 export default function Home() {
   const aiActive = useAIImageStore((s) => s.isActive);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [agentsOpen, setAgentsOpen] = useState(false);
 
   // Status polling — always-on, independent of which panels are open
   useStatusPoller();
@@ -108,6 +110,7 @@ export default function Home() {
                     <SearchBar />
                     <TileModeToggle />
                     <AIImageToggle />
+                    <AgentToggle onClick={() => setAgentsOpen(true)} />
                     <button
                         onClick={() => setSettingsOpen(true)}
                         className="flex items-center gap-2 px-3 py-2 bg-black/70 backdrop-blur-xl border border-zinc-800 rounded-lg text-zinc-400 hover:text-white hover:border-zinc-700 transition-colors text-xs font-mono"
@@ -130,6 +133,7 @@ export default function Home() {
 
                 {/* Settings modal */}
                 <SettingsPanel isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
+                <AgentPanel isOpen={agentsOpen} onClose={() => setAgentsOpen(false)} />
             </>
         )}
     </main>

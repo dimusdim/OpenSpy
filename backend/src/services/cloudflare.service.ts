@@ -79,12 +79,18 @@ export class CloudflareService {
         return null;
     }
 
-    private async fetchOutages() {
+    async fetchOutagesWindow(input: { dateStart?: string; dateEnd?: string; persist?: boolean } = {}): Promise<{
+        records: CloudflareOutage[];
+        rawCount: number;
+        rawPages: number;
+        metadata: Record<string, any>;
+    }> {
         const token = process.env.CLOUDFLARE_API_TOKEN;
-        if (!token) return;
+        if (!token) throw new Error('CLOUDFLARE_API_TOKEN is required for Cloudflare source fetch');
 
+        const dateStart = input.dateStart || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+        const dateEnd = input.dateEnd;
         try {
-            const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
             const effectivePageSize = this.positiveIntFromEnv(
                 ['CLOUDFLARE_OUTAGE_PAGE_SIZE', 'CLOUDFLARE_OUTAGE_LIMIT'],
                 100,
@@ -100,8 +106,9 @@ export class CloudflareService {
                 const params = new URLSearchParams({
                     limit: String(effectivePageSize),
                     offset: String(offset),
-                    dateStart: twentyFourHoursAgo,
+                    dateStart,
                 });
+                if (dateEnd) params.set('dateEnd', dateEnd);
                 const url = `https://api.cloudflare.com/client/v4/radar/annotations/outages?${params.toString()}`;
 
                 const res = await retryWithBackoff(() => axios.get(url, {
@@ -127,7 +134,7 @@ export class CloudflareService {
             }
 
             const ingestMetadata = {
-                sourceWindow: { startDate: twentyFourHoursAgo, hours: 24 },
+                sourceWindow: { startDate: dateStart, endDate: dateEnd || null },
                 pagination: {
                     pageSize: effectivePageSize,
                     maxPages: effectiveMaxPages,
@@ -144,11 +151,11 @@ export class CloudflareService {
             if (malformedPage && annotations.length === 0) {
                 this.health = 'error';
                 this.lastError = 'Malformed page in Cloudflare outage pagination';
-                return;
+                throw new Error(this.lastError);
             }
             if (hitPageLimit) {
                 console.warn(
-                    `[Cloudflare] hit pagination cap (${effectiveMaxPages} x ${effectivePageSize} = ${effectiveMaxPages * effectivePageSize} annotations) since ${twentyFourHoursAgo}; raise CLOUDFLARE_OUTAGE_MAX_PAGES or narrow the source window`,
+                    `[Cloudflare] hit pagination cap (${effectiveMaxPages} x ${effectivePageSize} = ${effectiveMaxPages * effectivePageSize} annotations) since ${dateStart}; raise CLOUDFLARE_OUTAGE_MAX_PAGES or narrow the source window`,
                 );
             }
 
@@ -184,18 +191,35 @@ export class CloudflareService {
                 : hitPageLimit
                     ? `Pagination cap hit at ${rawPages.length} pages`
                     : null;
-            await this.persistence?.persistCloudflareOutages(records, {
-                rawPayload: rawPages,
-                metadata: ingestMetadata,
-                rawPayloadMetadata: ingestMetadata,
-            });
+            if (input.persist !== false) {
+                await this.persistence?.persistCloudflareOutages(records, {
+                    rawPayload: rawPages,
+                    metadata: ingestMetadata,
+                    rawPayloadMetadata: ingestMetadata,
+                });
+            }
             console.log(`[Cloudflare] ${records.length} internet outage annotations loaded (${annotations.length} raw across ${rawPages.length} pages)`);
+            return {
+                records,
+                rawCount: annotations.length,
+                rawPages: rawPages.length,
+                metadata: ingestMetadata,
+            };
         } catch (err: any) {
             const body = err.response?.data;
             const detail = body ? JSON.stringify(body) : err.message;
             console.error('[Cloudflare] Fetch failed:', detail);
             this.health = 'error';
             this.lastError = detail;
+            throw err;
+        }
+    }
+
+    private async fetchOutages() {
+        try {
+            await this.fetchOutagesWindow();
+        } catch {
+            // fetchOutagesWindow already updates health and logs provider details.
         }
     }
 }

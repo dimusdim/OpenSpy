@@ -1892,21 +1892,26 @@ export class SourcePersistenceService {
             const observedAt = record.lastContact
                 ? new Date(record.lastContact * 1000).toISOString()
                 : new Date().toISOString();
-            const stateHash = stableHash({
+            const entityStateHash = stableHash({
+                icao24: record.icao24,
+                callsign: record.callsign || null,
+                origin: record.origin || null,
+                type: record.type,
+                squawk: record.squawk || null,
+            });
+            const positionStateHash = stableHash({
                 lat: Number(record.lat.toFixed(5)),
                 lng: Number(record.lng.toFixed(5)),
                 altMeters: record.altMeters ?? null,
                 heading: record.heading ?? 0,
-                type: record.type,
                 speedMps: record.speedMps ?? null,
                 onGround: record.onGround ?? false,
                 verticalRate: record.verticalRate ?? null,
-                squawk: record.squawk || null,
             });
 
             entities.push({
                 entity_id: entityId,
-                latest_snapshot_id: `entity-snap:${entityId}:${stateHash}`,
+                latest_snapshot_id: `entity-snap:${entityId}:${entityStateHash}`,
                 layer_id: binding.layerId,
                 source_id: binding.sourceId,
                 entity_kind: binding.recordKind,
@@ -1919,14 +1924,13 @@ export class SourcePersistenceService {
                     callsign: record.callsign,
                     origin: record.origin || null,
                     onGround: record.onGround ?? false,
-                    verticalRate: record.verticalRate ?? null,
                     squawk: record.squawk || null,
-                    _state_hash: stateHash,
+                    _state_hash: entityStateHash,
                 },
             });
 
             entitySnapshotsSeed.push({
-                entity_snapshot_id: `entity-snap:${entityId}:${stateHash}`,
+                entity_snapshot_id: `entity-snap:${entityId}:${entityStateHash}`,
                 entity_id: entityId,
                 layer_id: binding.layerId,
                 source_id: binding.sourceId,
@@ -1939,11 +1943,10 @@ export class SourcePersistenceService {
                     callsign: record.callsign,
                     origin: record.origin || null,
                     onGround: record.onGround ?? false,
-                    verticalRate: record.verticalRate ?? null,
                     squawk: record.squawk || null,
-                    _state_hash: stateHash,
+                    _state_hash: entityStateHash,
                 },
-                state_hash: stateHash,
+                state_hash: entityStateHash,
             });
 
             aliases.push({
@@ -1963,7 +1966,7 @@ export class SourcePersistenceService {
             }
 
             fixesSeed.push({
-                position_fix_id: `fix:${entityId}:${observedAt}:${stateHash}`,
+                position_fix_id: `fix:${entityId}:${observedAt}:${positionStateHash}`,
                 entity_id: entityId,
                 layer_id: binding.layerId,
                 source_id: binding.sourceId,
@@ -1980,9 +1983,9 @@ export class SourcePersistenceService {
                     onGround: record.onGround ?? false,
                     verticalRate: record.verticalRate ?? null,
                     squawk: record.squawk || null,
-                    _state_hash: stateHash,
+                    _state_hash: positionStateHash,
                 },
-                state_hash: stateHash,
+                state_hash: positionStateHash,
             });
         }
 
@@ -2093,20 +2096,30 @@ export class SourcePersistenceService {
 
             const entityId = `vessel:${record.id}`;
             const observedAt = record.observedAt;
-            const stateHash = stableHash({
+            const entityStateHash = stableHash({
+                type: record.type,
+                navigationStatus: record.navigationStatus || null,
+                name: record.name || null,
+                callSign: record.callSign || null,
+                imo: record.imo || null,
+                destination: record.destination || null,
+                eta: record.eta || null,
+                draught: record.draught ?? null,
+                length: record.length ?? null,
+                beam: record.beam ?? null,
+            });
+            const positionStateHash = stableHash({
                 lat: Number(record.lat.toFixed(5)),
                 lng: Number(record.lng.toFixed(5)),
                 heading: record.heading ?? 0,
-                type: record.type,
                 speedKnots: record.speedKnots ?? null,
-                navigationStatus: record.navigationStatus || null,
+                rateOfTurn: record.rateOfTurn ?? null,
                 cog: record.cog ?? null,
-                destination: record.destination || null,
             });
 
             entities.push({
                 entity_id: entityId,
-                latest_snapshot_id: `entity-snap:${entityId}:${stateHash}`,
+                latest_snapshot_id: `entity-snap:${entityId}:${entityStateHash}`,
                 layer_id: binding.layerId,
                 source_id: binding.sourceId,
                 entity_kind: binding.recordKind,
@@ -2125,14 +2138,12 @@ export class SourcePersistenceService {
                     length: record.length ?? null,
                     beam: record.beam ?? null,
                     navigationStatus: record.navigationStatus || null,
-                    rateOfTurn: record.rateOfTurn ?? null,
-                    cog: record.cog ?? null,
-                    _state_hash: stateHash,
+                    _state_hash: entityStateHash,
                 },
             });
 
             entitySnapshotsSeed.push({
-                entity_snapshot_id: `entity-snap:${entityId}:${stateHash}`,
+                entity_snapshot_id: `entity-snap:${entityId}:${entityStateHash}`,
                 entity_id: entityId,
                 layer_id: binding.layerId,
                 source_id: binding.sourceId,
@@ -2151,11 +2162,9 @@ export class SourcePersistenceService {
                     length: record.length ?? null,
                     beam: record.beam ?? null,
                     navigationStatus: record.navigationStatus || null,
-                    rateOfTurn: record.rateOfTurn ?? null,
-                    cog: record.cog ?? null,
-                    _state_hash: stateHash,
+                    _state_hash: entityStateHash,
                 },
-                state_hash: stateHash,
+                state_hash: entityStateHash,
             });
 
             aliases.push({
@@ -2184,7 +2193,7 @@ export class SourcePersistenceService {
             }
 
             fixesSeed.push({
-                position_fix_id: `fix:${entityId}:${observedAt}:${stateHash}`,
+                position_fix_id: `fix:${entityId}:${observedAt}:${positionStateHash}`,
                 entity_id: entityId,
                 layer_id: binding.layerId,
                 source_id: binding.sourceId,
@@ -2207,9 +2216,9 @@ export class SourcePersistenceService {
                     navigationStatus: record.navigationStatus || null,
                     rateOfTurn: record.rateOfTurn ?? null,
                     cog: record.cog ?? null,
-                    _state_hash: stateHash,
+                    _state_hash: positionStateHash,
                 },
-                state_hash: stateHash,
+                state_hash: positionStateHash,
             });
         }
 

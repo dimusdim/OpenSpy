@@ -8,6 +8,7 @@ import compression from 'compression';
 import axios from 'axios';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { recordRateLimitReject, recordReplayRequest, recordInfraFetch, recordReplayTileBundle, recordReplayTileBundlePhase, withSpan } from './telemetry/observability';
 import { logPerfEvent, logPerfEventFromClient } from './telemetry/perf-log';
 
@@ -47,9 +48,12 @@ import { setupAIImageRoutes } from './routes/ai-image';
 import { databaseService } from './db/database.service';
 import { ViewStateRepository } from './repositories/view-state.repository';
 import { SelectionRepository } from './repositories/selection.repository';
+import { AgentRepository, type AgentProvider } from './repositories/agent.repository';
 import { CatalogBootstrapService } from './services/catalog-bootstrap.service';
 import { CatalogReadService } from './services/catalog-read.service';
 import { ViewControlService } from './services/view-control.service';
+import { AgentToolService } from './services/agent-tool.service';
+import { AgentRuntimeService, getRepoRootFromBackend } from './services/agent-runtime.service';
 import { RuntimeStateRepository } from './repositories/runtime-state.repository';
 import { SourcePersistenceService } from './services/source-persistence.service';
 import { EventQueryService } from './services/event-query.service';
@@ -93,6 +97,274 @@ function sendError(res: express.Response, err: any): void {
     res.status(500).json(body);
 }
 
+function isLoopbackRequest(req: express.Request): boolean {
+    const raw = req.socket.remoteAddress || '';
+    const address = raw.replace(/^::ffff:/, '');
+    return address === '127.0.0.1' || address === '::1' || address === 'localhost';
+}
+
+function tokenMatches(candidate: string, expected: string): boolean {
+    if (!candidate || !expected) return false;
+    const a = Buffer.from(candidate);
+    const b = Buffer.from(expected);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function requireAgentAccess(req: express.Request, res: express.Response, next: express.NextFunction): void {
+    if (isLoopbackRequest(req)) {
+        next();
+        return;
+    }
+
+    const expected = process.env.AGENT_API_TOKEN || process.env.AI_WORLDVIEW_AGENT_TOKEN || '';
+    const auth = String(req.headers.authorization || '');
+    const bearer = auth.toLowerCase().startsWith('bearer ') ? auth.slice(7).trim() : '';
+    const headerToken = String(req.headers['x-agent-dev-token'] || '');
+    if (expected && (tokenMatches(bearer, expected) || tokenMatches(headerToken, expected))) {
+        next();
+        return;
+    }
+
+    res.status(403).json({
+        status: 'error',
+        error: {
+            code: 'AGENT_ACCESS_DENIED',
+            message: 'Agent runtime endpoints are available only from loopback or with AGENT_API_TOKEN.',
+        },
+    });
+}
+
+function hasStatementSeparatorOutsideSqlLiterals(sql: string): boolean {
+    let quote: 'single' | 'double' | 'line-comment' | 'block-comment' | null = null;
+    let dollarTag: string | null = null;
+
+    for (let i = 0; i < sql.length; i += 1) {
+        const char = sql[i];
+        const next = sql[i + 1];
+
+        if (dollarTag) {
+            if (sql.startsWith(dollarTag, i)) {
+                i += dollarTag.length - 1;
+                dollarTag = null;
+            }
+            continue;
+        }
+
+        if (quote === 'line-comment') {
+            if (char === '\n' || char === '\r') quote = null;
+            continue;
+        }
+
+        if (quote === 'block-comment') {
+            if (char === '*' && next === '/') {
+                i += 1;
+                quote = null;
+            }
+            continue;
+        }
+
+        if (quote === 'single') {
+            if (char === "'" && next === "'") {
+                i += 1;
+                continue;
+            }
+            if (char === "'") quote = null;
+            continue;
+        }
+
+        if (quote === 'double') {
+            if (char === '"' && next === '"') {
+                i += 1;
+                continue;
+            }
+            if (char === '"') quote = null;
+            continue;
+        }
+
+        if (char === '-' && next === '-') {
+            i += 1;
+            quote = 'line-comment';
+            continue;
+        }
+
+        if (char === '/' && next === '*') {
+            i += 1;
+            quote = 'block-comment';
+            continue;
+        }
+
+        if (char === "'") {
+            quote = 'single';
+            continue;
+        }
+
+        if (char === '"') {
+            quote = 'double';
+            continue;
+        }
+
+        if (char === '$') {
+            const rest = sql.slice(i);
+            const match = rest.match(/^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/);
+            if (match?.[0]) {
+                dollarTag = match[0];
+                i += dollarTag.length - 1;
+                continue;
+            }
+        }
+
+        if (char === ';') return true;
+    }
+
+    return false;
+}
+
+function sqlCodeOutsideLiterals(sql: string): string {
+    let out = '';
+    let quote: 'single' | 'double' | 'line-comment' | 'block-comment' | null = null;
+    let dollarTag: string | null = null;
+
+    for (let i = 0; i < sql.length; i += 1) {
+        const char = sql[i];
+        const next = sql[i + 1];
+
+        if (dollarTag) {
+            if (sql.startsWith(dollarTag, i)) {
+                out += ' '.repeat(dollarTag.length);
+                i += dollarTag.length - 1;
+                dollarTag = null;
+            } else {
+                out += char === '\n' || char === '\r' ? char : ' ';
+            }
+            continue;
+        }
+
+        if (quote === 'line-comment') {
+            if (char === '\n' || char === '\r') {
+                quote = null;
+                out += char;
+            } else {
+                out += ' ';
+            }
+            continue;
+        }
+
+        if (quote === 'block-comment') {
+            if (char === '*' && next === '/') {
+                out += '  ';
+                i += 1;
+                quote = null;
+            } else {
+                out += char === '\n' || char === '\r' ? char : ' ';
+            }
+            continue;
+        }
+
+        if (quote === 'single') {
+            if (char === "'" && next === "'") {
+                out += '  ';
+                i += 1;
+                continue;
+            }
+            out += ' ';
+            if (char === "'") quote = null;
+            continue;
+        }
+
+        if (quote === 'double') {
+            if (char === '"' && next === '"') {
+                out += '  ';
+                i += 1;
+                continue;
+            }
+            out += ' ';
+            if (char === '"') quote = null;
+            continue;
+        }
+
+        if (char === '-' && next === '-') {
+            out += '  ';
+            i += 1;
+            quote = 'line-comment';
+            continue;
+        }
+
+        if (char === '/' && next === '*') {
+            out += '  ';
+            i += 1;
+            quote = 'block-comment';
+            continue;
+        }
+
+        if (char === "'") {
+            out += ' ';
+            quote = 'single';
+            continue;
+        }
+
+        if (char === '"') {
+            out += ' ';
+            quote = 'double';
+            continue;
+        }
+
+        if (char === '$') {
+            const rest = sql.slice(i);
+            const match = rest.match(/^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/);
+            if (match?.[0]) {
+                dollarTag = match[0];
+                out += ' '.repeat(dollarTag.length);
+                i += dollarTag.length - 1;
+                continue;
+            }
+        }
+
+        out += char;
+    }
+
+    return out;
+}
+
+function validateReadOnlyAgentSql(sql: string): string {
+    let trimmed = sql.trim().replace(/;+\s*$/g, '').trim();
+    if (!trimmed) throw new Error('SQL is required');
+    const lower = trimmed.toLowerCase();
+    if (!/^(select|with)\s/.test(lower)) {
+        throw new Error('Only SELECT or WITH ... SELECT statements are allowed');
+    }
+    if (hasStatementSeparatorOutsideSqlLiterals(trimmed)) {
+        throw new Error('Only one SQL statement is allowed');
+    }
+    const codeOnly = sqlCodeOutsideLiterals(trimmed).toLowerCase();
+    if (/\b(insert|update|delete|merge|truncate|alter|create|drop|grant|revoke|copy|call|do|execute)\b/.test(codeOnly)) {
+        throw new Error('Only read-only SELECT expressions are allowed');
+    }
+    if (/\b(pg_sleep|pg_advisory_lock|pg_advisory_xact_lock|pg_try_advisory_lock|pg_try_advisory_xact_lock)\s*\(/.test(codeOnly)) {
+        throw new Error('Blocking or session-locking database functions are not allowed');
+    }
+    return trimmed;
+}
+
+let agentReadonlyRoleReady = false;
+let agentReadonlyRoleError = '';
+
+async function verifyAgentReadonlyRole(): Promise<void> {
+    agentReadonlyRoleReady = false;
+    agentReadonlyRoleError = '';
+    if (!databaseService.isReady()) return;
+    try {
+        await databaseService.withTransaction(async () => {
+            await databaseService.query('SET TRANSACTION READ ONLY');
+            await databaseService.query('SET LOCAL ROLE app_agent_readonly');
+            await databaseService.query('SELECT 1');
+        });
+        agentReadonlyRoleReady = true;
+    } catch (err: any) {
+        agentReadonlyRoleError = err?.message || 'app_agent_readonly role is not usable by the backend database user';
+        console.error('[AgentSQL] app_agent_readonly role check failed:', err);
+    }
+}
+
 const app = express();
 app.use(cors(corsOptions));
 // Required because frontend runs under COEP: credentialless. Without CORP,
@@ -112,6 +384,7 @@ app.use(compression({
         if (req.path === '/api/replay/tile-bundle') return false;
         if (req.path.startsWith('/api/replay/render-chunks/') && req.path.endsWith('/data')) return false;
         if (req.path.startsWith('/static/replay-tiles/')) return false;
+        if (req.path.startsWith('/api/agents/')) return false;
         return compression.filter(req, res);
     },
 }));
@@ -235,9 +508,12 @@ async function collectSourceIngestStatus() {
 // ---------------------------------------------------------------------------
 const viewStateRepository = new ViewStateRepository(databaseService);
 const selectionRepository = new SelectionRepository(databaseService);
+const agentRepository = new AgentRepository(databaseService);
 const catalogBootstrapService = new CatalogBootstrapService(databaseService);
 const catalogReadService = new CatalogReadService(databaseService);
 const viewControlService = new ViewControlService(viewStateRepository, catalogReadService);
+const agentToolService = new AgentToolService(databaseService, catalogReadService, selectionRepository, viewControlService);
+const agentRuntimeService = new AgentRuntimeService(agentRepository, getRepoRootFromBackend());
 const runtimeStateRepository = new RuntimeStateRepository(databaseService);
 const eventQueryService = new EventQueryService(databaseService);
 const entityQueryService = new EntityQueryService(databaseService);
@@ -585,6 +861,692 @@ app.post('/api/map/clear-selection', async (req, res) => {
         res.json({ cleared: true, layer, state });
     } catch (err: any) {
         sendError(res, err);
+    }
+});
+
+const SOURCE_FETCH_CAPABILITIES: Record<string, {
+    source: string;
+    status: 'available' | 'auth_required' | 'unsupported' | 'planned';
+    history: string;
+    notes: string;
+}> = {
+    'cloudflare-outages': {
+        source: 'cloudflare',
+        status: process.env.CLOUDFLARE_API_TOKEN ? 'available' : 'auth_required',
+        history: 'Provider supports time-window outage queries; backend connector is already present for live polling.',
+        notes: 'Fetches and persists Cloudflare Radar outage annotations for the requested time window.',
+    },
+    'gfw-events': {
+        source: 'gfw',
+        status: process.env.GFW_TOKEN ? 'available' : 'auth_required',
+        history: 'Provider can return vessel tracks/events when token and product access allow it.',
+        notes: 'Fetches and persists GFW gap events for an explicit date window.',
+    },
+    'opensky-tracks': {
+        source: 'opensky',
+        status: process.env.OPENSKY_USERNAME && process.env.OPENSKY_PASSWORD ? 'planned' : 'auth_required',
+        history: 'OpenSky track/history availability is account and credit dependent.',
+        notes: 'Use local position_fixes for replay; provider history should fill gaps, not replace canonical replay.',
+    },
+    'spacetrack-gp-history': {
+        source: 'spacetrack',
+        status: process.env.SPACETRACK_EMAIL && process.env.SPACETRACK_PASSWORD ? 'planned' : 'auth_required',
+        history: 'Space-Track GP history can provide historical orbital elements for satellites.',
+        notes: 'Replay positions should be computed from the best historical TLE for the target time.',
+    },
+    'firms-fires': {
+        source: 'nasa_firms',
+        status: 'unsupported',
+        history: 'NASA FIRMS exposes dated fire products.',
+        notes: 'The current backend connector only polls the latest active product; arbitrary historical data import is not wired yet.',
+    },
+    'gpsjam-history': {
+        source: 'gpsjam',
+        status: 'available',
+        history: 'GPSJam publishes daily historical CSV products.',
+        notes: 'Fetches and persists a daily GPSJam H3 CSV by YYYY-MM-DD date.',
+    },
+};
+
+const agentRateLimitMap = new Map<string, { count: number; resetAt: number }>();
+const AGENT_RATE_LIMIT_WINDOW_MS = 60_000;
+const AGENT_RATE_LIMIT_MAX = 240;
+
+function agentRateLimiter(req: any, res: any, next: any) {
+    const isRunEventStream = req.method === 'GET'
+        && /^\/api\/agents\/runs\/[^/]+\/events(?:\?|$)/.test(req.originalUrl || req.url || '');
+    if (isRunEventStream) {
+        next();
+        return;
+    }
+
+    const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+    const bucketKey = `${ip}:agent:${req.baseUrl || ''}`;
+    const now = Date.now();
+    const bucket = agentRateLimitMap.get(bucketKey);
+    if (!bucket || now >= bucket.resetAt) {
+        agentRateLimitMap.set(bucketKey, { count: 1, resetAt: now + AGENT_RATE_LIMIT_WINDOW_MS });
+    } else {
+        bucket.count++;
+        if (bucket.count > AGENT_RATE_LIMIT_MAX) {
+            recordRateLimitReject('agent', req.originalUrl || req.path || 'unknown');
+            res.status(429).json({ status: 'error', error: { code: 'RATE_LIMITED', message: 'Too many agent requests' } });
+            return;
+        }
+    }
+    next();
+}
+
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, bucket] of agentRateLimitMap) {
+        if (now >= bucket.resetAt) agentRateLimitMap.delete(key);
+    }
+}, 5 * 60_000);
+
+app.use('/api/agents', agentRateLimiter, requireAgentAccess);
+app.use('/api/agent-tools', agentRateLimiter, requireAgentAccess);
+
+app.post('/api/agent-tools/sql-query', async (req, res) => {
+    try {
+        if (!databaseService.isReady()) {
+            res.status(503).json({ status: 'error', error: { code: 'DATABASE_REQUIRED', message: 'Database is required for agent SQL' } });
+            return;
+        }
+        if (!agentReadonlyRoleReady) {
+            res.status(503).json({
+                status: 'error',
+                error: {
+                    code: 'AGENT_READONLY_ROLE_NOT_READY',
+                    message: agentReadonlyRoleError || 'app_agent_readonly is not granted to the backend database role',
+                },
+            });
+            return;
+        }
+        const sql = validateReadOnlyAgentSql(String(req.body?.sql || ''));
+        const reason = String(req.body?.reason || '').trim();
+        if (!reason) {
+            res.status(400).json({ status: 'error', error: { code: 'REASON_REQUIRED', message: 'Read-only SQL requires a reason' } });
+            return;
+        }
+        let limit = Number(req.body?.limit || 500);
+        if (!Number.isFinite(limit)) limit = 500;
+        limit = Math.max(1, Math.min(5000, Math.floor(limit)));
+        let timeoutMs = Number(req.body?.timeout_ms || req.body?.timeoutMs || 5000);
+        if (!Number.isFinite(timeoutMs)) timeoutMs = 5000;
+        timeoutMs = Math.max(100, Math.min(30000, Math.floor(timeoutMs)));
+
+        const rows = await databaseService.withTransaction(async () => {
+            await databaseService.query('SET TRANSACTION READ ONLY');
+            await databaseService.query('SET LOCAL ROLE app_agent_readonly');
+            // timeoutMs is integer-clamped above before interpolation.
+            await databaseService.query(`SET LOCAL statement_timeout = '${timeoutMs}ms'`);
+            const result = await databaseService.query(
+                `
+                    SELECT *
+                    FROM (${sql}) AS agent_q
+                    LIMIT ${limit}
+                `,
+            );
+            return result?.rows || [];
+        });
+
+        res.json({
+            status: 'ok',
+            data: { rows },
+            meta: {
+                limit,
+                timeout_ms: timeoutMs,
+                reason,
+            },
+            warnings: [],
+        });
+    } catch (err: any) {
+        if (err.code === '57014' || /statement timeout/i.test(err.message || '')) {
+            res.status(408).json({
+                status: 'error',
+                error: {
+                    code: 'SQL_TIMEOUT',
+                    message: err.message,
+                },
+            });
+            return;
+        }
+        if (err.code === '25006' || /read-only transaction/i.test(err.message || '')) {
+            res.status(403).json({
+                status: 'error',
+                error: {
+                    code: 'SQL_WRITE_REJECTED',
+                    message: err.message,
+                },
+            });
+            return;
+        }
+        if (/SQL|SELECT|statement|allowed|required/i.test(err.message || '')) {
+            res.status(400).json({ status: 'error', error: { code: 'SQL_REJECTED', message: err.message } });
+            return;
+        }
+        if (err.code === '42501' && /role/i.test(err.message || '')) {
+            res.status(503).json({
+                status: 'error',
+                error: {
+                    code: 'AGENT_READONLY_ROLE_NOT_GRANTED',
+                    message: err.message,
+                },
+            });
+            return;
+        }
+        if (err.code === '42501' || /permission denied/i.test(err.message || '')) {
+            res.status(403).json({
+                status: 'error',
+                error: {
+                    code: 'SQL_PERMISSION_DENIED',
+                    message: err.message,
+                },
+            });
+            return;
+        }
+        sendError(res, err);
+    }
+});
+
+app.post('/api/agent-tools/source-fetch', async (req, res) => {
+    try {
+        const operation = String(req.body?.operation || '').trim();
+        const args = req.body?.args && typeof req.body.args === 'object' ? req.body.args : {};
+        if (!operation) {
+            res.status(400).json({ status: 'error', error: { code: 'MISSING_OPERATION', message: 'Missing source fetch operation' } });
+            return;
+        }
+        if (operation === 'capabilities') {
+            res.json({
+                status: 'ok',
+                data: {
+                    operations: Object.entries(SOURCE_FETCH_CAPABILITIES)
+                        .map(([operationId, capability]) => ({
+                            operation: operationId,
+                            ...capability,
+                        }))
+                        .sort((a, b) => a.operation.localeCompare(b.operation)),
+                },
+                meta: {
+                    executed: false,
+                    count: Object.keys(SOURCE_FETCH_CAPABILITIES).length,
+                },
+            });
+            return;
+        }
+        const capability = SOURCE_FETCH_CAPABILITIES[operation];
+        if (!capability) {
+            res.status(400).json({
+                status: 'error',
+                error: {
+                    code: 'UNKNOWN_SOURCE_FETCH_OPERATION',
+                    message: `Unknown source fetch operation: ${operation}`,
+                },
+                data: {
+                    available_operations: Object.keys(SOURCE_FETCH_CAPABILITIES).sort(),
+                },
+            });
+            return;
+        }
+        if (capability.status === 'auth_required' || capability.status === 'unsupported') {
+            res.json({
+                status: capability.status,
+                data: {
+                    operation,
+                    args,
+                    capability,
+                },
+                meta: {
+                    executed: false,
+                },
+                warnings: [
+                    capability.status === 'auth_required'
+                        ? `Missing credentials for ${capability.source}.`
+                        : capability.notes,
+                ],
+            });
+            return;
+        }
+
+        const persist = args.persist !== false && args.dry_run !== true && args.dryRun !== true;
+        const from = parseIsoDateOrNull(args.from ? String(args.from) : undefined);
+        const to = parseIsoDateOrNull(args.to ? String(args.to) : undefined);
+
+        if (operation === 'gpsjam-history') {
+            const date = String(args.date || (from ? from.slice(0, 10) : '')).trim();
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_DATE', message: 'gpsjam-history requires --date YYYY-MM-DD or --from ISO timestamp' } });
+                return;
+            }
+            let fetched;
+            try {
+                fetched = await gpsJamService.fetchDate(date, { persist });
+            } catch (err: any) {
+                if (axios.isAxiosError(err) && err.response?.status === 404) {
+                    res.status(404).json({
+                        status: 'unsupported',
+                        error: {
+                            code: 'DATE_NOT_AVAILABLE',
+                            message: `GPSJam has no published daily CSV for ${date}.`,
+                        },
+                        data: { operation, source: capability.source, date },
+                        meta: { executed: false, persisted: false },
+                    });
+                    return;
+                }
+                throw err;
+            }
+            res.json({
+                status: 'ok',
+                data: {
+                    operation,
+                    source: capability.source,
+                    date: fetched.date,
+                    count: fetched.zones.length,
+                    rawBytes: fetched.rawBytes,
+                },
+                meta: { executed: true, persisted: persist, granularity: 'daily' },
+                warnings: ['GPSJam source granularity is daily, not sub-day.'],
+            });
+            return;
+        }
+
+        if (operation === 'cloudflare-outages') {
+            if (!from) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_WINDOW', message: 'cloudflare-outages requires --from ISO timestamp' } });
+                return;
+            }
+            const fetched = await cloudflareService.fetchOutagesWindow({ dateStart: from, dateEnd: to || undefined, persist });
+            res.json({
+                status: 'ok',
+                data: {
+                    operation,
+                    source: capability.source,
+                    count: fetched.records.length,
+                    rawCount: fetched.rawCount,
+                    rawPages: fetched.rawPages,
+                    metadata: fetched.metadata,
+                },
+                meta: { executed: true, persisted: persist },
+                warnings: fetched.metadata?.pagination?.truncated ? ['Cloudflare fetch hit pagination or malformed-page limit; result may be incomplete.'] : [],
+            });
+            return;
+        }
+
+        if (operation === 'gfw-events') {
+            if (!from || !to) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_WINDOW', message: 'gfw-events requires --from and --to ISO timestamps' } });
+                return;
+            }
+            const fetched = await gfwService.fetchEventsWindow({ startDate: from.slice(0, 10), endDate: to.slice(0, 10), persist });
+            res.json({
+                status: 'ok',
+                data: {
+                    operation,
+                    source: capability.source,
+                    count: fetched.records.length,
+                    rawCount: fetched.rawCount,
+                    rawPages: fetched.rawPages,
+                    metadata: fetched.metadata,
+                },
+                meta: { executed: true, persisted: persist, granularity: 'daily-window' },
+                warnings: fetched.metadata?.pagination?.truncated ? ['GFW fetch hit pagination or malformed-page limit; result may be incomplete.'] : [],
+            });
+            return;
+        }
+
+        res.json({
+            status: 'unsupported',
+            data: {
+                operation,
+                args,
+                capability,
+            },
+            meta: {
+                executed: false,
+                reason: 'No executable backend source-fetch adapter is implemented for this operation yet.',
+            },
+            warnings: [
+                'This endpoint does not fabricate missing historical data.',
+            ],
+        });
+    } catch (err: any) {
+        sendError(res, err);
+    }
+});
+
+function sendAgentToolError(res: express.Response, err: any): void {
+    const message = err?.message || 'Agent tool failed';
+    const status = /not found/i.test(message) ? 404
+        : /requires|must be|invalid|missing|bad/i.test(message) ? 400
+            : /not ready|required/i.test(message) ? 503
+                : 500;
+    res.status(status).json({
+        status: 'error',
+        error: {
+            code: status === 404 ? 'NOT_FOUND'
+                : status === 400 ? 'BAD_REQUEST'
+                    : status === 503 ? 'UNAVAILABLE'
+                        : 'AGENT_TOOL_FAILED',
+            message,
+        },
+    });
+}
+
+app.get('/api/agent-tools/catalog/describe', async (req, res) => {
+    try {
+        const data = await agentToolService.describeCatalog({
+            layer: req.query.layer,
+            source: req.query.source,
+        });
+        res.json({ status: 'ok', data, warnings: [] });
+    } catch (err: any) {
+        sendAgentToolError(res, err);
+    }
+});
+
+app.post('/api/agent-tools/resolve/region', async (req, res) => {
+    try {
+        const data = await agentToolService.resolveRegion(req.body || {});
+        res.json({ status: 'ok', data, warnings: [] });
+    } catch (err: any) {
+        sendAgentToolError(res, err);
+    }
+});
+
+app.post('/api/agent-tools/resolve/entity', async (req, res) => {
+    try {
+        const data = await agentToolService.resolveEntity(req.body || {});
+        res.json({ status: 'ok', data, warnings: [] });
+    } catch (err: any) {
+        sendAgentToolError(res, err);
+    }
+});
+
+app.post('/api/agent-tools/geometry/aoi', async (req, res) => {
+    try {
+        const data = await agentToolService.createAoi(req.body || {});
+        res.json({ status: 'ok', data, warnings: [] });
+    } catch (err: any) {
+        sendAgentToolError(res, err);
+    }
+});
+
+app.post('/api/agent-tools/query/aggregate', async (req, res) => {
+    try {
+        const data = await agentToolService.aggregate(req.body || {});
+        res.json({ status: 'ok', data, warnings: [] });
+    } catch (err: any) {
+        sendAgentToolError(res, err);
+    }
+});
+
+app.post('/api/agent-tools/geo/corridor', async (req, res) => {
+    try {
+        const data = await agentToolService.corridorSearch(req.body || {});
+        res.json({ status: 'ok', data, warnings: [] });
+    } catch (err: any) {
+        sendAgentToolError(res, err);
+    }
+});
+
+app.get('/api/agent-tools/selections/:selectionId/preview', async (req, res) => {
+    try {
+        const data = await agentToolService.previewSelection(req.params.selectionId);
+        res.json({ status: 'ok', data, warnings: [] });
+    } catch (err: any) {
+        sendAgentToolError(res, err);
+    }
+});
+
+app.get('/api/agent-tools/view/summary', async (_req, res) => {
+    try {
+        const data = await agentToolService.getViewSummary();
+        res.json({ status: 'ok', data, warnings: [] });
+    } catch (err: any) {
+        sendAgentToolError(res, err);
+    }
+});
+
+app.post('/api/agent-tools/map-command', async (req, res) => {
+    try {
+        const command = String(req.body?.command || '').trim();
+        const payload = req.body?.payload && typeof req.body.payload === 'object' ? req.body.payload : {};
+        if (!command) {
+            res.status(400).json({ status: 'error', error: { code: 'MISSING_COMMAND', message: 'Missing map command' } });
+            return;
+        }
+
+        if (command === 'selection.apply') {
+            const layer = String(payload.layer || '').trim();
+            const selectionId = String(payload.selection_id || payload.selectionId || '').trim();
+            const mode = ['replace', 'append', 'exclude', 'only'].includes(payload.mode) ? payload.mode : 'only';
+            if (!layer || !selectionId) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_SELECTION_ACTION', message: 'selection.apply requires layer and selection_id' } });
+                return;
+            }
+            const state = await viewControlService.applySelection(layer, selectionId, mode);
+            res.json({ status: 'ok', data: { command, layer, selection_id: selectionId, mode, state } });
+            return;
+        }
+
+        if (command === 'selection.clear') {
+            const layer = String(payload.layer || '').trim();
+            if (!layer) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_SELECTION_CLEAR', message: 'selection.clear requires layer' } });
+                return;
+            }
+            const state = await viewControlService.clearSelection(layer);
+            res.json({ status: 'ok', data: { command, layer, state } });
+            return;
+        }
+
+        const state = await viewControlService.patchState({
+            agentCommand: {
+                command,
+                payload,
+                createdAt: new Date().toISOString(),
+            },
+        });
+        res.json({
+            status: 'ok',
+            data: {
+                command,
+                payload,
+                state,
+            },
+            warnings: [
+                'Command stored in view state. Live browser execution happens through the Agent Panel action handler.',
+            ],
+        });
+    } catch (err: any) {
+        sendError(res, err);
+    }
+});
+
+app.get('/api/agents/providers', (_req, res) => {
+    try {
+        res.json({
+            status: 'ok',
+            data: agentRuntimeService.listProviders(),
+        });
+    } catch (err: any) {
+        sendError(res, err);
+    }
+});
+
+app.get('/api/agents/sessions', async (_req, res) => {
+    try {
+        res.json({
+            status: 'ok',
+            data: await agentRuntimeService.listSessions(),
+        });
+    } catch (err: any) {
+        if (/Database is required/i.test(err.message || '')) {
+            res.status(503).json({ status: 'error', error: { code: 'DATABASE_REQUIRED', message: err.message } });
+            return;
+        }
+        sendError(res, err);
+    }
+});
+
+app.post('/api/agents/sessions', async (req, res) => {
+    try {
+        const provider = String(req.body?.provider || 'claude_code').trim() as AgentProvider;
+        const metadata = req.body?.metadata && typeof req.body.metadata === 'object' ? req.body.metadata : {};
+        const session = await agentRuntimeService.createSession(provider, metadata);
+        res.json({ status: 'ok', data: session });
+    } catch (err: any) {
+        if (/not installed|Unknown agent provider|Database is required/i.test(err.message || '')) {
+            res.status(/Database is required/i.test(err.message || '') ? 503 : 400).json({
+                status: 'error',
+                error: { code: 'AGENT_SESSION_CREATE_FAILED', message: err.message },
+            });
+            return;
+        }
+        sendError(res, err);
+    }
+});
+
+app.get('/api/agents/sessions/:sessionId/messages', async (req, res) => {
+    try {
+        const session = await agentRuntimeService.getSession(req.params.sessionId);
+        if (!session) {
+            res.status(404).json({ status: 'error', error: { code: 'SESSION_NOT_FOUND', message: 'Agent session not found' } });
+            return;
+        }
+        const messages = await agentRuntimeService.listMessages(req.params.sessionId);
+        res.json({ status: 'ok', data: { session, messages } });
+    } catch (err: any) {
+        sendError(res, err);
+    }
+});
+
+app.post('/api/agents/sessions/:sessionId/messages', async (req, res) => {
+    try {
+        const prompt = String(req.body?.content || req.body?.prompt || '').trim();
+        if (!prompt) {
+            res.status(400).json({ status: 'error', error: { code: 'PROMPT_REQUIRED', message: 'Prompt is required' } });
+            return;
+        }
+        const result = await agentRuntimeService.startRun(req.params.sessionId, prompt);
+        res.json({ status: 'ok', data: result });
+    } catch (err: any) {
+        if (/not found|Prompt is required|Database is required|already has a running request|cannot resume sessions/i.test(err.message || '')) {
+            res.status(/not found/i.test(err.message || '') ? 404 : 400).json({
+                status: 'error',
+                error: { code: 'AGENT_RUN_FAILED_TO_START', message: err.message },
+            });
+            return;
+        }
+        sendError(res, err);
+    }
+});
+
+app.post('/api/agents/runs/:runId/cancel', async (req, res) => {
+    try {
+        await agentRuntimeService.cancelRun(req.params.runId);
+        res.json({ status: 'ok', data: { run_id: req.params.runId, cancelled: true } });
+    } catch (err: any) {
+        sendError(res, err);
+    }
+});
+
+app.get('/api/agents/runs/:runId/events', async (req, res) => {
+    try {
+        const after = Number(req.query.after || req.headers['last-event-id'] || '0');
+        const afterSequence = Number.isFinite(after) && after > 0 ? Math.floor(after) : 0;
+        const run = await agentRuntimeService.getRun(req.params.runId);
+        if (!run) {
+            res.status(404).json({ status: 'error', error: { code: 'RUN_NOT_FOUND', message: 'Agent run not found' } });
+            return;
+        }
+
+        res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache, no-transform',
+            Connection: 'keep-alive',
+            'X-Accel-Buffering': 'no',
+        });
+        if (typeof (res as any).flushHeaders === 'function') (res as any).flushHeaders();
+
+        const seenSequences = new Set<string>();
+        const bufferedLiveEvents: any[] = [];
+        let passThroughLive = false;
+        let unsubscribe = () => {};
+        let heartbeat: ReturnType<typeof setInterval> | null = null;
+        let closed = false;
+
+        const responseWritable = () => !res.writableEnded && !res.destroyed;
+        const closeStream = (status: string) => {
+            if (closed) return;
+            closed = true;
+            if (heartbeat) clearInterval(heartbeat);
+            unsubscribe();
+            if (responseWritable()) {
+                res.write('event: stream.closed\n');
+                res.write(`data: ${JSON.stringify({ run_id: req.params.runId, status })}\n\n`);
+                res.end();
+            }
+        };
+
+        const writeEvent = (event: any) => {
+            if (closed || !responseWritable()) return;
+            const sequence = String(event.sequence_no || '');
+            if (sequence && seenSequences.has(sequence)) return;
+            if (sequence) seenSequences.add(sequence);
+            res.write(`event: ${event.event_type}\n`);
+            res.write(`id: ${event.sequence_no}\n`);
+            res.write(`data: ${JSON.stringify(event)}\n\n`);
+            if (event.event_type === 'run.completed' || event.event_type === 'run.failed') {
+                const status = String(event.payload?.status || (event.event_type === 'run.completed' ? 'completed' : 'error'));
+                closeStream(status);
+            }
+        };
+
+        if (!['completed', 'cancelled', 'error'].includes(run.status)) {
+            unsubscribe = agentRuntimeService.subscribe(req.params.runId, (event) => {
+                if (passThroughLive) writeEvent(event);
+                else bufferedLiveEvents.push(event);
+            });
+        }
+
+        const existing = await agentRuntimeService.listRunEvents(req.params.runId, afterSequence);
+        for (const event of existing) writeEvent(event);
+        if (closed) return;
+
+        passThroughLive = true;
+        for (const event of bufferedLiveEvents) writeEvent(event);
+        bufferedLiveEvents.length = 0;
+        if (closed) return;
+
+        const lastSequence = [...seenSequences].reduce((max, value) => {
+            const n = Number(value);
+            return Number.isFinite(n) ? Math.max(max, n) : max;
+        }, afterSequence);
+        res.write('event: stream.cursor\n');
+        res.write(`data: ${JSON.stringify({ run_id: req.params.runId, after: lastSequence })}\n\n`);
+
+        const latestRun = await agentRuntimeService.getRun(req.params.runId);
+        if (!latestRun || ['completed', 'cancelled', 'error'].includes(latestRun.status)) {
+            closeStream(latestRun?.status || run.status);
+            return;
+        }
+
+        heartbeat = setInterval(() => {
+            if (closed) return;
+            res.write('event: heartbeat\n');
+            res.write(`data: ${JSON.stringify({ t: new Date().toISOString() })}\n\n`);
+        }, 15_000);
+
+        req.on('close', () => {
+            closeStream('client_closed');
+        });
+    } catch (err: any) {
+        if (!res.headersSent) sendError(res, err);
+        else res.end();
     }
 });
 
@@ -2963,6 +3925,10 @@ app.use((err: any, req: express.Request, res: express.Response, _next: express.N
 async function bootstrap() {
     console.log('Initializing backend services...');
     await databaseService.init();
+    if (databaseService.isReady()) {
+        await verifyAgentReadonlyRole();
+        await agentRuntimeService.recoverInterruptedRuns('backend_restart');
+    }
     await catalogBootstrapService.seed();
     // Spectator must init before SatelliteService so the TLE enrichment
     // step sees a populated catalog on first boot. If the Spectator fetch
