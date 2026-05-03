@@ -53,6 +53,10 @@ type LaunchConfig = {
     resumeMode: 'native' | 'new' | 'unsupported';
 };
 
+type StartRunOptions = {
+    requestContext?: Record<string, any> | null;
+};
+
 type ProviderLineState = {
     getAssistantText: () => string;
     setAssistantText: (value: string) => void;
@@ -65,7 +69,6 @@ const ACTION_BLOCK_RE_LIST = [
     /```ACTIONS_JSON\s*([\s\S]*?)\s*```/i,
     /ACTIONS_JSON:?\s*```(?:json)?\s*([\s\S]*?)\s*```/i,
 ];
-const INTERNAL_NOISE_RE = /(bash[- ]?guard|shell guard|allowed-tools|tool plumbing|alternative entrypoint|альтернативн.*entrypoint|quoting|квотирован|single-quote|double quote|пайп|кавычк|\$\$|backend-api|eval|pid|sql\s+with\s+quotes|actions_json|об[её]ртка|сыр(ой|ого)\s+sql|запускаю без них|посмотрю, как|api трактует bbox|возвращ[её]нные результаты пришли|перезапрос с правильным порядком|^понятно:?$|^понимаю проблему:?$|^изучаю\b|^анализирую\b|^смотрю\b|^проверяю\b|^получаю\b|^создаю\b|^готовлю\b|^проверю history-плотность|^готовлю отч[её]т|^i have clear coverage\.?$|^let me\b|^now i\b|^i'll\b|^i will\b|^i need\b|^next\b.*\b(check|query|build|create)\b|^got\b.*\bcoverage\b)/i;
 const DEFAULT_CLAUDE_ALLOWED_TOOLS = [
     'Bash(./.claude/skills/platform-cli/scripts/worldview-cli.sh *)',
     'Bash(./.agents/tools/backend-api.sh *)',
@@ -117,21 +120,6 @@ const CLAUDE_BARE_AUTH_ENV_KEYS = [
     'ANTHROPIC_API_KEY',
     'CLAUDE_CODE_API_KEY_HELPER_TTL_MS',
 ];
-const HIDDEN_PROVIDER_TOOLS = new Set([
-    'read',
-    'write',
-    'edit',
-    'multiedit',
-    'glob',
-    'grep',
-    'todowrite',
-    'toolsearch',
-    'webfetch',
-    'websearch',
-    'notebookedit',
-    'lsp',
-]);
-
 function isCodexProviderEnabled(): boolean {
     return process.env.AGENT_ENABLE_CODEX_PROVIDER === 'true';
 }
@@ -192,25 +180,45 @@ function extractActions(content: string): ParsedActions {
     }
 }
 
-function cleanAssistantVisibleText(text: string): string {
-    const withBreaks = text
-        .replace(/H3-хексов/gi, 'H3-зон')
-        .replace(/H3-хексы/gi, 'H3-зоны')
-        .replace(/H3-хекс/gi, 'H3-зона')
-        .replace(/хексов/gi, 'зон')
-        .replace(/хексы/gi, 'зоны')
-        .replace(/хекс/gi, 'зона')
-        .replace(/(Bash guard|bash-guard|AI Worldview bash guard)/gi, '\n$1')
-        .replace(/(Понятно: bash|Понимаю проблему: bash|Используем структурные команды CLI|Важное открытие: API трактует bbox)/gi, '\n$1')
-        .replace(/(Теперь смотрю|Получил реальные|Сводка:|###|##|- )/g, '\n$1');
-    return withBreaks
-        .replace(/(\|[^\n]*\|)\n\s*\n(?=\s*\|)/g, '$1\n')
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter((line) => !line || !INTERNAL_NOISE_RE.test(line))
-        .join('\n')
-        .replace(/\n{3,}/g, '\n\n')
-        .trim();
+function normalizeAssistantVisibleText(text: string): string {
+    return String(text || '').trim();
+}
+
+function finalAssistantTextAfterLastTool(events: AgentRunEventRow[], fallback: string): string {
+    const ordered = [...events].sort((a, b) => Number(a.sequence_no || 0) - Number(b.sequence_no || 0));
+    const lastToolSequence = ordered.reduce((max, event) => (
+        event.event_type === 'tool.started' || event.event_type === 'tool.completed'
+            ? Math.max(max, Number(event.sequence_no || 0))
+            : max
+    ), -1);
+    if (lastToolSequence < 0) return fallback;
+    const finalText = ordered
+        .filter((event) => event.event_type === 'message.delta' && Number(event.sequence_no || 0) > lastToolSequence)
+        .map((event) => String(event.payload?.text || ''))
+        .join('');
+    return finalText.trim() ? finalText : fallback;
+}
+
+function sanitizeJsonForPrompt(value: any, maxChars = 6000): Record<string, any> | null {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    try {
+        const json = JSON.stringify(value);
+        if (json.length > maxChars) {
+            return {
+                truncated: true,
+                note: `Request context exceeded ${maxChars} characters and was omitted.`,
+            };
+        }
+        return JSON.parse(json);
+    } catch {
+        return null;
+    }
+}
+
+function formatRequestContextForPrompt(value: any): string {
+    const context = sanitizeJsonForPrompt(value);
+    if (!context) return '';
+    return JSON.stringify(context, null, 2);
 }
 
 function findActionBlockStart(content: string): number {
@@ -276,10 +284,6 @@ function summarizeToolName(toolName: string, command: string): string {
     return 'Bash';
 }
 
-function isHiddenProviderTool(toolName: string): boolean {
-    return HIDDEN_PROVIDER_TOOLS.has(String(toolName || '').trim().toLowerCase());
-}
-
 function truthyEnv(value: string | undefined): boolean {
     return /^(1|true|yes|on)$/i.test(String(value || '').trim());
 }
@@ -294,6 +298,7 @@ function hasClaudeBareAuth(): boolean {
 export class AgentRuntimeService {
     private readonly liveRuns = new Map<string, LiveRun>();
     private providerCache: ProviderInfo[] | null = null;
+    private instructionDocsCache: string | null = null;
 
     constructor(
         private readonly repository: AgentRepository,
@@ -363,7 +368,7 @@ export class AgentRuntimeService {
             const runId = String(message.metadata?.run_id || '');
             const events = runId ? eventsByRun.get(runId) || [] : [];
             const cleanedContent = message.role === 'assistant'
-                ? cleanAssistantVisibleText(message.content || '')
+                ? normalizeAssistantVisibleText(message.content || '')
                 : message.content;
             const baseMessage = cleanedContent === message.content ? message : { ...message, content: cleanedContent };
             if (message.role !== 'assistant' || events.length === 0) return baseMessage;
@@ -403,7 +408,7 @@ export class AgentRuntimeService {
         return this.repository.listRunEvents(runId, afterSequence);
     }
 
-    async startRun(sessionId: string, userPrompt: string): Promise<{ runId: string }> {
+    async startRun(sessionId: string, userPrompt: string, options: StartRunOptions = {}): Promise<{ runId: string }> {
         const session = await this.repository.getSession(sessionId);
         if (!session) throw new Error('Agent session not found');
         if (!userPrompt.trim()) throw new Error('Prompt is required');
@@ -412,7 +417,8 @@ export class AgentRuntimeService {
             throw new Error('Agent session already has a running request');
         }
 
-        const launch = this.buildLaunch(session, userPrompt);
+        const requestContext = sanitizeJsonForPrompt(options.requestContext);
+        const launch = this.buildLaunch(session, userPrompt, { requestContext });
         if (launch.resumeMode === 'unsupported') {
             throw new Error(`Agent provider ${session.provider} cannot resume sessions with the current AI Worldview configuration`);
         }
@@ -420,11 +426,15 @@ export class AgentRuntimeService {
         const { run } = await this.repository.createRunForPrompt({
             sessionId,
             prompt: userPrompt,
-            messageMetadata: { source: 'frontend' },
+            messageMetadata: {
+                source: 'frontend',
+                requestContext,
+            },
             runMetadata: {
                 provider: session.provider,
                 startedBy: 'frontend',
                 resumeMode: launch.resumeMode,
+                requestContext,
             },
         });
         const emitter = new EventEmitter();
@@ -556,8 +566,8 @@ export class AgentRuntimeService {
         });
     }
 
-    buildLaunch(session: AgentSessionRow, userPrompt: string): LaunchConfig {
-        const prompt = this.composePrompt(session, userPrompt);
+    buildLaunch(session: AgentSessionRow, userPrompt: string, options: StartRunOptions = {}): LaunchConfig {
+        const prompt = this.composePrompt(session, userPrompt, options);
         if (session.provider === 'claude_code') {
             const providerSessionId = ensureUuid(session.provider_session_id);
             const useBare = process.env.AGENT_CLAUDE_BARE
@@ -661,22 +671,6 @@ export class AgentRuntimeService {
 
         for (const event of ordered) {
             const payload = event.payload || {};
-            if (event.event_type === 'message.delta') {
-                const text = String(payload.text || '');
-                if (!text) continue;
-                const last = parts[parts.length - 1];
-                if (last?.type === 'text') {
-                    parts[parts.length - 1] = { ...last, text: `${last.text || ''}${text}` };
-                } else {
-                    parts.push({
-                        id: `${runId}:${event.sequence_no}:text`,
-                        type: 'text',
-                        text,
-                    });
-                }
-                continue;
-            }
-
             const isTool = event.event_type === 'tool.started' || event.event_type === 'tool.completed';
             if (!isTool) continue;
 
@@ -688,7 +682,6 @@ export class AgentRuntimeService {
             } else if (event.event_type === 'tool.completed' && toolUseId && toolNamesById.has(toolUseId)) {
                 name = toolNamesById.get(toolUseId) || name;
             }
-            if (isHiddenProviderTool(name) || isHiddenProviderTool(payload.tool_name)) continue;
             const text = `${state === 'started' ? 'started' : 'completed'} ${name}`;
             parts.push({
                 id: `${runId}:${event.sequence_no}:${event.event_type}`,
@@ -701,76 +694,61 @@ export class AgentRuntimeService {
             });
         }
 
-        const rawText = parts
-            .filter((part) => part.type === 'text')
-            .map((part) => part.text || '')
-            .join('');
-        const actionStart = findActionBlockStart(rawText);
-        if (actionStart < 0) {
-            if (parts.length === 0 && finalContent) {
-                return [{
-                    id: `${runId}:final:text`,
-                    type: 'text',
-                    text: finalContent,
-                }];
-            }
-            return parts;
-        }
-
-        let remainingText = actionStart;
-        const visibleParts: AgentStreamPart[] = [];
-        for (const part of parts) {
-            if (part.type !== 'text') {
-                if (remainingText > 0) visibleParts.push(part);
-                continue;
-            }
-            const text = part.text || '';
-            if (remainingText <= 0) continue;
-            const visibleText = text.slice(0, remainingText);
-            remainingText = Math.max(0, remainingText - text.length);
-            if (visibleText) visibleParts.push({ ...part, text: visibleText });
-        }
-
-        const cleanedParts = trimTrailingText(visibleParts);
-        if (cleanedParts.length === 0 && finalContent) {
-            cleanedParts.push({
+        if (finalContent) {
+            parts.push({
                 id: `${runId}:final:text`,
                 type: 'text',
                 text: finalContent,
             });
         }
-        return cleanedParts;
+        return trimTrailingText(parts);
     }
 
-    private composePrompt(session: AgentSessionRow, userPrompt: string): string {
+    private composePrompt(session: AgentSessionRow, userPrompt: string, options: StartRunOptions = {}): string {
         const providerInstruction = session.provider === 'claude_code'
             ? 'This is a non-interactive Claude Code subprocess launched by AI Worldview.'
             : 'This is a non-interactive Codex CLI subprocess launched by AI Worldview.';
+        const productInstructions = this.loadProductInstructionDocs();
+        const requestContext = formatRequestContextForPrompt(options.requestContext);
         return [
             'You are an AI Worldview OSINT agent.',
             '',
             providerInstruction,
-            'The instructions in this prompt are authoritative for this product chat. Do not rely on repository instructions, external memory, skills discovery, or provider file tools.',
-            'Use only the approved AI Worldview command entrypoints for investigation:',
-            '- ./.claude/skills/platform-cli/scripts/worldview-cli.sh for catalog, layer status, local data search, tracks, coverage, and source capabilities.',
-            '- ./.agents/tools/sql-readonly.sh for read-only PostgreSQL analysis. For complex SQL use --sql-b64 so shell quoting never becomes part of the task.',
-            '- ./.agents/tools/source-fetch.sh only when source capabilities mark a provider operation as available or auth_required.',
-            '- ./.agents/tools/backend-api.sh for AI Worldview backend API calls.',
-            '- ./.agents/tools/map-command.sh for selections, annotations, filters, replay windows, camera commands, and presentation actions.',
-            'Do not use provider file tools such as Read, Write, Edit, Glob, Grep, TodoWrite, ToolSearch, WebFetch, or WebSearch. Do not create temporary files.',
-            'Do not mutate the database directly.',
-            'Use read-only SQL freely when it is the most direct way to analyze local data.',
-            'Do not narrate shell guard, quoting, retries, or internal tool failures to the user; switch tools and report only product-relevant data limits.',
-            'For AI Worldview query/replay bbox arguments use south,west,north,east. For geometry/AOI/map payloads use west,south,east,north or GeoJSON [lng,lat] coordinates as documented.',
-            'When local data exists, lead with the analytic conclusion and the local evidence. Separate correlation from causation.',
-            'State source limitations, missing history, and provider-plan constraints clearly, but do not make the answer mainly about limitations.',
-            'Only recommend data expansion when source capabilities say it is available or auth_required. Treat planned or unsupported capabilities as product roadmap, not a user recommendation.',
-            'Use one ACTIONS_JSON block at the end when the user should inspect results visually. Valid action types include map.fly_to, map.annotate, replay.play_window, selection.apply, layer.set_visibility, layer.filter, and overlay.draw_geometry.',
-            'Never mention ACTIONS_JSON, tool names, shell commands, retries, provider internals, or implementation steps in visible answer text.',
+            'The product contract below is loaded from AI Worldview Markdown instructions and skills. Use it as the source of truth for data access, source capability checks, map actions and replay presentation.',
             '',
+            '<AI_WORLDVIEW_MARKDOWN_INSTRUCTIONS>',
+            productInstructions,
+            '</AI_WORLDVIEW_MARKDOWN_INSTRUCTIONS>',
+            '',
+            ...(requestContext ? [
+                '<AI_WORLDVIEW_REQUEST_CONTEXT>',
+                requestContext,
+                '</AI_WORLDVIEW_REQUEST_CONTEXT>',
+                '',
+            ] : []),
             'User request:',
             userPrompt,
         ].join('\n');
+    }
+
+    private loadProductInstructionDocs(): string {
+        if (this.instructionDocsCache !== null) return this.instructionDocsCache;
+        const files = [
+            'AGENTS.md',
+            '.agents/skills/worldview-data/SKILL.md',
+            '.agents/skills/worldview-sources/SKILL.md',
+            '.agents/skills/worldview-map-control/SKILL.md',
+        ];
+        const docs = files.map((relativePath) => {
+            const filePath = path.join(this.repoRoot, relativePath);
+            try {
+                return `# ${relativePath}\n\n${fs.readFileSync(filePath, 'utf8').trim()}`;
+            } catch (err: any) {
+                return `# ${relativePath}\n\nInstruction file unavailable: ${err?.message || 'read failed'}`;
+            }
+        });
+        this.instructionDocsCache = docs.join('\n\n---\n\n');
+        return this.instructionDocsCache;
     }
 
     private buildChildEnv(session: AgentSessionRow, runId: string): NodeJS.ProcessEnv {
@@ -1082,9 +1060,13 @@ export class AgentRuntimeService {
         if (live?.completed) return;
         if (live) live.completed = true;
 
-        const parsedRaw = extractActions(assistantText);
+        const events = await this.repository.listRunEvents(runId).catch(() => [] as AgentRunEventRow[]);
+        const finalAssistantText = status === 'completed'
+            ? finalAssistantTextAfterLastTool(events, assistantText)
+            : assistantText;
+        const parsedRaw = extractActions(finalAssistantText);
         const parsed: ParsedActions = {
-            content: cleanAssistantVisibleText(parsedRaw.content),
+            content: normalizeAssistantVisibleText(parsedRaw.content),
             contentJson: parsedRaw.contentJson,
         };
         if (parsed.content || parsed.contentJson) {

@@ -906,6 +906,24 @@ const SOURCE_FETCH_CAPABILITIES: Record<string, {
         history: 'GPSJam publishes daily historical CSV products.',
         notes: 'Fetches and persists a daily GPSJam H3 CSV by YYYY-MM-DD date.',
     },
+    'nasa-gibs-imagery': {
+        source: 'nasa_gibs',
+        status: 'available',
+        history: 'NASA GIBS/Worldview provides date-addressable public WMTS/WMS imagery layers.',
+        notes: 'UI can display time-aware NASA GIBS imagery overlays. This source-fetch operation is metadata-only; scene search is a separate future tool.',
+    },
+    'copernicus-sentinel-imagery': {
+        source: 'copernicus',
+        status: process.env.COPERNICUS_CLIENT_ID && process.env.COPERNICUS_CLIENT_SECRET ? 'planned' : 'auth_required',
+        history: 'Copernicus Data Space can search Sentinel scenes by AOI/time after registration/auth.',
+        notes: 'Not executable yet. Needed for higher-resolution scene metadata, quicklook/render and Sentinel-1/Sentinel-2 overlays.',
+    },
+    'landsat-stac-imagery': {
+        source: 'usgs_landsat',
+        status: 'planned',
+        history: 'USGS Landsat STAC supports historical AOI/time scene search.',
+        notes: 'Not executable yet. Useful for historical corroboration and before/after analysis, not freshest global imagery.',
+    },
 };
 
 const agentRateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -1197,6 +1215,48 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
             return;
         }
 
+        if (operation === 'nasa-gibs-imagery') {
+            const date = String(args.date || args.time || (from ? from.slice(0, 10) : new Date().toISOString().slice(0, 10))).slice(0, 10);
+            const layer = String(args.layer || 'viirs_true_color').trim();
+            res.json({
+                status: 'ok',
+                data: {
+                    operation,
+                    source: capability.source,
+                    imagery_kind: 'date_addressable_wmts',
+                    date,
+                    requested_layer: layer,
+                    supported_layer_aliases: {
+                        modis_true_color: 'MODIS_Terra_CorrectedReflectance_TrueColor',
+                        terra_true_color: 'MODIS_Terra_CorrectedReflectance_TrueColor',
+                        aqua_true_color: 'MODIS_Aqua_CorrectedReflectance_TrueColor',
+                        viirs_true_color: 'VIIRS_SNPP_CorrectedReflectance_TrueColor',
+                        viirs_noaa20_true_color: 'VIIRS_NOAA20_CorrectedReflectance_TrueColor',
+                        viirs_noaa21_true_color: 'VIIRS_NOAA21_CorrectedReflectance_TrueColor',
+                    },
+                    ui_actions: ['imagery.show_layer', 'imagery.show_scene', 'imagery.compare', 'imagery.clear'],
+                    action_payload_example: {
+                        type: 'imagery.show_layer',
+                        payload: {
+                            source: 'nasa_gibs',
+                            layer,
+                            date,
+                            opacity: 0.7,
+                        },
+                    },
+                },
+                meta: {
+                    executed: false,
+                    persisted: false,
+                    raw_pixels_downloaded: false,
+                },
+                warnings: [
+                    'NASA GIBS is a context imagery overlay. It does not import raw pixels into canonical replay storage.',
+                ],
+            });
+            return;
+        }
+
         res.json({
             status: 'unsupported',
             data: {
@@ -1343,6 +1403,62 @@ app.post('/api/agent-tools/map-command', async (req, res) => {
             return;
         }
 
+        if (command === 'layer.filter') {
+            const layer = String(payload.layer || payload.layer_id || '').trim();
+            const mode = ['replace', 'append', 'exclude', 'only'].includes(payload.mode) ? payload.mode : 'only';
+            const predicate = payload.predicate && typeof payload.predicate === 'object'
+                ? payload.predicate
+                : payload.filter && typeof payload.filter === 'object'
+                    ? payload.filter
+                    : {
+                        ...(Array.isArray(payload.bbox) ? { bbox: payload.bbox } : {}),
+                        ...(payload.from ? { from: payload.from } : {}),
+                        ...(payload.to ? { to: payload.to } : {}),
+                        ...(payload.observed_from ? { observed_from: payload.observed_from } : {}),
+                        ...(payload.observed_to ? { observed_to: payload.observed_to } : {}),
+                        ...(Array.isArray(payload.ids) ? { ids: payload.ids.slice(0, 5000) } : {}),
+                        ...(Array.isArray(payload.entity_ids) ? { ids: payload.entity_ids.slice(0, 5000) } : {}),
+                        ...(payload.subtype ? { subtype: payload.subtype } : {}),
+                        ...(Array.isArray(payload.subtype_in) ? { subtype_in: payload.subtype_in } : {}),
+                    };
+            if (!layer) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_LAYER_FILTER', message: 'layer.filter requires layer' } });
+                return;
+            }
+            if (Object.keys(predicate).length === 0 && !payload.geometry) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_LAYER_FILTER', message: 'layer.filter requires predicate, filter, bbox, ids or geometry' } });
+                return;
+            }
+            const selection = await selectionRepository.saveSelection({
+                selectionId: typeof payload.selection_id === 'string' ? payload.selection_id
+                    : typeof payload.selectionId === 'string' ? payload.selectionId
+                        : undefined,
+                layerId: layer,
+                selectionMode: 'filter',
+                predicate,
+                geometryJson: payload.geometry && typeof payload.geometry === 'object' ? payload.geometry : null,
+                metadata: {
+                    source: 'agent-layer-filter',
+                    label: payload.label || null,
+                    createdBy: 'agent',
+                },
+            });
+            const state = await viewControlService.applySelection(layer, selection.selection_id, mode);
+            res.json({
+                status: 'ok',
+                data: {
+                    command,
+                    layer,
+                    selection_id: selection.selection_id,
+                    mode,
+                    predicate,
+                    geometry: selection.geometry_json,
+                    state,
+                },
+            });
+            return;
+        }
+
         const state = await viewControlService.patchState({
             agentCommand: {
                 command,
@@ -1431,7 +1547,10 @@ app.post('/api/agents/sessions/:sessionId/messages', async (req, res) => {
             res.status(400).json({ status: 'error', error: { code: 'PROMPT_REQUIRED', message: 'Prompt is required' } });
             return;
         }
-        const result = await agentRuntimeService.startRun(req.params.sessionId, prompt);
+        const requestContext = req.body?.context && typeof req.body.context === 'object' && !Array.isArray(req.body.context)
+            ? req.body.context
+            : null;
+        const result = await agentRuntimeService.startRun(req.params.sessionId, prompt, { requestContext });
         res.json({ status: 'ok', data: result });
     } catch (err: any) {
         if (/not found|Prompt is required|Database is required|already has a running request|cannot resume sessions/i.test(err.message || '')) {

@@ -10,6 +10,7 @@ import {
     MessageSquare,
     Play,
     Plus,
+    Satellite,
     Send,
     Square,
     X,
@@ -65,21 +66,11 @@ const ACTION_BLOCK_RE_LIST = [
     /```ACTIONS_JSON\s*([\s\S]*?)\s*```/i,
     /ACTIONS_JSON:?\s*```(?:json)?\s*([\s\S]*?)\s*```/i,
 ];
-
-const INTERNAL_NOISE_RE = /(bash[- ]?guard|shell guard|allowed-tools|tool plumbing|alternative entrypoint|альтернативн.*entrypoint|quoting|квотирован|single-quote|double quote|пайп|кавычк|\$\$|backend-api|eval|pid|sql\s+with\s+quotes|actions_json|об[её]ртка|сыр(ой|ого)\s+sql|запускаю без них|посмотрю, как|api трактует bbox|возвращ[её]нные результаты пришли|перезапрос с правильным порядком|^понятно:?$|^понимаю проблему:?$|^изучаю\b|^анализирую\b|^смотрю\b|^проверяю\b|^получаю\b|^создаю\b|^готовлю\b|^проверю history-плотность|^готовлю отч[её]т|^i have clear coverage\.?$|^let me\b|^now i\b|^i'll\b|^i will\b|^i need\b|^next\b.*\b(check|query|build|create)\b|^got\b.*\bcoverage\b)/i;
-const HIDDEN_PROVIDER_TOOL_NAMES = new Set([
-    'read',
-    'write',
-    'edit',
-    'multiedit',
-    'glob',
-    'grep',
-    'todowrite',
-    'toolsearch',
-    'webfetch',
-    'websearch',
-    'notebookedit',
-]);
+const ACTION_BLOCK_START_RE_LIST = [
+    /<ACTIONS_JSON\b/i,
+    /```ACTIONS_JSON\b/i,
+    /ACTIONS_JSON:?\s*```(?:json)?/i,
+];
 
 const LAYER_KEY_ALIASES: Record<string, string> = {
     aircraft: 'aviation',
@@ -149,6 +140,15 @@ const LEGEND_NODE_ALIASES: Record<string, string> = {
 
 const AGENT_ENTITY_PREFIX = 'agent-';
 
+type TrackPoint = {
+    lat: number;
+    lng: number;
+    alt?: number;
+    at?: string;
+};
+
+let agentImageryLayers: Cesium.ImageryLayer[] = [];
+
 type AgentPanelProps = {
     isOpen: boolean;
     onClose: () => void;
@@ -172,29 +172,15 @@ function normalizeMessages(rows: any[]): AgentMessage[] {
 function getActionIcon(type: string) {
     if (type.startsWith('replay.')) return <Play size={13} />;
     if (type.startsWith('map.')) return <MapPin size={13} />;
+    if (type.startsWith('layer.') || type.startsWith('overlay.')) return <MapPin size={13} />;
+    if (type.startsWith('entity.') || type.startsWith('track.')) return <MapPin size={13} />;
+    if (type.startsWith('imagery.')) return <Satellite size={13} />;
     if (type.startsWith('selection.')) return <Database size={13} />;
     return <Bot size={13} />;
 }
 
 function cleanVisibleText(text: string): string {
-    const withBreaks = text
-        .replace(/H3-хексов/gi, 'H3-зон')
-        .replace(/H3-хексы/gi, 'H3-зоны')
-        .replace(/H3-хекс/gi, 'H3-зона')
-        .replace(/хексов/gi, 'зон')
-        .replace(/хексы/gi, 'зоны')
-        .replace(/хекс/gi, 'зона')
-        .replace(/(Bash guard|bash-guard|AI Worldview bash guard)/gi, '\n$1')
-        .replace(/(Понятно: bash|Понимаю проблему: bash|Используем структурные команды CLI|Важное открытие: API трактует bbox)/gi, '\n$1')
-        .replace(/(Теперь смотрю|Получил реальные|Сводка:|###|##|- )/g, '\n$1');
-    return withBreaks
-        .replace(/(\|[^\n]*\|)\n\s*\n(?=\s*\|)/g, '$1\n')
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter((line) => !line || !INTERNAL_NOISE_RE.test(line))
-        .join('\n')
-        .replace(/\n{3,}/g, '\n\n')
-        .trim();
+    return String(text || '').trim();
 }
 
 function cleanToolName(name?: string): string {
@@ -202,10 +188,6 @@ function cleanToolName(name?: string): string {
     if (!raw || /^toolu_[a-z0-9]+$/i.test(raw)) return 'AI Worldview tool';
     if (raw === 'Bash') return 'AI Worldview command';
     return raw;
-}
-
-function isHiddenToolName(name?: string): boolean {
-    return HIDDEN_PROVIDER_TOOL_NAMES.has(String(name || '').trim().toLowerCase());
 }
 
 function formatActionType(type: string): string {
@@ -218,10 +200,24 @@ function formatActionType(type: string): string {
         'map.clear_agent_overlays': 'Clear overlays',
         'legend.set_node_state': 'Set legend',
         'map.set_layers': 'Set layers',
+        'layer.set_visibility': 'Set layers',
+        'layer.filter': 'Filter layer',
+        'overlay.draw_geometry': 'Show geometry',
         'view.patch': 'Set view',
         'object.open': 'Open object',
         'object.focus': 'Focus object',
         'entity.open': 'Open entity',
+        'entity.place': 'Place entity',
+        'entity.show_marker': 'Show marker',
+        'entity.track': 'Draw track',
+        'entity.draw_track': 'Draw track',
+        'entity.animate_track': 'Animate track',
+        'track.draw': 'Draw track',
+        'track.animate': 'Animate track',
+        'imagery.show_layer': 'Show imagery',
+        'imagery.show_scene': 'Show imagery',
+        'imagery.compare': 'Compare imagery',
+        'imagery.clear': 'Clear imagery',
         'selection.apply': 'Apply selection',
         'selection.clear': 'Clear selection',
         'replay.seek': 'Seek replay',
@@ -351,8 +347,7 @@ function MarkdownBlock({ text }: { text: string }) {
 }
 
 function displayPartsForMessage(message: AgentMessage, runningRunId: string | null): AgentStreamPart[] {
-    const parts = streamPartsFromMetadata(message.metadata)
-        .filter((part) => part.type !== 'tool' || !isHiddenToolName(part.name));
+    const parts = streamPartsFromMetadata(message.metadata);
     if (parts.length === 0) return [];
     const isFinal = message.role === 'assistant'
         && message.agent_message_id !== `run:${runningRunId || ''}`;
@@ -382,10 +377,12 @@ function groupStreamParts(parts: AgentStreamPart[]): Array<{ type: 'text'; part:
 
 function ToolGroup({ parts }: { parts: AgentStreamPart[] }) {
     const completed = parts.filter((part) => part.state === 'completed' && !part.isError).length;
+    const failed = parts.filter((part) => part.state === 'completed' && part.isError).length;
     const running = parts.filter((part) => part.state === 'started').length;
-    if (completed === 0 && running === 0) return null;
+    if (completed === 0 && failed === 0 && running === 0) return null;
     const summary = [
         completed > 0 ? `${completed} completed` : '',
+        failed > 0 ? `${failed} failed` : '',
         running > 0 ? `${running} running` : '',
     ].filter(Boolean).join(', ') || `${parts.length} calls`;
     return (
@@ -394,7 +391,7 @@ function ToolGroup({ parts }: { parts: AgentStreamPart[] }) {
                 Tools: {summary}
             </summary>
             <div className="mt-1 space-y-1">
-                {parts.filter((part) => !part.isError || part.state !== 'completed').map((part) => (
+                {parts.map((part) => (
                     <div
                         key={part.id}
                         className={`flex items-center gap-1.5 rounded border px-2 py-1 ${
@@ -422,13 +419,32 @@ function streamPartsFromMetadata(metadata: Record<string, any> | undefined): Age
 
 function findActionBlockStart(content: string): number {
     let first = -1;
-    for (const pattern of ACTION_BLOCK_RE_LIST) {
+    for (const pattern of [...ACTION_BLOCK_RE_LIST, ...ACTION_BLOCK_START_RE_LIST]) {
         const match = content.match(pattern);
         if (match && typeof match.index === 'number') {
             first = first === -1 ? match.index : Math.min(first, match.index);
         }
     }
     return first;
+}
+
+function streamTextFromMetadata(metadata: Record<string, any> | undefined): string {
+    return streamPartsFromMetadata(metadata)
+        .filter((part) => part.type === 'text')
+        .map((part) => part.text || '')
+        .join('');
+}
+
+function stripActionBlocks(content: string): string {
+    let visible = String(content || '');
+    for (const pattern of ACTION_BLOCK_RE_LIST) {
+        visible = visible.replace(pattern, '');
+    }
+    const actionStart = findActionBlockStart(visible);
+    if (actionStart >= 0) {
+        visible = visible.slice(0, actionStart);
+    }
+    return visible.trim();
 }
 
 function trimTrailingText(parts: AgentStreamPart[]): AgentStreamPart[] {
@@ -452,6 +468,20 @@ function finalizeStreamParts(
 ): Record<string, any> {
     const parts = streamPartsFromMetadata(metadata);
     if (parts.length === 0) return metadata || {};
+    if (finalContent) {
+        return {
+            ...(metadata || {}),
+            streamParts: [
+                ...parts.filter((part) => part.type !== 'text'),
+                {
+                    id: `text:${Date.now()}:final`,
+                    type: 'text',
+                    text: finalContent,
+                } satisfies AgentStreamPart,
+            ],
+            actionsBlockHidden: true,
+        };
+    }
     const rawText = parts
         .filter((part) => part.type === 'text')
         .map((part) => part.text || '')
@@ -484,6 +514,7 @@ function finalizeStreamParts(
     return {
         ...(metadata || {}),
         streamParts: cleanedParts,
+        actionsBlockHidden: true,
     };
 }
 
@@ -520,7 +551,6 @@ function appendEventPart(
             ? 'completed'
             : 'status';
     const name = String(payload.name || payload.raw_type || (isTool ? 'tool' : 'status'));
-    if (isTool && isHiddenToolName(name)) return metadata || {};
     const message = eventType === 'status.updated'
         ? String(payload.message || payload.raw_type || 'status')
         : `${state === 'started' ? 'started' : 'completed'} ${name}`;
@@ -547,10 +577,105 @@ function getViewer(): Cesium.Viewer | null {
     return viewer;
 }
 
+function roundCoord(value: number, digits = 6): number | null {
+    if (!Number.isFinite(value)) return null;
+    const factor = 10 ** digits;
+    return Math.round(value * factor) / factor;
+}
+
+function cartographicToLatLng(carto: Cesium.Cartographic | undefined | null): Record<string, number | null> | null {
+    if (!carto) return null;
+    return {
+        lat: roundCoord(Cesium.Math.toDegrees(carto.latitude)),
+        lng: roundCoord(Cesium.Math.toDegrees(carto.longitude)),
+        height_m: roundCoord(carto.height, 1),
+    };
+}
+
+function buildAgentRequestContext(): Record<string, any> {
+    const timeline = useTimelineStore.getState();
+    const viewer = getViewer();
+    const context: Record<string, any> = {
+        timeline: {
+            mode: timeline.mode,
+            playbackKind: timeline.playbackKind,
+            currentTime: timeline.currentTime?.toISOString?.(),
+            isPlaying: timeline.isPlaying,
+            speedMultiplier: timeline.speedMultiplier,
+        },
+        layers: {
+            sources: timeline.sources,
+            visibility: timeline.visibility,
+            subtypeVisibility: timeline.subtypeVisibility,
+            sourceVisibility: timeline.sourceVisibility,
+            activeFilter: timeline.activeFilter,
+            selectedEntityId: timeline.selectedEntityId,
+        },
+    };
+    if (!viewer) return context;
+
+    const cameraCarto = viewer.camera.positionCartographic;
+    const canvas = viewer.scene.canvas;
+    const screenCenter = new Cesium.Cartesian2(
+        Math.max(1, canvas.clientWidth || canvas.width || 1) / 2,
+        Math.max(1, canvas.clientHeight || canvas.height || 1) / 2,
+    );
+    const groundCartesian = viewer.camera.pickEllipsoid(screenCenter, viewer.scene.globe.ellipsoid);
+    const groundCarto = groundCartesian
+        ? Cesium.Cartographic.fromCartesian(groundCartesian, viewer.scene.globe.ellipsoid)
+        : null;
+    const rect = viewer.camera.computeViewRectangle(viewer.scene.globe.ellipsoid);
+
+    context.view = {
+        camera: {
+            ...(cartographicToLatLng(cameraCarto) || {}),
+            heading_deg: roundCoord(Cesium.Math.toDegrees(viewer.camera.heading), 2),
+            pitch_deg: roundCoord(Cesium.Math.toDegrees(viewer.camera.pitch), 2),
+            roll_deg: roundCoord(Cesium.Math.toDegrees(viewer.camera.roll), 2),
+        },
+        groundTarget: cartographicToLatLng(groundCarto),
+        bbox: rect ? [
+            roundCoord(Cesium.Math.toDegrees(rect.west)),
+            roundCoord(Cesium.Math.toDegrees(rect.south)),
+            roundCoord(Cesium.Math.toDegrees(rect.east)),
+            roundCoord(Cesium.Math.toDegrees(rect.north)),
+        ] : null,
+        bboxOrder: 'west,south,east,north',
+        capturedAt: new Date().toISOString(),
+    };
+    return context;
+}
+
 function normalizeLayerKey(layer: any): string | null {
     const raw = String(layer || '').trim();
     if (!raw) return null;
     return LAYER_KEY_ALIASES[raw] || LAYER_KEY_ALIASES[raw.replace(/-/g, '_')] || null;
+}
+
+function normalizeCatalogLayerId(layer: any): string {
+    const raw = String(layer || '').trim();
+    if (!raw) return '';
+    const key = raw.replace(/-/g, '_').toLowerCase();
+    const aliases: Record<string, string> = {
+        aviation: 'aircraft',
+        aircraft: 'aircraft',
+        maritime: 'vessel',
+        vessel: 'vessel',
+        vessels: 'vessel',
+        satellites: 'satellite',
+        satellite: 'satellite',
+        fires: 'fire',
+        fire: 'fire',
+        outages: 'outage',
+        outage: 'outage',
+        conflicts: 'conflict',
+        conflict: 'conflict',
+        pipelines: 'pipeline',
+        pipeline: 'pipeline',
+        cables: 'cable',
+        cable: 'cable',
+    };
+    return aliases[key] || raw;
 }
 
 function normalizeLegendNodeId(node: any): string {
@@ -690,6 +815,216 @@ function centerOfCoordinates(coords: [number, number][]): { lat: number; lng: nu
     if (coords.length === 0) return null;
     const sum = coords.reduce((acc, [lng, lat]) => ({ lng: acc.lng + lng, lat: acc.lat + lat }), { lat: 0, lng: 0 });
     return { lat: sum.lat / coords.length, lng: sum.lng / coords.length };
+}
+
+function trackPointFromValue(value: any): TrackPoint | null {
+    if (!value || typeof value !== 'object') return null;
+    const props = value.properties && typeof value.properties === 'object' ? value.properties : {};
+    const coordinates = value.geometry?.coordinates || value.coordinates;
+    const pair = Array.isArray(coordinates) ? normalizeCoordinatePair(coordinates) : null;
+    const lng = Number(value.lng ?? value.lon ?? value.longitude ?? props.lng ?? props.lon ?? props.longitude ?? pair?.[0]);
+    const lat = Number(value.lat ?? value.latitude ?? props.lat ?? props.latitude ?? pair?.[1]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    const alt = Number(value.alt ?? value.altitude ?? value.altitude_m ?? props.alt ?? props.altitude ?? props.altitude_m ?? coordinates?.[2] ?? 0);
+    const at = String(value.at || value.time || value.observed_at || props.at || props.time || props.observed_at || '');
+    return {
+        lat,
+        lng,
+        alt: Number.isFinite(alt) ? alt : 0,
+        at: at || undefined,
+    };
+}
+
+function trackPointsFromPayload(payload: Record<string, any>): TrackPoint[] {
+    const candidates = payload.points || payload.track || payload.samples || payload.items || payload.coordinates || [];
+    if (!Array.isArray(candidates)) return [];
+    if (candidates.length > 0 && Array.isArray(candidates[0])) {
+        const points: TrackPoint[] = [];
+        for (const item of candidates) {
+            const pair = normalizeCoordinatePair(item);
+            if (!pair) continue;
+            const alt = Number(item[2] || 0);
+            points.push({ lng: pair[0], lat: pair[1], alt: Number.isFinite(alt) ? alt : 0 });
+        }
+        return points;
+    }
+    return candidates
+        .map(trackPointFromValue)
+        .filter((point: TrackPoint | null): point is TrackPoint => point !== null);
+}
+
+function drawTrackOverlay(
+    viewer: Cesium.Viewer,
+    points: TrackPoint[],
+    payload: Record<string, any>,
+    label: string,
+): void {
+    if (points.length < 2) throw new Error('Track action requires at least two points');
+    const color = colorFromPayload(payload.color, Cesium.Color.CYAN);
+    const idBase = `${AGENT_ENTITY_PREFIX}track-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const positions = points.flatMap((point) => [point.lng, point.lat, Number(point.alt || 0)]);
+    viewer.entities.add({
+        id: `${idBase}:line`,
+        polyline: {
+            positions: Cesium.Cartesian3.fromDegreesArrayHeights(positions),
+            width: Number(payload.width || 3),
+            material: color.withAlpha(Number(payload.alpha ?? 0.85)),
+            clampToGround: payload.clampToGround !== false && points.every((point) => !point.alt),
+        },
+    });
+    const first = points[0];
+    const last = points[points.length - 1];
+    drawPointOrLabel(viewer, {
+        lat: first.lat,
+        lng: first.lng,
+        label: payload.start_label || 'start',
+        pixelSize: 7,
+    }, 'track start', color.withAlpha(0.75));
+    drawPointOrLabel(viewer, {
+        lat: last.lat,
+        lng: last.lng,
+        label: payload.label || label || payload.entity_id || 'track',
+        pixelSize: 10,
+    }, label || 'track', color);
+}
+
+async function fetchTrackPoints(payload: Record<string, any>): Promise<TrackPoint[]> {
+    const existing = trackPointsFromPayload(payload);
+    if (existing.length >= 2) return existing;
+    const entityId = String(payload.entity_id || payload.entityId || payload.id || '').trim();
+    if (!entityId) return existing;
+    const params = new URLSearchParams();
+    if (payload.from) params.set('from', String(payload.from));
+    if (payload.to) params.set('to', String(payload.to));
+    if (payload.limit) params.set('limit', String(payload.limit));
+    if (payload.stepSeconds || payload.step_seconds) params.set('stepSeconds', String(payload.stepSeconds || payload.step_seconds));
+    const response = await fetch(`${API_URL}/api/replay/track/${encodeURIComponent(entityId)}?${params.toString()}`);
+    const json = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(json?.error || `Track fetch failed for ${entityId}`);
+    return (Array.isArray(json?.items) ? json.items : [])
+        .map(trackPointFromValue)
+        .filter((point: TrackPoint | null): point is TrackPoint => point !== null);
+}
+
+async function animateTrackOverlay(
+    viewer: Cesium.Viewer,
+    points: TrackPoint[],
+    payload: Record<string, any>,
+    label: string,
+): Promise<void> {
+    if (points.length < 2) throw new Error('Track animation requires at least two points');
+    drawTrackOverlay(viewer, points, payload, label);
+    const color = colorFromPayload(payload.color, Cesium.Color.LIME);
+    const marker = viewer.entities.add({
+        id: `${AGENT_ENTITY_PREFIX}track-marker-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        position: Cesium.Cartesian3.fromDegrees(points[0].lng, points[0].lat, Number(points[0].alt || 0)),
+        point: {
+            pixelSize: Number(payload.pixelSize || 12),
+            color: color.withAlpha(0.95),
+            outlineColor: Cesium.Color.BLACK,
+            outlineWidth: 2,
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        },
+        label: {
+            text: String(payload.label || label || payload.entity_id || 'tracked object'),
+            font: '12px monospace',
+            pixelOffset: new Cesium.Cartesian2(0, -24),
+            fillColor: Cesium.Color.WHITE,
+            outlineColor: Cesium.Color.BLACK,
+            outlineWidth: 3,
+            style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        },
+    });
+    const durationMs = Math.max(250, Math.min(Number(payload.duration_ms ?? payload.durationMs ?? 3500), 30_000));
+    const startedAt = performance.now();
+    await new Promise<void>((resolve) => {
+        const tick = () => {
+            const elapsed = performance.now() - startedAt;
+            const progress = Math.min(1, elapsed / durationMs);
+            const scaled = progress * (points.length - 1);
+            const index = Math.min(points.length - 2, Math.floor(scaled));
+            const local = scaled - index;
+            const a = points[index];
+            const b = points[index + 1];
+            const lng = a.lng + (b.lng - a.lng) * local;
+            const lat = a.lat + (b.lat - a.lat) * local;
+            const alt = Number(a.alt || 0) + (Number(b.alt || 0) - Number(a.alt || 0)) * local;
+            (marker as any).position = new Cesium.ConstantPositionProperty(Cesium.Cartesian3.fromDegrees(lng, lat, alt));
+            viewer.scene.requestRender();
+            if (progress >= 1) {
+                resolve();
+                return;
+            }
+            window.requestAnimationFrame(tick);
+        };
+        tick();
+    });
+}
+
+function clearAgentImageryLayers(viewer: Cesium.Viewer): void {
+    const layers = viewer.imageryLayers;
+    if (!layers) return;
+    for (const layer of agentImageryLayers) {
+        try {
+            if (layers.contains?.(layer)) layers.remove(layer, true);
+        } catch {
+            // Best-effort cleanup; the Cesium layer collection may already own destruction.
+        }
+    }
+    agentImageryLayers = [];
+}
+
+function normalizeGibsLayerName(value: any): string {
+    const key = String(value || '').trim();
+    const normalized = key.toLowerCase().replace(/[\s-]+/g, '_');
+    const aliases: Record<string, string> = {
+        modis: 'MODIS_Terra_CorrectedReflectance_TrueColor',
+        modis_true_color: 'MODIS_Terra_CorrectedReflectance_TrueColor',
+        terra_true_color: 'MODIS_Terra_CorrectedReflectance_TrueColor',
+        true_color: 'MODIS_Terra_CorrectedReflectance_TrueColor',
+        viirs: 'VIIRS_SNPP_CorrectedReflectance_TrueColor',
+        viirs_true_color: 'VIIRS_SNPP_CorrectedReflectance_TrueColor',
+    };
+    return aliases[normalized] || key || 'MODIS_Terra_CorrectedReflectance_TrueColor';
+}
+
+function showGibsImageryLayer(viewer: Cesium.Viewer, payload: Record<string, any>): void {
+    const layerName = normalizeGibsLayerName(payload.layer || payload.product || payload.gibsLayer || payload.gibs_layer);
+    const date = new Date(payload.time || payload.at || payload.date || Date.now() - 86400_000);
+    if (Number.isNaN(date.getTime())) throw new Error('imagery.show_layer requires a valid date/time');
+    const time = date.toISOString().slice(0, 10);
+    const opacity = Number(payload.opacity ?? payload.alpha ?? 0.65);
+    const shouldReplace = payload.replace !== false && payload.mode !== 'compare';
+    if (shouldReplace) clearAgentImageryLayers(viewer);
+
+    const store = useTimelineStore.getState();
+    useTimelineStore.setState({
+        sources: { ...store.sources, satellite_imagery: true },
+        visibility: { ...store.visibility, satellite_imagery: true },
+    });
+
+    if (!viewer.imageryLayers?.addImageryProvider) {
+        store.setTileMode('modis');
+        return;
+    }
+
+    const provider = new Cesium.WebMapTileServiceImageryProvider({
+        url: `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/${layerName}/default/${time}/GoogleMapsCompatible_Level9/{TileMatrix}/{TileRow}/{TileCol}.jpg`,
+        layer: layerName,
+        style: 'default',
+        tileMatrixSetID: 'GoogleMapsCompatible_Level9',
+        tilingScheme: new Cesium.WebMercatorTilingScheme(),
+        tileWidth: 256,
+        tileHeight: 256,
+        maximumLevel: 9,
+        format: 'image/jpeg',
+        credit: `NASA GIBS ${layerName}`,
+    });
+    const imageryLayer = viewer.imageryLayers.addImageryProvider(provider);
+    imageryLayer.alpha = Number.isFinite(opacity) ? Math.max(0, Math.min(opacity, 1)) : 0.65;
+    agentImageryLayers.push(imageryLayer);
+    viewer.scene.requestRender();
 }
 
 function drawPointOrLabel(
@@ -930,6 +1265,7 @@ function presentationDelayForAction(action: AgentAction): number {
     if (Number.isFinite(explicitDelay) && explicitDelay >= 0) return Math.min(explicitDelay, 120_000);
     if (action.type === 'replay.play_window') return 3000;
     if (action.type === 'map.fly_to' || action.type === 'object.open' || action.type === 'object.focus' || action.type === 'entity.open') return 1200;
+    if (action.type === 'entity.animate_track' || action.type === 'track.animate') return Number(payload.duration_ms ?? payload.durationMs ?? 3500) + 500;
     if (action.type.startsWith('selection.')) return 700;
     return 500;
 }
@@ -1185,25 +1521,41 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
             if (row.event_type === 'message.delta') {
                 const text = String(payload.text || '');
                 if (!text) return;
-                updateRunMessage(sessionId, runId, (message) => ({
-                    ...message,
-                    content: `${message.content}${text}`,
-                    metadata: appendTextPart(message.metadata, text),
-                }));
+                updateRunMessage(sessionId, runId, (message) => {
+                    if (message.metadata?.actionsBlockHidden) return message;
+                    const metadata = appendTextPart(message.metadata, text);
+                    const rawText = streamTextFromMetadata(metadata);
+                    const actionStart = findActionBlockStart(rawText);
+                    if (actionStart >= 0) {
+                        const visibleContent = stripActionBlocks(rawText);
+                        return {
+                            ...message,
+                            content: visibleContent,
+                            metadata: finalizeStreamParts(metadata, visibleContent),
+                        };
+                    }
+                    return {
+                        ...message,
+                        content: `${message.content}${text}`,
+                        metadata,
+                    };
+                });
             }
             if (row.event_type === 'message.completed') {
-                const actions = Array.isArray(payload.content_json?.actions) ? payload.content_json.actions : [];
+                const contentJson = payload.content_json || payload.contentJson || null;
+                const actions = Array.isArray(contentJson?.actions) ? contentJson.actions : [];
                 if (actions.length > 0) {
                     setActionsBySession((current) => ({
                         ...current,
                         [sessionId]: actions,
                     }));
                 }
+                const visibleContent = stripActionBlocks(payload.content || '');
                 updateRunMessage(sessionId, runId, (message) => ({
                     ...message,
-                    content: payload.content || message.content,
-                    content_json: payload.content_json || message.content_json || null,
-                    metadata: finalizeStreamParts(message.metadata, payload.content),
+                    content: visibleContent || stripActionBlocks(message.content),
+                    content_json: contentJson || message.content_json || null,
+                    metadata: finalizeStreamParts(message.metadata, visibleContent || message.content),
                 }));
             }
             if (row.event_type === 'action.created') {
@@ -1233,7 +1585,6 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                     const name = toolNamesByRunRef.current.get(runId)?.get(toolUseId);
                     if (name) eventPayload = { ...payload, name };
                 }
-                if (isHiddenToolName(eventPayload.name || eventPayload.tool_name)) return;
                 const label = `${row.event_type === 'tool.started' ? 'started' : 'completed'} ${String(eventPayload.name || eventPayload.raw_type || 'tool')}`;
                 updateRunMessage(sessionId, runId, (message) => ({
                     ...message,
@@ -1351,10 +1702,11 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         }));
 
         try {
+            const context = buildAgentRequestContext();
             const response = await fetch(`${API_URL}/api/agents/sessions/${encodeURIComponent(sessionId)}/messages`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content }),
+                body: JSON.stringify({ content, context }),
             });
             const json = await response.json();
             if (!response.ok || json.status === 'error') {
@@ -1545,6 +1897,74 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
             if (!viewer) throw new Error('Cesium viewer is not ready');
             const entities = viewer.entities.values.filter((entity) => String(entity.id || '').startsWith(AGENT_ENTITY_PREFIX));
             for (const entity of entities) viewer.entities.remove(entity);
+            clearAgentImageryLayers(viewer);
+            viewer.scene.requestRender();
+            return;
+        }
+
+        if (action.type === 'entity.place' || action.type === 'entity.show_marker' || action.type === 'entity.highlight') {
+            const viewer = getViewer();
+            if (!viewer) throw new Error('Cesium viewer is not ready');
+            const label = action.label || payload.label || payload.name || payload.entity_id || 'Agent object';
+            drawPointOrLabel(viewer, payload, String(label), colorFromPayload(payload.color, Cesium.Color.LIME));
+            const entityId = String(payload.entity_id || payload.entityId || payload.id || '').trim();
+            if (entityId) {
+                store.setSelectedEntityId(entityId, {
+                    id: entityId,
+                    name: payload.name || payload.display_name || entityId,
+                    type: payload.object_type || payload.objectType || typeForLayer(payload.layer || payload.layer_id),
+                    layer: payload.layer || payload.layer_id,
+                    source: payload.source || payload.source_id,
+                    agentSelected: true,
+                });
+            }
+            viewer.scene.requestRender();
+            return;
+        }
+
+        if (
+            action.type === 'entity.track'
+            || action.type === 'entity.draw_track'
+            || action.type === 'track.draw'
+            || action.type === 'entity.animate_track'
+            || action.type === 'track.animate'
+        ) {
+            const viewer = getViewer();
+            if (!viewer) throw new Error('Cesium viewer is not ready');
+            const points = await fetchTrackPoints(payload);
+            if (points.length < 2) throw new Error(`${action.type} requires track points or entity_id with from/to`);
+            if (action.type === 'entity.animate_track' || action.type === 'track.animate') {
+                await animateTrackOverlay(viewer, points, payload, action.label || 'Agent track');
+            } else {
+                drawTrackOverlay(viewer, points, payload, action.label || 'Agent track');
+            }
+            viewer.scene.requestRender();
+            return;
+        }
+
+        if (action.type === 'imagery.show_layer' || action.type === 'imagery.show_scene' || action.type === 'imagery.compare') {
+            const source = String(payload.source || payload.provider || 'nasa_gibs').toLowerCase();
+            if (!/(gibs|nasa|worldview)/.test(source)) {
+                throw new Error(`${action.type} currently supports NASA GIBS/Worldview imagery only`);
+            }
+            const viewer = getViewer();
+            if (!viewer) throw new Error('Cesium viewer is not ready');
+            if (action.type === 'imagery.compare') {
+                const before = payload.before && typeof payload.before === 'object' ? payload.before : null;
+                const after = payload.after && typeof payload.after === 'object' ? payload.after : null;
+                if (before) showGibsImageryLayer(viewer, { ...before, replace: true, opacity: before.opacity ?? 0.45 });
+                if (after) showGibsImageryLayer(viewer, { ...after, replace: false, mode: 'compare', opacity: after.opacity ?? payload.opacity ?? 0.65 });
+                if (!before && !after) showGibsImageryLayer(viewer, { ...payload, mode: 'compare' });
+            } else {
+                showGibsImageryLayer(viewer, payload);
+            }
+            return;
+        }
+
+        if (action.type === 'imagery.clear') {
+            const viewer = getViewer();
+            if (!viewer) throw new Error('Cesium viewer is not ready');
+            clearAgentImageryLayers(viewer);
             viewer.scene.requestRender();
             return;
         }
@@ -1556,6 +1976,20 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
             const json = await postJson('/api/view-state/patch', patch);
             applyViewStateToStore(json.state || json.data?.state || patch);
             if (shouldResumePlayback) startHistoricalPlaybackWhenReady();
+            return;
+        }
+
+        if (action.type === 'layer.filter') {
+            const layer = normalizeCatalogLayerId(payload.layer || payload.layer_id);
+            if (!layer) throw new Error('layer.filter requires layer');
+            const json = await postJson('/api/agent-tools/map-command', {
+                command: 'layer.filter',
+                payload: {
+                    ...payload,
+                    layer,
+                },
+            });
+            applyViewStateToStore(json.data?.state || json.state);
             return;
         }
 
@@ -1583,14 +2017,14 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         }
 
         if (action.type === 'selection.apply' || action.type === 'selection.clear') {
-            if (action.type === 'selection.apply' && Array.isArray(payload.entities) && payload.entities.length > 0 && payload.selection_id) {
+            if (action.type === 'selection.apply' && Array.isArray(payload.entities) && payload.entities.length > 0) {
                 const ids = payload.entities
                     .map((entity: any) => String(entity?.entity_id || entity?.entityId || entity?.id || '').trim())
                     .filter(Boolean);
                 if (ids.length > 0) {
-                    await postJson('/api/selections', {
-                        selectionId: payload.selection_id,
-                        layerId: payload.layer || 'vessel',
+                    const selection = await postJson('/api/selections', {
+                        selectionId: payload.selection_id || payload.selectionId || `sel:agent-inline:${Date.now()}:${Math.random().toString(16).slice(2)}`,
+                        layerId: normalizeCatalogLayerId(payload.layer || payload.layer_id || payload.entities[0]?.layer || 'vessel'),
                         selectionMode: 'filter',
                         predicate: { ids },
                         metadata: {
@@ -1598,6 +2032,8 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                             label: payload.label || action.label || null,
                         },
                     });
+                    payload.selection_id = payload.selection_id || selection.selection_id || selection.data?.selection_id;
+                    payload.layer = normalizeCatalogLayerId(payload.layer || selection.layer || selection.data?.layer || payload.entities[0]?.layer || 'vessel');
                 }
             }
             const response = await fetch(`${API_URL}/api/agent-tools/map-command`, {
@@ -1776,6 +2212,8 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                                             {actions.map((action, idx) => (
                                                 <button
                                                     key={`${action.type}-${idx}`}
+                                                    data-action-type={action.type}
+                                                    title={`${formatActionType(action.type)}: ${actionLabel(action, idx)}`}
                                                     onClick={() => void applyAction(action, activeSessionId).catch((err) => {
                                                         setError(err instanceof Error ? err.message : 'Agent action failed');
                                                     })}
@@ -1816,6 +2254,8 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                                     {latestActions.map((action, idx) => (
                                         <button
                                             key={`latest-${action.type}-${idx}`}
+                                            data-action-type={action.type}
+                                            title={`${formatActionType(action.type)}: ${actionLabel(action, idx)}`}
                                             onClick={() => void applyAction(action, activeSessionId).catch((err) => {
                                                 setError(err instanceof Error ? err.message : 'Agent action failed');
                                             })}
