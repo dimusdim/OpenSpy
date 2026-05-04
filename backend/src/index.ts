@@ -26,13 +26,13 @@ process.on('uncaughtException', (err) => {
 });
 import { SatelliteService } from './services/satellite.service';
 import { SpectatorService } from './services/spectator.service';
-import { LiveStreamService } from './services/live-stream.service';
-import { ExtendedDataService } from './services/extended.service';
+import { LiveStreamService, type DisasterEvent } from './services/live-stream.service';
+import { ExtendedDataService, type FireRecord } from './services/extended.service';
 import { GPSJamService } from './services/gpsjam.service';
 import { WebcamsService } from './services/webcams.service';
 import { InfrastructureService } from './services/infrastructure.service';
 import { OvertureService, dedupAgainstOverture } from './services/overture.service';
-import { IODAService } from './services/ioda.service';
+import { IODAService, COUNTRY_CENTROIDS, type OutageRecord } from './services/ioda.service';
 import { OilPricesService } from './services/oilprices.service';
 import { EnergyService } from './services/energy.service';
 import { TomTomService } from './services/tomtom.service';
@@ -871,7 +871,7 @@ const SOURCE_FETCH_CAPABILITIES: Record<string, {
     notes: string;
 }> = {
     'cloudflare-outages': {
-        source: 'cloudflare',
+        source: 'cloudflare_radar',
         status: process.env.CLOUDFLARE_API_TOKEN ? 'available' : 'auth_required',
         history: 'Provider supports time-window outage queries; backend connector is already present for live polling.',
         notes: 'Fetches and persists Cloudflare Radar outage annotations for the requested time window.',
@@ -889,16 +889,40 @@ const SOURCE_FETCH_CAPABILITIES: Record<string, {
         notes: 'Use local position_fixes for replay; provider history should fill gaps, not replace canonical replay.',
     },
     'spacetrack-gp-history': {
-        source: 'spacetrack',
+        source: 'celestrak',
         status: process.env.SPACETRACK_EMAIL && process.env.SPACETRACK_PASSWORD ? 'planned' : 'auth_required',
         history: 'Space-Track GP history can provide historical orbital elements for satellites.',
         notes: 'Replay positions should be computed from the best historical TLE for the target time.',
     },
     'firms-fires': {
-        source: 'nasa_firms',
-        status: 'unsupported',
-        history: 'NASA FIRMS exposes dated fire products.',
-        notes: 'The current backend connector only polls the latest active product; arbitrary historical data import is not wired yet.',
+        source: 'firms',
+        status: process.env.FIRMS_MAP_KEY || process.env.NASA_FIRMS_MAP_KEY ? 'available' : 'auth_required',
+        history: 'NASA FIRMS Area API exposes dated CSV fire products with MAP_KEY, source, bbox/world area, day range and date.',
+        notes: 'Fetches VIIRS/MODIS active-fire CSV for an explicit date/day range and persists normalized fire events when credentials are configured.',
+    },
+    'usgs-earthquakes': {
+        source: 'usgs',
+        status: 'available',
+        history: 'USGS FDSN earthquake catalog supports GeoJSON queries by start/end time, magnitude and bbox.',
+        notes: 'Fetches and persists earthquake events into the disaster layer for the requested window.',
+    },
+    'eonet-events': {
+        source: 'eonet',
+        status: 'available',
+        history: 'NASA EONET v3 supports status, days, start, end and bbox filters for natural events.',
+        notes: 'Fetches and persists EONET natural events into the disaster layer for the requested window.',
+    },
+    'gdacs-disasters': {
+        source: 'gdacs',
+        status: 'planned',
+        history: 'The product ingests GDACS current/recent alerts, but a pinned arbitrary historical GDACS import contract is not implemented yet.',
+        notes: 'Use local disaster snapshots for replay. Do not claim GDACS historical import is executable until the connector pins query parameters and lifecycle semantics.',
+    },
+    'ioda-outages': {
+        source: 'ioda',
+        status: 'available',
+        history: 'The current IODA connector queries country-level alerts over a Unix timestamp window.',
+        notes: 'Fetches and persists country-level IODA outage alerts for the requested window. Treat as alert-level evidence, not full raw signal history.',
     },
     'gpsjam-history': {
         source: 'gpsjam',
@@ -910,7 +934,13 @@ const SOURCE_FETCH_CAPABILITIES: Record<string, {
         source: 'nasa_gibs',
         status: 'available',
         history: 'NASA GIBS/Worldview provides date-addressable public WMTS/WMS imagery layers.',
-        notes: 'UI can display time-aware NASA GIBS imagery overlays. This source-fetch operation is metadata-only; scene search is a separate future tool.',
+        notes: 'UI can display time-aware NASA GIBS imagery overlays. This operation returns metadata and map actions, not raw pixels.',
+    },
+    'imagery-search-latest': {
+        source: 'nasa_gibs',
+        status: 'available',
+        history: 'NASA GIBS/Worldview provides public daily/date-addressable global imagery layers suitable for fresh context overlays.',
+        notes: 'Returns a lightweight scene descriptor for the latest usable NASA GIBS date and UI actions for overlay/compare. It does not download raw pixels.',
     },
     'copernicus-sentinel-imagery': {
         source: 'copernicus',
@@ -925,6 +955,411 @@ const SOURCE_FETCH_CAPABILITIES: Record<string, {
         notes: 'Not executable yet. Useful for historical corroboration and before/after analysis, not freshest global imagery.',
     },
 };
+
+function authConfigured(manifest: any): boolean | null {
+    const auth = manifest?.auth;
+    if (!auth || auth.required === false) return true;
+    const keys = Array.isArray(auth.env_keys) ? auth.env_keys : [];
+    if (keys.length === 0) return null;
+    return keys.every((key: string) => Boolean(process.env[key]));
+}
+
+function stableHash(value: unknown): string {
+    return crypto.createHash('sha1').update(JSON.stringify(value)).digest('hex').slice(0, 16);
+}
+
+function parseToolBbox(value: unknown): [number, number, number, number] | null {
+    if (!value) return null;
+    const parts = Array.isArray(value)
+        ? value
+        : String(value).split(',');
+    if (parts.length !== 4) return null;
+    const parsed = parts.map((part) => Number(part));
+    if (parsed.some((part) => !Number.isFinite(part))) return null;
+    const [south, west, north, east] = parsed;
+    if (south < -90 || north > 90 || west < -180 || east > 180 || south >= north || west >= east) {
+        return null;
+    }
+    return [south, west, north, east];
+}
+
+function isoDateOnly(value: string | null | undefined): string | null {
+    if (!value) return null;
+    return value.slice(0, 10);
+}
+
+function dayRangeFromWindow(from: string, to: string | null, fallback = 1): number {
+    if (!to) return fallback;
+    const fromMs = new Date(from).getTime();
+    const toMs = new Date(to).getTime();
+    if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs < fromMs) return fallback;
+    return Math.max(1, Math.min(10, Math.ceil((toMs - fromMs) / 86_400_000) + 1));
+}
+
+function splitCsvLine(line: string): string[] {
+    const out: string[] = [];
+    let current = '';
+    let quoted = false;
+    for (let index = 0; index < line.length; index += 1) {
+        const char = line[index];
+        if (char === '"') {
+            if (quoted && line[index + 1] === '"') {
+                current += '"';
+                index += 1;
+            } else {
+                quoted = !quoted;
+            }
+            continue;
+        }
+        if (char === ',' && !quoted) {
+            out.push(current);
+            current = '';
+            continue;
+        }
+        current += char;
+    }
+    out.push(current);
+    return out;
+}
+
+function parseFirmsCsv(csv: string): FireRecord[] {
+    const lines = csv.split(/\r?\n/).filter((line) => line.trim());
+    if (lines.length < 2) return [];
+    const header = splitCsvLine(lines[0]).map((name) => name.trim());
+    const indexOf = (name: string) => header.indexOf(name);
+    const latIdx = indexOf('latitude');
+    const lngIdx = indexOf('longitude');
+    const brightIdx = indexOf('bright_ti4');
+    const confIdx = indexOf('confidence');
+    const frpIdx = indexOf('frp');
+    const dnIdx = indexOf('daynight');
+    const dateIdx = indexOf('acq_date');
+    const timeIdx = indexOf('acq_time');
+    const typeIdx = indexOf('type');
+    if (latIdx < 0 || lngIdx < 0) return [];
+
+    const records: FireRecord[] = [];
+    for (const line of lines.slice(1)) {
+        const cols = splitCsvLine(line);
+        const lat = Number(cols[latIdx]);
+        const lng = Number(cols[lngIdx]);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+        records.push({
+            id: `fire-${dateIdx >= 0 ? cols[dateIdx] : 'unknown'}-${timeIdx >= 0 ? cols[timeIdx] : '0000'}-${lat}-${lng}`,
+            lat,
+            lng,
+            acqDate: dateIdx >= 0 ? cols[dateIdx] : '',
+            brightness: brightIdx >= 0 ? Number(cols[brightIdx]) || 0 : 0,
+            confidence: confIdx >= 0 ? cols[confIdx] : '',
+            frp: frpIdx >= 0 ? Number(cols[frpIdx]) || 0 : 0,
+            source: 'NASA FIRMS',
+            daynight: dnIdx >= 0 ? cols[dnIdx] : '',
+            acqTime: timeIdx >= 0 ? cols[timeIdx] : '',
+            fireType: typeIdx >= 0 ? Number.parseInt(cols[typeIdx] || '0', 10) || 0 : 0,
+        });
+    }
+    return records;
+}
+
+function extractPointLikeCoordinates(geometry: any): [number, number] | null {
+    if (!geometry?.coordinates) return null;
+    if (geometry.type === 'Point' && Array.isArray(geometry.coordinates) && geometry.coordinates.length >= 2) {
+        return [Number(geometry.coordinates[0]), Number(geometry.coordinates[1])];
+    }
+    const flat = (geometry.coordinates.flat(Infinity) as unknown[]).filter((item) => typeof item === 'number');
+    if (flat.length < 2) return null;
+    return [Number(flat[0]), Number(flat[1])];
+}
+
+function mapUsgsEarthquakeFeature(feature: any): DisasterEvent | null {
+    const coords = extractPointLikeCoordinates(feature?.geometry);
+    if (!coords) return null;
+    const props = feature.properties || {};
+    const mag = Number(props.mag || 0);
+    const [lng, lat] = coords;
+    const timeMs = Number(props.time || Date.now());
+    return {
+        id: `usgs-${feature.id || stableHash(feature)}`,
+        type: 'strike',
+        source: 'USGS',
+        eventType: 'EQ',
+        alertLevel: mag >= 6.5 ? 'Red' : mag >= 5.5 ? 'Orange' : 'Green',
+        radiusKm: Math.round(10 * Math.pow(10, (mag - 2) / 3)),
+        lat,
+        lng,
+        startTime: new Date(timeMs).toISOString(),
+        endTime: new Date(timeMs + 7 * 86_400_000).toISOString(),
+        description: `M${Number.isFinite(mag) ? mag.toFixed(1) : '?'} — ${props.place || 'unknown location'}`,
+        geometry: feature.geometry || null,
+    };
+}
+
+function mapEonetEvent(event: any): DisasterEvent | null {
+    const catToCode: Record<string, string> = {
+        wildfires: 'WF',
+        volcanoes: 'VO',
+        severeStorms: 'TC',
+        floods: 'FL',
+        drought: 'DR',
+        earthquakes: 'EQ',
+        seaLakeIce: 'XX',
+        snow: 'XX',
+        dustHaze: 'XX',
+        manmade: 'XX',
+        landslides: 'XX',
+        waterColor: 'XX',
+        tempExtremes: 'XX',
+    };
+    const geometry = Array.isArray(event.geometry) ? event.geometry.at(-1) : null;
+    const coords = extractPointLikeCoordinates(geometry);
+    if (!coords) return null;
+    const [lng, lat] = coords;
+    const category = event.categories?.[0]?.id || '';
+    return {
+        id: `eonet-${event.id || stableHash(event)}`,
+        type: 'strike',
+        source: 'NASA EONET',
+        eventType: catToCode[category] || 'XX',
+        alertLevel: 'Orange',
+        lat,
+        lng,
+        startTime: geometry.date || event.closed || null,
+        endTime: event.closed || new Date(Date.now() + 7 * 86_400_000).toISOString(),
+        description: event.title || 'NASA EONET event',
+        geometry: geometry || null,
+    };
+}
+
+function iodaSeverityRank(level: string): number {
+    if (level === 'critical') return 2;
+    if (level === 'warning') return 1;
+    return 0;
+}
+
+function mapIodaAlerts(payload: any): OutageRecord[] {
+    const alerts = Array.isArray(payload?.data) ? payload.data : [];
+    const byCountry = new Map<string, OutageRecord>();
+    for (const alert of alerts) {
+        const code = String(alert?.entity?.code || '').toUpperCase();
+        const centroid = COUNTRY_CENTROIDS[code];
+        if (!code || !centroid) continue;
+        const level = String(alert.level || 'normal').toLowerCase();
+        if (level === 'normal') continue;
+        const datasource = String(alert.datasource || 'unknown');
+        const startTime = alert.time
+            ? new Date(Number(alert.time) * 1000).toISOString()
+            : new Date().toISOString();
+        const record: OutageRecord = {
+            id: `ioda-${code}-${datasource}-${alert.time || 0}`,
+            country: alert.entity?.name || code,
+            countryCode: code,
+            lat: centroid[0],
+            lng: centroid[1],
+            level,
+            datasource,
+            startTime,
+        };
+        const existing = byCountry.get(code);
+        if (!existing || iodaSeverityRank(record.level) > iodaSeverityRank(existing.level)) {
+            byCountry.set(code, record);
+        }
+    }
+    return [...byCountry.values()];
+}
+
+function resolveGibsLayerAlias(layer: unknown): string {
+    const key = String(layer || 'viirs_true_color').trim().toLowerCase().replace(/[\s-]+/g, '_');
+    const aliases: Record<string, string> = {
+        modis_true_color: 'MODIS_Terra_CorrectedReflectance_TrueColor',
+        terra_true_color: 'MODIS_Terra_CorrectedReflectance_TrueColor',
+        aqua_true_color: 'MODIS_Aqua_CorrectedReflectance_TrueColor',
+        viirs_true_color: 'VIIRS_SNPP_CorrectedReflectance_TrueColor',
+        viirs_noaa20_true_color: 'VIIRS_NOAA20_CorrectedReflectance_TrueColor',
+        viirs_noaa21_true_color: 'VIIRS_NOAA21_CorrectedReflectance_TrueColor',
+    };
+    return aliases[key] || String(layer || aliases.viirs_true_color);
+}
+
+function buildGibsSceneDescriptor(input: {
+    operation: string;
+    date?: string | null;
+    layer?: unknown;
+    bbox?: [number, number, number, number] | null;
+    opacity?: unknown;
+}) {
+    const requestedDate = input.date && /^\d{4}-\d{2}-\d{2}$/.test(input.date)
+        ? input.date
+        : new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+    const layerAlias = String(input.layer || 'viirs_true_color').trim() || 'viirs_true_color';
+    const layerId = resolveGibsLayerAlias(layerAlias);
+    const opacity = Number(input.opacity ?? 0.72);
+    const sceneId = `scene:nasa_gibs:${layerId}:${requestedDate}`;
+    const showPayload = {
+        source: 'nasa_gibs',
+        scene_id: sceneId,
+        layer: layerAlias,
+        gibsLayer: layerId,
+        date: requestedDate,
+        opacity: Number.isFinite(opacity) ? Math.max(0, Math.min(opacity, 1)) : 0.72,
+        ...(input.bbox ? { bbox: input.bbox } : {}),
+    };
+    return {
+        scene_id: sceneId,
+        source: 'nasa_gibs',
+        provider: 'NASA GIBS / NASA Worldview',
+        imagery_kind: 'date_addressable_wmts',
+        coverage: input.bbox
+            ? { scope: 'aoi_overlay', bbox: input.bbox, bbox_order: 'south,west,north,east' }
+            : { scope: 'global_overlay' },
+        requested_layer: layerAlias,
+        layer_id: layerId,
+        date: requestedDate,
+        freshness: {
+            selected_date: requestedDate,
+            rule: 'Default latest date is yesterday UTC because same-day GIBS true-color tiles can be incomplete.',
+        },
+        visual_use: 'Context imagery overlay for corroboration, not canonical vector replay data.',
+        resolution_notes: 'Public GIBS corrected-reflectance layers are global context imagery; use Sentinel/Landsat scene search for higher-resolution targeted evidence when connectors are configured.',
+        supported_layer_aliases: {
+            modis_true_color: 'MODIS_Terra_CorrectedReflectance_TrueColor',
+            terra_true_color: 'MODIS_Terra_CorrectedReflectance_TrueColor',
+            aqua_true_color: 'MODIS_Aqua_CorrectedReflectance_TrueColor',
+            viirs_true_color: 'VIIRS_SNPP_CorrectedReflectance_TrueColor',
+            viirs_noaa20_true_color: 'VIIRS_NOAA20_CorrectedReflectance_TrueColor',
+            viirs_noaa21_true_color: 'VIIRS_NOAA21_CorrectedReflectance_TrueColor',
+        },
+        wmts: {
+            tile_matrix_set: 'GoogleMapsCompatible_Level9',
+            format: 'image/jpeg',
+            url_template: `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/${layerId}/default/${requestedDate}/GoogleMapsCompatible_Level9/{TileMatrix}/{TileRow}/{TileCol}.jpg`,
+        },
+        ui_actions: ['imagery.show_layer', 'imagery.show_scene', 'imagery.compare', 'imagery.clear'],
+        action_payloads: {
+            show_layer: { type: 'imagery.show_layer', label: `Show NASA GIBS ${requestedDate}`, payload: showPayload },
+            show_scene: { type: 'imagery.show_scene', label: `Show scene ${requestedDate}`, payload: showPayload },
+            clear: { type: 'imagery.clear', label: 'Clear satellite imagery', payload: {} },
+        },
+    };
+}
+
+async function buildSourceCapabilityMatrix() {
+    const [sources, layers, ingestRows] = await Promise.all([
+        catalogReadService.listSources(),
+        catalogReadService.listLayers(),
+        collectSourceIngestStatus(),
+    ]);
+    const layersById = new Map((layers || []).map((layer: any) => [layer.layer_id || layer.id || layer.slug, layer]));
+    const ingestBySource = new Map<string, any[]>();
+    for (const row of ingestRows) {
+        if (!ingestBySource.has(row.sourceId)) ingestBySource.set(row.sourceId, []);
+        ingestBySource.get(row.sourceId)!.push(row);
+    }
+    const bindingsBySource = new Map<string, any[]>();
+    for (const binding of Object.values(SOURCE_BINDINGS)) {
+        if (!bindingsBySource.has(binding.sourceId)) bindingsBySource.set(binding.sourceId, []);
+        bindingsBySource.get(binding.sourceId)!.push(binding);
+    }
+    const operationsBySource = new Map<string, Array<any>>();
+    for (const [operation, capability] of Object.entries(SOURCE_FETCH_CAPABILITIES)) {
+        if (!operationsBySource.has(capability.source)) operationsBySource.set(capability.source, []);
+        operationsBySource.get(capability.source)!.push({ operation, ...capability });
+    }
+
+    const matrix = (sources || []).map((source: any) => {
+        const sourceId = source.source_id || source.id;
+        const manifest = source.manifest || source;
+        const bindings = bindingsBySource.get(sourceId) || [];
+        const boundLayers = bindings.map((binding) => {
+            const layer = layersById.get(binding.layerId) as any;
+            return {
+                layer_id: binding.layerId,
+                canonical_target: binding.canonicalTarget,
+                coverage_scope: binding.coverageScope || layer?.coverage_scope || null,
+                history_mode: layer?.history_mode || null,
+                replay_scope: layer?.capabilities?.replayScope || layer?.metadata?.replayScope || null,
+                replay: Boolean(layer?.capabilities?.replay),
+                details_on_demand: Boolean(layer?.capabilities?.detailsOnDemand),
+                live_only_context: layer?.capabilities?.replayScope === 'live_only_context'
+                    || layer?.metadata?.replayScope === 'live_only_context'
+                    || layer?.history_mode === 'none'
+                    || binding.coverageScope === 'viewport',
+                raw_capture_mode: binding.rawCaptureMode,
+                storage_policy_id: binding.storagePolicyId,
+            };
+        });
+        const ingest = ingestBySource.get(sourceId) || [];
+        const sourceFetchOperations = operationsBySource.get(sourceId) || [];
+        const liveContract = manifest.live_contract || source.live_contract || null;
+        return {
+            source_id: sourceId,
+            slug: source.slug || manifest.slug || sourceId,
+            display_name: source.display_name || manifest.name || sourceId,
+            provider: manifest.provider || null,
+            provider_kind: source.provider_kind || manifest.provider_kind || manifest.type || null,
+            catalog_status: source.status || manifest.status || null,
+            category: manifest.category || null,
+            layer: manifest.layer || null,
+            refresh: manifest.refresh || null,
+            auth: {
+                required: Boolean(manifest.auth?.required),
+                configured: authConfigured(manifest),
+                method: manifest.auth?.method || null,
+                env_keys: Array.isArray(manifest.auth?.env_keys) ? manifest.auth.env_keys : [],
+                limits: manifest.auth?.limits || null,
+            },
+            live_contract: liveContract,
+            local_storage: {
+                layers: boundLayers,
+                has_local_history: boundLayers.some((layer) => ['local_history', 'event_log', 'snapshot'].includes(String(layer.history_mode || '')) || layer.replay),
+                replay_supported: boundLayers.some((layer) => layer.replay),
+                live_only: boundLayers.length > 0 && boundLayers.every((layer) => layer.live_only_context),
+            },
+            source_fetch_operations: sourceFetchOperations.map((operation) => ({
+                operation: operation.operation,
+                status: operation.status,
+                history: operation.history,
+                notes: operation.notes,
+            })),
+            latest_ingest: ingest.map((row) => ({
+                layer_id: row.layerId,
+                status: row.status,
+                completeness: row.completeness,
+                latest_completed_at: row.latestIngest?.completedAt || null,
+                upstream_bytes: row.latestIngest?.upstreamBytes ?? null,
+                raw_count: row.latestIngest?.rawCount ?? null,
+                normalized_count: row.latestIngest?.normalizedCount ?? null,
+                changed_count: row.latestIngest?.changedCount ?? null,
+                total_ms: row.latestIngest?.totalMs ?? null,
+                error_message: row.latestIngest?.errorMessage || null,
+            })),
+            fields_available_not_loaded: manifest.fields_available_not_loaded || {},
+            api_capabilities_not_used: manifest.api_capabilities_not_used || {},
+            notes: {
+                inactive_catalog_entry: boundLayers.length === 0,
+                provider_history_actionable: sourceFetchOperations.some((operation) => operation.status === 'available' || operation.status === 'auth_required'),
+            },
+        };
+    });
+
+    return {
+        sources: matrix.sort((a, b) => a.source_id.localeCompare(b.source_id)),
+        operations: Object.entries(SOURCE_FETCH_CAPABILITIES)
+            .map(([operationId, capability]) => ({
+                operation: operationId,
+                ...capability,
+            }))
+            .sort((a, b) => a.operation.localeCompare(b.operation)),
+        summary: {
+            sources: matrix.length,
+            bound_sources: matrix.filter((source) => !source.notes.inactive_catalog_entry).length,
+            inactive_catalog_entries: matrix.filter((source) => source.notes.inactive_catalog_entry).length,
+            auth_required_sources: matrix.filter((source) => source.auth.required && source.auth.configured !== true).length,
+            source_fetch_operations: Object.keys(SOURCE_FETCH_CAPABILITIES).length,
+            actionable_source_fetch_operations: Object.values(SOURCE_FETCH_CAPABILITIES)
+                .filter((operation) => operation.status === 'available' || operation.status === 'auth_required').length,
+        },
+    };
+}
 
 const agentRateLimitMap = new Map<string, { count: number; resetAt: number }>();
 const AGENT_RATE_LIMIT_WINDOW_MS = 60_000;
@@ -1077,19 +1512,18 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
             return;
         }
         if (operation === 'capabilities') {
+            const matrix = await buildSourceCapabilityMatrix();
             res.json({
                 status: 'ok',
                 data: {
-                    operations: Object.entries(SOURCE_FETCH_CAPABILITIES)
-                        .map(([operationId, capability]) => ({
-                            operation: operationId,
-                            ...capability,
-                        }))
-                        .sort((a, b) => a.operation.localeCompare(b.operation)),
+                    operations: matrix.operations,
+                    sources: matrix.sources,
+                    summary: matrix.summary,
                 },
                 meta: {
                     executed: false,
-                    count: Object.keys(SOURCE_FETCH_CAPABILITIES).length,
+                    operation_count: matrix.operations.length,
+                    source_count: matrix.sources.length,
                 },
             });
             return;
@@ -1108,7 +1542,7 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
             });
             return;
         }
-        if (capability.status === 'auth_required' || capability.status === 'unsupported') {
+        if (capability.status === 'auth_required' || capability.status === 'unsupported' || capability.status === 'planned') {
             res.json({
                 status: capability.status,
                 data: {
@@ -1122,6 +1556,8 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
                 warnings: [
                     capability.status === 'auth_required'
                         ? `Missing credentials for ${capability.source}.`
+                        : capability.status === 'planned'
+                            ? capability.notes
                         : capability.notes,
                 ],
             });
@@ -1129,8 +1565,175 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
         }
 
         const persist = args.persist !== false && args.dry_run !== true && args.dryRun !== true;
+        const dryRun = args.dry_run === true || args.dryRun === true;
         const from = parseIsoDateOrNull(args.from ? String(args.from) : undefined);
         const to = parseIsoDateOrNull(args.to ? String(args.to) : undefined);
+
+        if (operation === 'firms-fires') {
+            if (!from && !args.date) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_WINDOW', message: 'firms-fires requires --from ISO timestamp or --date YYYY-MM-DD' } });
+                return;
+            }
+            const date = String(args.date || isoDateOnly(from) || '').slice(0, 10);
+            const bbox = parseToolBbox(args.bbox);
+            const dayRange = Math.max(1, Math.min(10, Number.parseInt(String(args.day_range || args.dayRange || dayRangeFromWindow(from || `${date}T00:00:00.000Z`, to)), 10) || 1));
+            const source = String(args.source || 'VIIRS_SNPP_NRT').trim();
+            const area = String(args.area || (bbox ? `${bbox[1]},${bbox[0]},${bbox[3]},${bbox[2]}` : 'world')).trim();
+            if (dryRun) {
+                res.json({
+                    status: 'ok',
+                    data: { operation, source: capability.source, date, dayRange, firmsSource: source, area, capability },
+                    meta: { executed: false, persisted: false, dry_run: true },
+                    warnings: ['Dry run only. No provider request was sent and no local data was written.'],
+                });
+                return;
+            }
+            const mapKey = process.env.FIRMS_MAP_KEY || process.env.NASA_FIRMS_MAP_KEY;
+            const url = `https://firms.modaps.eosdis.nasa.gov/api/area/csv/${encodeURIComponent(mapKey || '')}/${encodeURIComponent(source)}/${encodeURIComponent(area)}/${dayRange}/${encodeURIComponent(date)}`;
+            const response = await axios.get<string>(url, { timeout: 60_000, responseType: 'text' });
+            const records = parseFirmsCsv(response.data);
+            if (persist) await sourcePersistenceService.persistFires(records, { rawCsv: response.data });
+            res.json({
+                status: 'ok',
+                data: { operation, source: capability.source, date, dayRange, firmsSource: source, area, count: records.length, rawBytes: Buffer.byteLength(response.data, 'utf8') },
+                meta: { executed: true, persisted: persist },
+                warnings: dayRange > 1 ? ['FIRMS date window is inclusive from date through date + dayRange - 1.'] : [],
+            });
+            return;
+        }
+
+        if (operation === 'usgs-earthquakes') {
+            if (!from || !to) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_WINDOW', message: 'usgs-earthquakes requires --from and --to ISO timestamps' } });
+                return;
+            }
+            const bbox = parseToolBbox(args.bbox);
+            const params = new URLSearchParams({
+                format: 'geojson',
+                starttime: from,
+                endtime: to,
+                minmagnitude: String(args.min_magnitude || args.minMagnitude || '2.5'),
+                limit: String(args.limit || '2000'),
+                orderby: 'time',
+            });
+            if (bbox) {
+                params.set('minlatitude', String(bbox[0]));
+                params.set('minlongitude', String(bbox[1]));
+                params.set('maxlatitude', String(bbox[2]));
+                params.set('maxlongitude', String(bbox[3]));
+            }
+            if (dryRun) {
+                res.json({
+                    status: 'ok',
+                    data: { operation, source: capability.source, query: Object.fromEntries(params.entries()), capability },
+                    meta: { executed: false, persisted: false, dry_run: true },
+                    warnings: ['Dry run only. No provider request was sent and no local data was written.'],
+                });
+                return;
+            }
+            const response = await axios.get(`https://earthquake.usgs.gov/fdsnws/event/1/query?${params.toString()}`, { timeout: 30_000 });
+            const features = Array.isArray(response.data?.features) ? response.data.features : [];
+            const events = features.map(mapUsgsEarthquakeFeature).filter((event: DisasterEvent | null): event is DisasterEvent => Boolean(event));
+            if (persist) {
+                await sourcePersistenceService.persistDisasterEvents(events, {
+                    rawPayloads: [{
+                        source_id: 'usgs',
+                        payload: response.data,
+                        observed_at: from,
+                        upstream_id: `${from}:${to}`,
+                        metadata: { format: 'geojson', payloadKind: 'historical_query', query: Object.fromEntries(params.entries()) },
+                    }],
+                });
+            }
+            res.json({
+                status: 'ok',
+                data: { operation, source: capability.source, count: events.length, rawCount: features.length, metadata: response.data?.metadata || null },
+                meta: { executed: true, persisted: persist },
+                warnings: [],
+            });
+            return;
+        }
+
+        if (operation === 'eonet-events') {
+            if (!from || !to) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_WINDOW', message: 'eonet-events requires --from and --to ISO timestamps' } });
+                return;
+            }
+            const bbox = parseToolBbox(args.bbox);
+            const params = new URLSearchParams({
+                status: String(args.status || 'all'),
+                start: from.slice(0, 10),
+                end: to.slice(0, 10),
+                limit: String(args.limit || '500'),
+            });
+            if (bbox) params.set('bbox', `${bbox[1]},${bbox[2]},${bbox[3]},${bbox[0]}`);
+            if (dryRun) {
+                res.json({
+                    status: 'ok',
+                    data: { operation, source: capability.source, query: Object.fromEntries(params.entries()), capability },
+                    meta: { executed: false, persisted: false, dry_run: true },
+                    warnings: ['Dry run only. No provider request was sent and no local data was written.'],
+                });
+                return;
+            }
+            const response = await axios.get(`https://eonet.gsfc.nasa.gov/api/v3/events?${params.toString()}`, { timeout: 30_000 });
+            const rawEvents = Array.isArray(response.data?.events) ? response.data.events : [];
+            const events = rawEvents.map(mapEonetEvent).filter((event: DisasterEvent | null): event is DisasterEvent => Boolean(event));
+            if (persist) {
+                await sourcePersistenceService.persistDisasterEvents(events, {
+                    rawPayloads: [{
+                        source_id: 'eonet',
+                        payload: response.data,
+                        observed_at: from,
+                        upstream_id: `${from}:${to}`,
+                        metadata: { format: 'json', payloadKind: 'historical_query', query: Object.fromEntries(params.entries()) },
+                    }],
+                });
+            }
+            res.json({
+                status: 'ok',
+                data: { operation, source: capability.source, count: events.length, rawCount: rawEvents.length },
+                meta: { executed: true, persisted: persist },
+                warnings: [],
+            });
+            return;
+        }
+
+        if (operation === 'ioda-outages') {
+            if (!from || !to) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_WINDOW', message: 'ioda-outages requires --from and --to ISO timestamps' } });
+                return;
+            }
+            const query = {
+                from: Math.floor(new Date(from).getTime() / 1000),
+                until: Math.floor(new Date(to).getTime() / 1000),
+                entityType: String(args.entity_type || args.entityType || 'country'),
+            };
+            if (dryRun) {
+                res.json({
+                    status: 'ok',
+                    data: { operation, source: capability.source, query, capability },
+                    meta: { executed: false, persisted: false, dry_run: true },
+                    warnings: ['Dry run only. No provider request was sent and no local data was written.'],
+                });
+                return;
+            }
+            const params = new URLSearchParams({
+                from: String(query.from),
+                until: String(query.until),
+                entityType: query.entityType,
+            });
+            const response = await axios.get(`https://api.ioda.inetintel.cc.gatech.edu/v2/outages/alerts?${params.toString()}`, { timeout: 30_000 });
+            const records = mapIodaAlerts(response.data);
+            if (persist) await sourcePersistenceService.persistOutages(records, { sourceId: 'ioda', rawPayload: response.data });
+            res.json({
+                status: 'ok',
+                data: { operation, source: capability.source, count: records.length, rawCount: Array.isArray(response.data?.data) ? response.data.data.length : null, query },
+                meta: { executed: true, persisted: persist },
+                warnings: ['IODA import stores country-level alerts, not raw BGP/probing/darknet signal time series.'],
+            });
+            return;
+        }
 
         if (operation === 'gpsjam-history') {
             const date = String(args.date || (from ? from.slice(0, 10) : '')).trim();
@@ -1215,35 +1818,32 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
             return;
         }
 
-        if (operation === 'nasa-gibs-imagery') {
+        if (operation === 'nasa-gibs-imagery' || operation === 'imagery-search-latest') {
             const date = String(args.date || args.time || (from ? from.slice(0, 10) : new Date().toISOString().slice(0, 10))).slice(0, 10);
             const layer = String(args.layer || 'viirs_true_color').trim();
+            const bbox = parseToolBbox(args.bbox);
+            const scene = buildGibsSceneDescriptor({
+                operation,
+                date: operation === 'imagery-search-latest' && !args.date && !args.time && !from
+                    ? null
+                    : date,
+                layer,
+                bbox,
+                opacity: args.opacity,
+            });
             res.json({
                 status: 'ok',
                 data: {
                     operation,
                     source: capability.source,
-                    imagery_kind: 'date_addressable_wmts',
-                    date,
-                    requested_layer: layer,
-                    supported_layer_aliases: {
-                        modis_true_color: 'MODIS_Terra_CorrectedReflectance_TrueColor',
-                        terra_true_color: 'MODIS_Terra_CorrectedReflectance_TrueColor',
-                        aqua_true_color: 'MODIS_Aqua_CorrectedReflectance_TrueColor',
-                        viirs_true_color: 'VIIRS_SNPP_CorrectedReflectance_TrueColor',
-                        viirs_noaa20_true_color: 'VIIRS_NOAA20_CorrectedReflectance_TrueColor',
-                        viirs_noaa21_true_color: 'VIIRS_NOAA21_CorrectedReflectance_TrueColor',
-                    },
-                    ui_actions: ['imagery.show_layer', 'imagery.show_scene', 'imagery.compare', 'imagery.clear'],
-                    action_payload_example: {
-                        type: 'imagery.show_layer',
-                        payload: {
-                            source: 'nasa_gibs',
-                            layer,
-                            date,
-                            opacity: 0.7,
-                        },
-                    },
+                    scene,
+                    scenes: [scene],
+                    imagery_kind: scene.imagery_kind,
+                    date: scene.date,
+                    requested_layer: scene.requested_layer,
+                    supported_layer_aliases: scene.supported_layer_aliases,
+                    ui_actions: scene.ui_actions,
+                    action_payload_example: scene.action_payloads.show_layer,
                 },
                 meta: {
                     executed: false,
@@ -1370,6 +1970,109 @@ app.get('/api/agent-tools/view/summary', async (_req, res) => {
     }
 });
 
+const UI_BROWSER_ACTION_COMMANDS = new Set([
+    'map.fly_to',
+    'map.annotate',
+    'map.highlight',
+    'map.add_aoi',
+    'map.draw_aoi',
+    'map.add_corridor',
+    'map.draw_corridor',
+    'map.clear_agent_overlays',
+    'overlay.draw_geometry',
+    'object.open',
+    'object.focus',
+    'entity.open',
+    'entity.place',
+    'entity.show_marker',
+    'entity.highlight',
+    'entity.track',
+    'entity.draw_track',
+    'entity.animate_track',
+    'entity.show_marker',
+    'track.draw',
+    'track.animate',
+    'imagery.show_layer',
+    'imagery.show_scene',
+    'imagery.compare',
+    'imagery.clear',
+    'replay.seek',
+    'replay.play_window',
+    'replay.set_speed',
+    'replay.follow_entity',
+    'replay.pause',
+    'replay.stop',
+]);
+
+const BACKEND_MAP_COMMANDS = new Set([
+    'selection.apply',
+    'selection.clear',
+    'layer.filter',
+    'legend.set_node_state',
+    'view.patch',
+    'map.set_layers',
+    'source.set_enabled',
+    'layer.set_visibility',
+]);
+
+const SUPPORTED_MAP_COMMANDS = [
+    ...Array.from(BACKEND_MAP_COMMANDS),
+    ...Array.from(UI_BROWSER_ACTION_COMMANDS),
+].sort();
+
+function mapCommandBoolean(value: any, fallback = true): boolean {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') return value !== 0;
+    if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+        if (['1', 'true', 'yes', 'on', 'enabled'].includes(normalized)) return true;
+        if (['0', 'false', 'no', 'off', 'disabled'].includes(normalized)) return false;
+    }
+    return fallback;
+}
+
+function buildLayerViewPatch(payload: Record<string, any>, defaultTarget: 'sources' | 'visibility' = 'visibility'): Record<string, any> {
+    const patch: Record<string, any> = {};
+    const addFlags = (target: 'sources' | 'visibility', value: any) => {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+        patch[target] = {
+            ...(patch[target] || {}),
+            ...value,
+        };
+    };
+    addFlags('sources', payload.sources);
+    addFlags('visibility', payload.visibility);
+
+    const items = Array.isArray(payload.layers) ? payload.layers : [];
+    for (const item of items) {
+        if (!item || typeof item !== 'object') continue;
+        const layer = String(item.layer || item.layer_id || item.id || '').trim();
+        if (!layer) continue;
+        const target = item.target === 'sources' || item.source === true ? 'sources' : defaultTarget;
+        patch[target] = {
+            ...(patch[target] || {}),
+            [layer]: mapCommandBoolean(item.enabled),
+        };
+    }
+
+    const singleLayer = String(payload.layer || payload.layer_id || '').trim();
+    if (singleLayer) {
+        const target = payload.target === 'sources' || payload.source === true ? 'sources' : defaultTarget;
+        patch[target] = {
+            ...(patch[target] || {}),
+            [singleLayer]: mapCommandBoolean(payload.enabled),
+        };
+    }
+
+    if (payload.subtypeVisibility && typeof payload.subtypeVisibility === 'object' && !Array.isArray(payload.subtypeVisibility)) {
+        patch.subtypeVisibility = payload.subtypeVisibility;
+    }
+    if (payload.sourceVisibility && typeof payload.sourceVisibility === 'object' && !Array.isArray(payload.sourceVisibility)) {
+        patch.sourceVisibility = payload.sourceVisibility;
+    }
+    return patch;
+}
+
 app.post('/api/agent-tools/map-command', async (req, res) => {
     try {
         const command = String(req.body?.command || '').trim();
@@ -1400,6 +2103,41 @@ app.post('/api/agent-tools/map-command', async (req, res) => {
             }
             const state = await viewControlService.clearSelection(layer);
             res.json({ status: 'ok', data: { command, layer, state } });
+            return;
+        }
+
+        if (command === 'legend.set_node_state') {
+            const nodeId = String(payload.node || payload.nodeId || payload.node_id || payload.id || '').trim();
+            const enabled = payload.enabled !== false;
+            const target = payload.target === 'sources' ? 'sources' : 'visibility';
+            if (!nodeId) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_LEGEND_ACTION', message: 'legend.set_node_state requires node' } });
+                return;
+            }
+            const state = await viewControlService.setLegendNodeState(nodeId, enabled, target);
+            res.json({ status: 'ok', data: { command, node_id: nodeId, enabled, target, state } });
+            return;
+        }
+
+        if (command === 'view.patch') {
+            const patch = payload.patch && typeof payload.patch === 'object' && !Array.isArray(payload.patch) ? payload.patch : payload;
+            if (!patch || typeof patch !== 'object' || Array.isArray(patch) || Object.keys(patch).length === 0) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_VIEW_PATCH', message: 'view.patch requires a patch object' } });
+                return;
+            }
+            const state = await viewControlService.patchState(patch);
+            res.json({ status: 'ok', data: { command, patch, state } });
+            return;
+        }
+
+        if (command === 'map.set_layers' || command === 'source.set_enabled' || command === 'layer.set_visibility') {
+            const patch = buildLayerViewPatch(payload, command === 'source.set_enabled' ? 'sources' : 'visibility');
+            if (Object.keys(patch).length === 0) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_LAYER_STATE_ACTION', message: `${command} requires layer/source/visibility payload` } });
+                return;
+            }
+            const state = await viewControlService.patchState(patch);
+            res.json({ status: 'ok', data: { command, patch, state } });
             return;
         }
 
@@ -1459,6 +2197,20 @@ app.post('/api/agent-tools/map-command', async (req, res) => {
             return;
         }
 
+        if (!SUPPORTED_MAP_COMMANDS.includes(command)) {
+            res.status(400).json({
+                status: 'error',
+                error: {
+                    code: 'UNKNOWN_MAP_COMMAND',
+                    message: `Unknown map command: ${command}`,
+                },
+                data: {
+                    supported_commands: SUPPORTED_MAP_COMMANDS,
+                },
+            });
+            return;
+        }
+
         const state = await viewControlService.patchState({
             agentCommand: {
                 command,
@@ -1471,6 +2223,7 @@ app.post('/api/agent-tools/map-command', async (req, res) => {
             data: {
                 command,
                 payload,
+                execution: 'browser_action',
                 state,
             },
             warnings: [
@@ -3188,6 +3941,43 @@ app.get('/api/query/entities/latest', async (req, res) => {
             filters,
             count: items.length,
             items,
+        });
+    } catch (err: any) {
+        sendError(res, err);
+    }
+});
+
+app.get('/api/query/entities/live-status', async (req, res) => {
+    if (!entityQueryService.isReady()) {
+        res.status(503).json({ error: 'Query database is not ready' });
+        return;
+    }
+
+    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    if (req.query.bbox && !bbox) {
+        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        return;
+    }
+
+    const freshnessMinutesRaw = req.query.freshnessMinutes || req.query.freshness_minutes;
+    const freshnessMinutes = freshnessMinutesRaw ? Number(freshnessMinutesRaw) : 30;
+    if (!Number.isFinite(freshnessMinutes) || freshnessMinutes <= 0) {
+        res.status(400).json({ error: 'Invalid freshnessMinutes' });
+        return;
+    }
+
+    try {
+        const filters = {
+            layerId: normalizeLayerId((req.query.layerId as string | undefined) || (req.query.layer as string | undefined)),
+            bbox: bbox || undefined,
+            freshnessMinutes,
+            limit: parsePositiveLimit(req.query.limit as string | undefined, 20),
+        };
+        const data = await entityQueryService.getLiveStatus(filters);
+        res.json({
+            mode: 'live-status',
+            filters,
+            ...data,
         });
     } catch (err: any) {
         sendError(res, err);

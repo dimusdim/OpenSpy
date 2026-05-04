@@ -553,9 +553,19 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
   }),
   // Legend → visibility (render control)
   toggleVisibility: (layer) => set((state) => {
-      const next = { ...state, visibility: { ...state.visibility, [layer]: !state.visibility[layer] } };
+      const nextVisible = !state.visibility[layer];
+      const next = {
+          ...state,
+          visibility: { ...state.visibility, [layer]: nextVisible },
+          // Effective rendering is `sources && visibility`. If a user turns a
+          // layer back on from the legend, also restart its source so the UI
+          // cannot look enabled while the data feed remains stopped.
+          sources: nextVisible
+              ? { ...state.sources, [layer]: true }
+              : state.sources,
+      };
       saveSettingsToServer(next);
-      return { visibility: next.visibility };
+      return { visibility: next.visibility, sources: next.sources };
   }),
   setSelectedEntityId: (id, data) => set({ selectedEntityId: id, selectedEntityData: data || null }),
   setStreamMetric: (layer, data) => set(state => ({

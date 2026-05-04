@@ -99,7 +99,11 @@ const LAYER_TO_DOMAIN: Record<string, string> = {
 // the entity's 3D world position to screen coords (for the dotted leader line)
 // AND reads back the live geodetic position (lat/lng/alt) + the subtype that
 // the layer hooks stashed in entity.properties when the entity was created.
-export default function EntityHUD() {
+type EntityHUDProps = {
+    avoidRightPx?: number;
+};
+
+export default function EntityHUD({ avoidRightPx = 0 }: EntityHUDProps) {
     // Individual selectors — whole-store subscription re-renders this
     // component on every store write (streamMetrics, currentTime, etc.),
     // including the 60 Hz rAF loop below calling setScreenPos/setLive.
@@ -694,7 +698,9 @@ export default function EntityHUD() {
 
     if (!selectedEntityId || !selectedEntityData) return null;
 
-    const panelX = typeof window !== 'undefined' ? window.innerWidth - 340 : 1000;
+    const panelX = typeof window !== 'undefined'
+        ? Math.max(340, window.innerWidth - 340 - Math.max(0, avoidRightPx))
+        : 1000;
     const panelY = 100;
 
     const flyTo = () => {

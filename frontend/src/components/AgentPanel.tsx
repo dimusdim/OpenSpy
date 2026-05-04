@@ -1,6 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import * as Cesium from 'cesium';
 import {
     Bot,
@@ -17,6 +19,7 @@ import {
 } from 'lucide-react';
 import { API_URL } from '../lib/config';
 import { useTimelineStore } from '../store/useTimelineStore';
+import { replayMetaMap } from '../cesium/useReplayOverlay';
 
 type ProviderInfo = {
     provider: string;
@@ -57,10 +60,17 @@ type AgentStreamPart = {
     text?: string;
     eventType?: string;
     name?: string;
+    toolUseId?: string;
+    rawType?: string;
+    input?: any;
+    output?: any;
     state?: 'started' | 'completed' | 'status';
     isError?: boolean;
 };
 
+// Explicit machine-action block used for presentation batches. Inline object,
+// area and replay references must use Markdown `ospy://` links instead of
+// frontend text guessing.
 const ACTION_BLOCK_RE_LIST = [
     /<ACTIONS_JSON>\s*([\s\S]*?)\s*<\/ACTIONS_JSON>/i,
     /```ACTIONS_JSON\s*([\s\S]*?)\s*```/i,
@@ -131,6 +141,9 @@ const LEGEND_NODE_ALIASES: Record<string, string> = {
     infrastructure: 'infrastructure',
     pipelines: 'infrastructure/oil-gas/pipelines',
     pipeline: 'infrastructure/oil-gas/pipelines',
+    infrastructure_cables: 'infrastructure/telecom-infra/cables',
+    infrastructure_telecom: 'infrastructure/telecom-infra',
+    telecom_cables: 'infrastructure/telecom-infra/cables',
     cables: 'infrastructure/telecom-infra/cables',
     cable: 'infrastructure/telecom-infra/cables',
     wifi: 'connectivity/wifi',
@@ -145,6 +158,10 @@ type TrackPoint = {
     lng: number;
     alt?: number;
     at?: string;
+    heading?: number;
+    speed?: number;
+    layer?: string;
+    source?: string;
 };
 
 let agentImageryLayers: Cesium.ImageryLayer[] = [];
@@ -185,9 +202,23 @@ function cleanVisibleText(text: string): string {
 
 function cleanToolName(name?: string): string {
     const raw = String(name || '').trim();
-    if (!raw || /^toolu_[a-z0-9]+$/i.test(raw)) return 'AI Worldview tool';
-    if (raw === 'Bash') return 'AI Worldview command';
+    if (!raw || /^toolu_[a-z0-9]+$/i.test(raw)) return 'tool';
     return raw;
+}
+
+function isGenericToolName(name?: string): boolean {
+    const raw = cleanToolName(name).toLowerCase();
+    return raw === 'tool' || raw === 'bash';
+}
+
+function formatToolPayload(value: any): string {
+    if (value === undefined || value === null || value === '') return '';
+    if (typeof value === 'string') return value;
+    try {
+        return JSON.stringify(value, null, 2);
+    } catch {
+        return String(value);
+    }
 }
 
 function formatActionType(type: string): string {
@@ -222,6 +253,8 @@ function formatActionType(type: string): string {
         'selection.clear': 'Clear selection',
         'replay.seek': 'Seek replay',
         'replay.play_window': 'Play replay',
+        'replay.pause': 'Pause replay',
+        'replay.stop': 'Stop replay',
         'replay.set_speed': 'Set speed',
         'replay.follow_entity': 'Follow entity',
     };
@@ -232,127 +265,179 @@ function actionLabel(action: AgentAction, idx: number): string {
     return action.label || `${idx + 1}. ${formatActionType(action.type)}`;
 }
 
-function inlineMarkdown(text: string): Array<string | JSX.Element> {
-    const nodes: Array<string | JSX.Element> = [];
-    const pattern = /(`[^`]+`|\*\*[^*]+\*\*)/g;
-    let cursor = 0;
-    let match: RegExpExecArray | null;
-    while ((match = pattern.exec(text))) {
-        if (match.index > cursor) nodes.push(text.slice(cursor, match.index));
-        const token = match[0];
-        if (token.startsWith('`')) {
-            nodes.push(<code key={`code-${match.index}`} className="rounded bg-zinc-900 px-1 py-0.5 text-[11px] text-cyan-200">{token.slice(1, -1)}</code>);
-        } else {
-            nodes.push(<strong key={`strong-${match.index}`} className="font-semibold text-zinc-100">{token.slice(2, -2)}</strong>);
+function paramsToPayload(params: URLSearchParams, skip: Set<string> = new Set()): Record<string, any> {
+    const payload: Record<string, any> = {};
+    params.forEach((value, key) => {
+        if (skip.has(key)) return;
+        if (/^(lat|lng|lon|height|speed|alt|heading|heading_deg|speed_mps|opacity)$/i.test(key)) {
+            const numeric = Number(value);
+            payload[key] = Number.isFinite(numeric) ? numeric : value;
+            return;
         }
-        cursor = match.index + token.length;
-    }
-    if (cursor < text.length) nodes.push(text.slice(cursor));
-    return nodes;
+        if (/^(show_marker|draw_marker|enabled)$/i.test(key)) {
+            payload[key] = ['1', 'true', 'yes', 'on'].includes(value.toLowerCase());
+            return;
+        }
+        payload[key] = value;
+    });
+    return payload;
 }
 
-function MarkdownBlock({ text }: { text: string }) {
+function parseJsonParam(params: URLSearchParams): Record<string, any> {
+    const raw = params.get('payload') || params.get('payload_json');
+    if (!raw) return {};
+    try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+function parseOpenSpyLink(href: string, fallbackLabel?: string): AgentAction | null {
+    if (!href || !href.startsWith('ospy://')) return null;
+    const url = new URL(href);
+    const target = (url.hostname || url.pathname.replace(/^\/+/, '')).toLowerCase();
+    const params = url.searchParams;
+    const label = params.get('label') || fallbackLabel || undefined;
+    const jsonPayload = parseJsonParam(params);
+    const skip = new Set(['type', 'label', 'payload', 'payload_json']);
+    const payload = {
+        ...paramsToPayload(params, skip),
+        ...jsonPayload,
+    };
+
+    if (target === 'entity' || target === 'object' || target === 'asset' || target === 'event') {
+        const id = payload.entity_id || payload.entityId || payload.id || payload.asset_id || payload.event_id;
+        if (!id) throw new Error(`ospy://${target} requires entity_id, id, asset_id or event_id`);
+        return {
+            type: params.get('type') || 'object.open',
+            label: label || `Open ${payload.name || payload.display_name || id}`,
+            payload: {
+                ...payload,
+                id,
+                entity_id: payload.entity_id || payload.entityId || id,
+                object_type: payload.object_type || payload.objectType || typeForLayer(payload.layer || payload.layer_id || target),
+                show_marker: payload.show_marker ?? true,
+                draw_marker: payload.draw_marker ?? true,
+            },
+        };
+    }
+
+    if (target === 'selection') {
+        if (!payload.selection_id && !payload.selectionId) throw new Error('ospy://selection requires selection_id');
+        return {
+            type: params.get('type') || 'selection.apply',
+            label: label || 'Apply selection',
+            payload,
+        };
+    }
+
+    if (target === 'replay') {
+        const type = payload.from || payload.to ? 'replay.play_window' : 'replay.seek';
+        return {
+            type: params.get('type') || type,
+            label: label || (type === 'replay.seek' ? 'Seek replay' : 'Play replay'),
+            payload,
+        };
+    }
+
+    if (target === 'map' || target === 'camera') {
+        return {
+            type: params.get('type') || 'map.fly_to',
+            label: label || 'Move map',
+            payload,
+        };
+    }
+
+    if (target === 'action') {
+        const type = params.get('type');
+        if (!type) throw new Error('ospy://action requires type');
+        return {
+            type,
+            label: label || formatActionType(type),
+            payload,
+        };
+    }
+
+    throw new Error(`Unsupported OpenSpy link target: ${target}`);
+}
+
+function childrenText(value: any): string {
+    if (typeof value === 'string') return value;
+    if (Array.isArray(value)) return value.map(childrenText).join('');
+    if (value && typeof value === 'object' && 'props' in value) return childrenText(value.props?.children);
+    return '';
+}
+
+function MarkdownBlock({
+    text,
+    onOpenSpyLinkClick,
+}: {
+    text: string;
+    onOpenSpyLinkClick?: (href: string, label?: string) => void;
+}) {
     const cleaned = cleanVisibleText(text);
     if (!cleaned) return null;
-    const lines = cleaned.split(/\n/);
-    const blocks: JSX.Element[] = [];
-    let listItems: string[] = [];
-    const flushList = () => {
-        if (listItems.length === 0) return;
-        const items = listItems;
-        listItems = [];
-        blocks.push(
-            <ul key={`list-${blocks.length}`} className="my-2 list-disc space-y-1 pl-4 text-xs leading-relaxed text-zinc-300">
-                {items.map((item, idx) => (
-                    <li key={`${item}-${idx}`}>{inlineMarkdown(item)}</li>
-                ))}
-            </ul>,
-        );
-    };
-    const parseTableRow = (line: string) => line
-        .replace(/^\|/, '')
-        .replace(/\|$/, '')
-        .split('|')
-        .map((cell) => cell.trim());
-    const isTableSeparator = (line: string) => /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line);
-
-    for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-        const rawLine = lines[lineIndex];
-        const line = rawLine.trim();
-        if (!line) {
-            flushList();
-            continue;
-        }
-        if (line.startsWith('|') && lines[lineIndex + 1] && isTableSeparator(lines[lineIndex + 1].trim())) {
-            flushList();
-            const header = parseTableRow(line);
-            lineIndex += 2;
-            const rows: string[][] = [];
-            while (lineIndex < lines.length && lines[lineIndex].trim().startsWith('|')) {
-                rows.push(parseTableRow(lines[lineIndex].trim()));
-                lineIndex += 1;
-            }
-            lineIndex -= 1;
-            blocks.push(
-                <div key={`table-${blocks.length}`} className="my-2 overflow-x-auto rounded border border-zinc-800">
-                    <table className="min-w-full border-collapse text-left text-[10px] text-zinc-300">
-                        <thead className="bg-zinc-900/80 text-zinc-100">
-                            <tr>
-                                {header.map((cell, idx) => (
-                                    <th key={`${cell}-${idx}`} className="border-b border-zinc-800 px-2 py-1 font-semibold">
-                                        {inlineMarkdown(cell)}
-                                    </th>
-                                ))}
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {rows.map((row, rowIdx) => (
-                                <tr key={`row-${rowIdx}`} className="odd:bg-zinc-950/80 even:bg-zinc-900/30">
-                                    {row.map((cell, cellIdx) => (
-                                        <td key={`${cell}-${cellIdx}`} className="border-t border-zinc-900 px-2 py-1 align-top">
-                                            {inlineMarkdown(cell)}
-                                        </td>
-                                    ))}
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>,
-            );
-            continue;
-        }
-        const bullet = line.match(/^[-*]\s+(.+)$/);
-        if (bullet) {
-            listItems.push(bullet[1]);
-            continue;
-        }
-        flushList();
-        const heading = line.match(/^(#{1,3})\s+(.+)$/);
-        if (heading) {
-            blocks.push(
-                <div key={`h-${blocks.length}`} className="mt-2 text-[12px] font-semibold text-zinc-100">
-                    {inlineMarkdown(heading[2])}
-                </div>,
-            );
-            continue;
-        }
-        blocks.push(
-            <p key={`p-${blocks.length}`} className="my-1 text-xs leading-relaxed text-zinc-300">
-                {inlineMarkdown(line)}
-            </p>,
-        );
-    }
-    flushList();
-    return <>{blocks}</>;
+    return (
+        <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            urlTransform={(url) => (url.startsWith('ospy://') ? url : defaultUrlTransform(url))}
+            components={{
+                p: ({ children }) => <p className="my-1 text-xs leading-relaxed text-zinc-300">{children}</p>,
+                ul: ({ children }) => <ul className="my-2 list-disc space-y-1 pl-4 text-xs leading-relaxed text-zinc-300">{children}</ul>,
+                ol: ({ children }) => <ol className="my-2 list-decimal space-y-1 pl-4 text-xs leading-relaxed text-zinc-300">{children}</ol>,
+                li: ({ children }) => <li>{children}</li>,
+                strong: ({ children }) => <strong className="font-semibold text-zinc-100">{children}</strong>,
+                code: ({ children }) => <code className="rounded bg-zinc-900 px-1 py-0.5 text-[11px] text-cyan-200">{children}</code>,
+                h1: ({ children }) => <div className="mt-2 text-[13px] font-semibold text-zinc-100">{children}</div>,
+                h2: ({ children }) => <div className="mt-2 text-[12px] font-semibold text-zinc-100">{children}</div>,
+                h3: ({ children }) => <div className="mt-2 text-[12px] font-semibold text-zinc-100">{children}</div>,
+                table: ({ children }) => (
+                    <div className="my-2 overflow-x-auto rounded border border-zinc-800">
+                        <table className="min-w-full border-collapse text-left text-[10px] text-zinc-300">{children}</table>
+                    </div>
+                ),
+                thead: ({ children }) => <thead className="bg-zinc-900/80 text-zinc-100">{children}</thead>,
+                th: ({ children }) => <th className="border-b border-zinc-800 px-2 py-1 font-semibold">{children}</th>,
+                tr: ({ children }) => <tr className="odd:bg-zinc-950/80 even:bg-zinc-900/30">{children}</tr>,
+                td: ({ children }) => <td className="border-t border-zinc-900 px-2 py-1 align-top">{children}</td>,
+                a: ({ href, children }) => {
+                    const linkHref = String(href || '');
+                    if (linkHref.startsWith('ospy://')) {
+                        return (
+                            <button
+                                type="button"
+                                onClick={() => onOpenSpyLinkClick?.(linkHref, childrenText(children))}
+                                title="Open in OpenSpy"
+                                className="inline-flex max-w-full items-baseline rounded border border-cyan-900/70 bg-cyan-950/20 px-1 py-0.5 align-baseline font-mono text-[11px] leading-none text-cyan-200 underline decoration-cyan-700/70 underline-offset-2 hover:border-cyan-500 hover:bg-cyan-950/50 hover:text-cyan-100"
+                            >
+                                {children}
+                            </button>
+                        );
+                    }
+                    return (
+                        <a
+                            href={linkHref}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-cyan-300 underline decoration-cyan-700 underline-offset-2 hover:text-cyan-100"
+                        >
+                            {children}
+                        </a>
+                    );
+                },
+            }}
+        >
+            {cleaned}
+        </ReactMarkdown>
+    );
 }
 
 function displayPartsForMessage(message: AgentMessage, runningRunId: string | null): AgentStreamPart[] {
     const parts = streamPartsFromMetadata(message.metadata);
     if (parts.length === 0) return [];
-    const isFinal = message.role === 'assistant'
-        && message.agent_message_id !== `run:${runningRunId || ''}`;
-    if (!isFinal) return parts;
-    return parts.filter((part) => part.type !== 'tool' || part.state !== 'started');
+    return parts;
 }
 
 function groupStreamParts(parts: AgentStreamPart[]): Array<{ type: 'text'; part: AgentStreamPart } | { type: 'tools'; parts: AgentStreamPart[] }> {
@@ -376,25 +461,53 @@ function groupStreamParts(parts: AgentStreamPart[]): Array<{ type: 'text'; part:
 }
 
 function ToolGroup({ parts }: { parts: AgentStreamPart[] }) {
-    const completed = parts.filter((part) => part.state === 'completed' && !part.isError).length;
-    const failed = parts.filter((part) => part.state === 'completed' && part.isError).length;
-    const running = parts.filter((part) => part.state === 'started').length;
-    if (completed === 0 && failed === 0 && running === 0) return null;
-    const summary = [
-        completed > 0 ? `${completed} completed` : '',
-        failed > 0 ? `${failed} failed` : '',
-        running > 0 ? `${running} running` : '',
-    ].filter(Boolean).join(', ') || `${parts.length} calls`;
+    const visibleParts = parts.filter((part) => part.state === 'started' || part.state === 'completed');
+    if (visibleParts.length === 0) return null;
+    const rows: Array<{
+        key: string;
+        id: string;
+        name?: string;
+        toolUseId?: string;
+        rawTypes: string[];
+        input?: any;
+        output?: any;
+        state?: 'started' | 'completed' | 'status';
+        isError?: boolean;
+    }> = [];
+    const rowByKey = new Map<string, (typeof rows)[number]>();
+    for (const part of visibleParts) {
+        const key = part.toolUseId ? `tool:${part.toolUseId}` : part.id;
+        let row = rowByKey.get(key);
+        if (!row) {
+            row = {
+                key,
+                id: part.id,
+                name: part.name,
+                toolUseId: part.toolUseId,
+                rawTypes: [],
+                state: part.state,
+                isError: part.isError,
+            };
+            rowByKey.set(key, row);
+            rows.push(row);
+        }
+        if (part.name && (!row.name || isGenericToolName(row.name) || !isGenericToolName(part.name))) row.name = part.name;
+        if (part.toolUseId) row.toolUseId = part.toolUseId;
+        if (part.rawType && !row.rawTypes.includes(part.rawType)) row.rawTypes.push(part.rawType);
+        if (part.input !== undefined) row.input = part.input;
+        if (part.output !== undefined) row.output = part.output;
+        if (part.state === 'completed') row.state = 'completed';
+        if (part.isError) row.isError = true;
+    }
     return (
-        <details className="my-1 rounded border border-zinc-800 bg-zinc-950/60 px-2 py-1 text-[10px] font-mono text-zinc-500">
-            <summary className="cursor-pointer select-none text-zinc-400">
-                Tools: {summary}
-            </summary>
-            <div className="mt-1 space-y-1">
-                {parts.map((part) => (
-                    <div
-                        key={part.id}
-                        className={`flex items-center gap-1.5 rounded border px-2 py-1 ${
+        <div className="my-1 space-y-1 text-[10px] font-mono">
+            {rows.map((part) => {
+                const input = formatToolPayload(part.input);
+                const output = formatToolPayload(part.output);
+                return (
+                    <details
+                        key={part.key}
+                        className={`rounded border px-2 py-1 ${
                             part.isError
                                 ? 'border-red-950/60 bg-red-950/15 text-red-300'
                                 : part.state === 'started'
@@ -402,14 +515,47 @@ function ToolGroup({ parts }: { parts: AgentStreamPart[] }) {
                                     : 'border-cyan-950/70 bg-cyan-950/15 text-cyan-300'
                         }`}
                     >
-                        <Database size={12} />
-                        <span className="truncate">
-                            {part.state === 'started' ? 'Started' : part.isError ? 'Failed' : 'Completed'}: {cleanToolName(part.name)}
-                        </span>
-                    </div>
-                ))}
-            </div>
-        </details>
+                        <summary className="flex cursor-pointer list-none items-center gap-1.5">
+                            <Database size={12} className="shrink-0" />
+                            <span className="min-w-0 flex-1 truncate">
+                                {part.state === 'started' ? 'Started' : part.isError ? 'Failed' : 'Completed'}: {cleanToolName(part.name)}
+                            </span>
+                        </summary>
+                        <div className="mt-1 space-y-1 border-t border-zinc-800/70 pt-1 text-[10px] text-zinc-400">
+                            {part.toolUseId && (
+                                <div className="truncate">
+                                    <span className="text-zinc-500">id:</span> {part.toolUseId}
+                                </div>
+                            )}
+                            {part.rawTypes.length > 0 && (
+                                <div className="truncate">
+                                    <span className="text-zinc-500">event:</span> {part.rawTypes.join(', ')}
+                                </div>
+                            )}
+                            {input && (
+                                <div>
+                                    <div className="mb-0.5 text-zinc-500">IN</div>
+                                    <pre className="max-h-44 overflow-auto whitespace-pre-wrap rounded bg-black/60 p-2 text-[10px] leading-relaxed text-zinc-300">
+                                        {input}
+                                    </pre>
+                                </div>
+                            )}
+                            {output && (
+                                <div>
+                                    <div className="mb-0.5 text-zinc-500">OUT</div>
+                                    <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded bg-black/60 p-2 text-[10px] leading-relaxed text-zinc-300">
+                                        {output}
+                                    </pre>
+                                </div>
+                            )}
+                            {!input && !output && (
+                                <div className="text-zinc-600">No structured payload in stream event.</div>
+                            )}
+                        </div>
+                    </details>
+                );
+            })}
+        </div>
     );
 }
 
@@ -468,7 +614,8 @@ function finalizeStreamParts(
 ): Record<string, any> {
     const parts = streamPartsFromMetadata(metadata);
     if (parts.length === 0) return metadata || {};
-    if (finalContent) {
+    const hasStreamedText = parts.some((part) => part.type === 'text' && String(part.text || '').trim());
+    if (finalContent && !hasStreamedText) {
         return {
             ...(metadata || {}),
             streamParts: [
@@ -563,6 +710,10 @@ function appendEventPart(
                 type: isTool ? 'tool' : 'status',
                 eventType,
                 name,
+                toolUseId: typeof payload.tool_use_id === 'string' ? payload.tool_use_id : undefined,
+                rawType: typeof payload.raw_type === 'string' ? payload.raw_type : undefined,
+                input: payload.input,
+                output: payload.output,
                 state,
                 isError: Boolean(payload.is_error),
                 text: message,
@@ -822,16 +973,22 @@ function trackPointFromValue(value: any): TrackPoint | null {
     const props = value.properties && typeof value.properties === 'object' ? value.properties : {};
     const coordinates = value.geometry?.coordinates || value.coordinates;
     const pair = Array.isArray(coordinates) ? normalizeCoordinatePair(coordinates) : null;
-    const lng = Number(value.lng ?? value.lon ?? value.longitude ?? props.lng ?? props.lon ?? props.longitude ?? pair?.[0]);
-    const lat = Number(value.lat ?? value.latitude ?? props.lat ?? props.latitude ?? pair?.[1]);
+    const lng = Number(value.lng ?? value.lon ?? value.longitude ?? value.display_lng ?? props.lng ?? props.lon ?? props.longitude ?? props.display_lng ?? pair?.[0]);
+    const lat = Number(value.lat ?? value.latitude ?? value.display_lat ?? props.lat ?? props.latitude ?? props.display_lat ?? pair?.[1]);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
     const alt = Number(value.alt ?? value.altitude ?? value.altitude_m ?? props.alt ?? props.altitude ?? props.altitude_m ?? coordinates?.[2] ?? 0);
     const at = String(value.at || value.time || value.observed_at || props.at || props.time || props.observed_at || '');
+    const heading = Number(value.heading_deg ?? value.heading ?? props.heading_deg ?? props.heading);
+    const speed = Number(value.speed_mps ?? value.speed ?? props.speed_mps ?? props.speed);
     return {
         lat,
         lng,
         alt: Number.isFinite(alt) ? alt : 0,
         at: at || undefined,
+        heading: Number.isFinite(heading) ? heading : undefined,
+        speed: Number.isFinite(speed) ? speed : undefined,
+        layer: value.layer_id || props.layer_id || undefined,
+        source: value.source_id || props.source_id || undefined,
     };
 }
 
@@ -904,6 +1061,56 @@ async function fetchTrackPoints(payload: Record<string, any>): Promise<TrackPoin
     return (Array.isArray(json?.items) ? json.items : [])
         .map(trackPointFromValue)
         .filter((point: TrackPoint | null): point is TrackPoint => point !== null);
+}
+
+function nearestTrackPoint(points: TrackPoint[], at: string): TrackPoint | null {
+    if (points.length === 0) return null;
+    const target = new Date(at).getTime();
+    if (Number.isNaN(target)) return points[points.length - 1] || null;
+    let best = points[0];
+    let bestDelta = Number.POSITIVE_INFINITY;
+    for (const point of points) {
+        const observed = point.at ? new Date(point.at).getTime() : Number.NaN;
+        const delta = Number.isNaN(observed) ? Number.POSITIVE_INFINITY : Math.abs(observed - target);
+        if (delta < bestDelta) {
+            best = point;
+            bestDelta = delta;
+        }
+    }
+    return best || null;
+}
+
+async function resolveEntityPoint(payload: Record<string, any>, entityId: string): Promise<TrackPoint | null> {
+    const lat = Number(payload.lat ?? payload.latitude);
+    const lng = Number(payload.lng ?? payload.lon ?? payload.longitude);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+        return {
+            lat,
+            lng,
+            alt: Number(payload.alt ?? payload.altitude ?? payload.height ?? 0) || 0,
+            at: payload.at || payload.time || undefined,
+            heading: Number.isFinite(Number(payload.heading_deg ?? payload.heading)) ? Number(payload.heading_deg ?? payload.heading) : undefined,
+            speed: Number.isFinite(Number(payload.speed_mps ?? payload.speed)) ? Number(payload.speed_mps ?? payload.speed) : undefined,
+            layer: payload.layer || payload.layer_id || undefined,
+            source: payload.source || payload.source_id || undefined,
+        };
+    }
+
+    const at = String(payload.at || payload.time || '').trim();
+    const date = at ? new Date(at) : null;
+    if (!date || Number.isNaN(date.getTime())) return null;
+    const windowMinutes = Number(payload.lookup_window_minutes ?? payload.lookupWindowMinutes ?? 30);
+    const boundedWindowMinutes = Number.isFinite(windowMinutes) ? Math.max(1, Math.min(windowMinutes, 240)) : 30;
+    const from = new Date(date.getTime() - boundedWindowMinutes * 60_000).toISOString();
+    const to = new Date(date.getTime() + boundedWindowMinutes * 60_000).toISOString();
+    const points = await fetchTrackPoints({
+        entity_id: entityId,
+        from,
+        to,
+        limit: payload.lookup_limit || 120,
+        stepSeconds: payload.stepSeconds || payload.step_seconds,
+    });
+    return nearestTrackPoint(points, at);
 }
 
 async function animateTrackOverlay(
@@ -983,15 +1190,27 @@ function normalizeGibsLayerName(value: any): string {
         modis_true_color: 'MODIS_Terra_CorrectedReflectance_TrueColor',
         terra_true_color: 'MODIS_Terra_CorrectedReflectance_TrueColor',
         true_color: 'MODIS_Terra_CorrectedReflectance_TrueColor',
+        aqua_true_color: 'MODIS_Aqua_CorrectedReflectance_TrueColor',
         viirs: 'VIIRS_SNPP_CorrectedReflectance_TrueColor',
         viirs_true_color: 'VIIRS_SNPP_CorrectedReflectance_TrueColor',
+        viirs_noaa20_true_color: 'VIIRS_NOAA20_CorrectedReflectance_TrueColor',
+        viirs_noaa21_true_color: 'VIIRS_NOAA21_CorrectedReflectance_TrueColor',
     };
     return aliases[normalized] || key || 'MODIS_Terra_CorrectedReflectance_TrueColor';
 }
 
 function showGibsImageryLayer(viewer: Cesium.Viewer, payload: Record<string, any>): void {
-    const layerName = normalizeGibsLayerName(payload.layer || payload.product || payload.gibsLayer || payload.gibs_layer);
-    const date = new Date(payload.time || payload.at || payload.date || Date.now() - 86400_000);
+    const scene = payload.scene && typeof payload.scene === 'object' ? payload.scene : null;
+    const layerName = normalizeGibsLayerName(
+        payload.gibsLayer
+        || payload.gibs_layer
+        || scene?.layer_id
+        || scene?.gibsLayer
+        || payload.layer
+        || payload.product
+        || scene?.requested_layer,
+    );
+    const date = new Date(payload.time || payload.at || payload.date || scene?.date || Date.now() - 86400_000);
     if (Number.isNaN(date.getTime())) throw new Error('imagery.show_layer requires a valid date/time');
     const time = date.toISOString().slice(0, 10);
     const opacity = Number(payload.opacity ?? payload.alpha ?? 0.65);
@@ -1032,13 +1251,17 @@ function drawPointOrLabel(
     payload: Record<string, any>,
     label: string,
     color: Cesium.Color,
-): void {
+): string {
     const lat = Number(payload.lat ?? payload.latitude);
     const lng = Number(payload.lng ?? payload.lon ?? payload.longitude);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) throw new Error('Point action requires lat and lng');
+    const id = String(payload.entity_id || payload.entityId || payload.id || `${AGENT_ENTITY_PREFIX}annotation-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    const height = Number(payload.height ?? payload.alt ?? payload.altitude ?? 0);
+    const existing = viewer.entities.getById(id);
+    if (existing) viewer.entities.remove(existing);
     viewer.entities.add({
-        id: `${AGENT_ENTITY_PREFIX}annotation-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-        position: Cesium.Cartesian3.fromDegrees(lng, lat, Number(payload.height || 0)),
+        id,
+        position: Cesium.Cartesian3.fromDegrees(lng, lat, Number.isFinite(height) ? height : 0),
         point: {
             pixelSize: Number(payload.pixelSize || 12),
             color: color.withAlpha(0.9),
@@ -1057,6 +1280,26 @@ function drawPointOrLabel(
             disableDepthTestDistance: Number.POSITIVE_INFINITY,
         },
     });
+    replayMetaMap.set(id, {
+        id,
+        name: String(payload.name || payload.display_name || payload.label || payload.text || label || id),
+        layer: typeForLayer(payload.layer || payload.layer_id),
+        layerId: normalizeCatalogLayerId(payload.layer || payload.layer_id || '') || String(payload.layer || payload.layer_id || ''),
+        subtype: payload.subtype || payload.type || null,
+        source: payload.source || payload.source_id || null,
+        lat,
+        lng,
+        alt: Number.isFinite(height) ? height : 0,
+        speed: Number.isFinite(Number(payload.speed_mps ?? payload.speed)) ? Number(payload.speed_mps ?? payload.speed) : null,
+        heading: Number.isFinite(Number(payload.heading_deg ?? payload.heading)) ? Number(payload.heading_deg ?? payload.heading) : null,
+        description: payload.description || payload.note || undefined,
+        extra: {
+            ...((payload.metadata && typeof payload.metadata === 'object') ? payload.metadata : {}),
+            agentOverlay: true,
+            observedAt: payload.observed_at || payload.observedAt || payload.at || payload.time || undefined,
+        },
+    });
+    return id;
 }
 
 function drawGeometryOverlay(
@@ -1164,7 +1407,7 @@ function drawGeometryOverlay(
 }
 
 function runCursorKey(runId: string): string {
-    return `aiw:agent-run-cursor:${runId}`;
+    return `ospy:agent-run-cursor:${runId}`;
 }
 
 function readRunCursor(runId: string): number {
@@ -1247,6 +1490,24 @@ function startHistoricalPlaybackWhenReady(timeoutMs = 900_000, stableMs = 500): 
     };
 
     tick();
+}
+
+function pauseHistoricalPlayback(action: 'pause' | 'stop' = 'pause'): void {
+    cancelPendingHistoricalPlayback();
+    const state = useTimelineStore.getState();
+    state.setIsPlaying(false);
+    document.dispatchEvent(new CustomEvent('timeline-ctrl', { detail: { action } }));
+}
+
+function publishPresentationState(detail: Record<string, any>): void {
+    if (typeof window === 'undefined') return;
+    (window as any).__agentPresentationState = {
+        ...detail,
+        updatedAt: new Date().toISOString(),
+    };
+    document.dispatchEvent(new CustomEvent('agent-presentation-state', {
+        detail: (window as any).__agentPresentationState,
+    }));
 }
 
 function shouldResumeHistoricalPlaybackAfterViewChange(state: ReturnType<typeof useTimelineStore.getState>): boolean {
@@ -1348,6 +1609,20 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
     useEffect(() => {
         activeSessionIdRef.current = activeSessionId;
     }, [activeSessionId]);
+
+    useEffect(() => {
+        (window as any).__agentPresentationRunningKey = runningPresentationKey;
+    }, [runningPresentationKey]);
+
+    useEffect(() => {
+        const handleReplayControl = (event: Event) => {
+            const action = String((event as CustomEvent).detail?.action || '').toLowerCase();
+            if (action !== 'pause' && action !== 'stop') return;
+            pauseHistoricalPlayback(action);
+        };
+        document.addEventListener('agent-replay-control', handleReplayControl);
+        return () => document.removeEventListener('agent-replay-control', handleReplayControl);
+    }, []);
 
     useEffect(() => {
         if (availableProviders.length === 0) return;
@@ -1826,6 +2101,11 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
             return;
         }
 
+        if (action.type === 'replay.pause' || action.type === 'replay.stop') {
+            pauseHistoricalPlayback(action.type === 'replay.stop' ? 'stop' : 'pause');
+            return;
+        }
+
         if (action.type === 'replay.follow_entity') {
             const entityId = String(payload.entity_id || payload.entityId || '');
             if (!entityId) throw new Error('replay.follow_entity requires entity_id');
@@ -1857,6 +2137,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                     changedReplayTime = true;
                 }
             }
+            const resolvedPoint = await resolveEntityPoint(payload, entityId);
             const layer = payload.layer || payload.layer_id || payload.type;
             store.setSelectedEntityId(entityId, {
                 id: entityId,
@@ -1864,17 +2145,34 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                 type: payload.object_type || payload.objectType || typeForLayer(layer),
                 layer,
                 source: payload.source || payload.source_id,
+                lat: resolvedPoint?.lat,
+                lng: resolvedPoint?.lng,
+                alt: resolvedPoint?.alt,
+                heading: resolvedPoint?.heading,
+                speed: resolvedPoint?.speed,
+                observedAt: resolvedPoint?.at || at || undefined,
                 agentSelected: true,
                 ...((payload.metadata && typeof payload.metadata === 'object') ? payload.metadata : {}),
             });
-            const lat = Number(payload.lat ?? payload.latitude);
-            const lng = Number(payload.lng ?? payload.lon ?? payload.longitude);
+            const lat = Number(resolvedPoint?.lat);
+            const lng = Number(resolvedPoint?.lng);
             if (Number.isFinite(lat) && Number.isFinite(lng)) {
                 const viewer = getViewer();
                 if (viewer && payload.draw_marker !== false && payload.show_marker !== false) {
                     drawPointOrLabel(
                         viewer,
-                        { ...payload, lat, lng, pixelSize: payload.pixelSize || 10 },
+                        {
+                            ...payload,
+                            lat,
+                            lng,
+                            alt: resolvedPoint?.alt,
+                            heading: payload.heading ?? payload.heading_deg ?? resolvedPoint?.heading,
+                            speed: payload.speed ?? payload.speed_mps ?? resolvedPoint?.speed,
+                            source: payload.source || payload.source_id || resolvedPoint?.source,
+                            layer: payload.layer || payload.layer_id || resolvedPoint?.layer,
+                            observed_at: resolvedPoint?.at || at || undefined,
+                            pixelSize: payload.pixelSize || 10,
+                        },
                         String(action.label || payload.label || payload.name || payload.display_name || entityId),
                         colorFromPayload(payload.color, Cesium.Color.YELLOW),
                     );
@@ -1905,8 +2203,14 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         if (action.type === 'map.clear_agent_overlays') {
             const viewer = getViewer();
             if (!viewer) throw new Error('Cesium viewer is not ready');
-            const entities = viewer.entities.values.filter((entity) => String(entity.id || '').startsWith(AGENT_ENTITY_PREFIX));
+            const entities = viewer.entities.values.filter((entity) => {
+                    const id = String(entity.id || '');
+                    return id.startsWith(AGENT_ENTITY_PREFIX) || Boolean(replayMetaMap.get(id)?.extra?.agentOverlay);
+                });
             for (const entity of entities) viewer.entities.remove(entity);
+            for (const [id, meta] of Array.from(replayMetaMap.entries())) {
+                if (id.startsWith(AGENT_ENTITY_PREFIX) || meta.extra?.agentOverlay) replayMetaMap.delete(id);
+            }
             clearAgentImageryLayers(viewer);
             viewer.scene.requestRender();
             return;
@@ -2069,6 +2373,17 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         }
     }, []);
 
+    const openOpenSpyLink = useCallback(async (href: string, label?: string) => {
+        try {
+            setError(null);
+            const action = parseOpenSpyLink(href, label);
+            if (!action) throw new Error('Unsupported OpenSpy link');
+            await applyAction(action, activeSessionIdRef.current);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'OpenSpy link failed');
+        }
+    }, [applyAction]);
+
     const replayPresentation = useCallback(async (sessionId: string, messageId: string, actions: AgentAction[]) => {
         if (activeSessionIdRef.current !== sessionId) {
             setError('Switch back to this agent session to replay its presentation');
@@ -2076,6 +2391,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         }
         const key = `${sessionId}:${messageId}`;
         setRunningPresentationKey(key);
+        publishPresentationState({ key, sessionId, messageId, status: 'running' });
         setError(null);
         cancelPendingHistoricalPlayback();
         const actionErrors: string[] = [];
@@ -2100,7 +2416,21 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
             if (actionErrors.length > 0) {
                 setError(`Presentation finished with ${actionErrors.length} skipped step(s)`);
             }
+            publishPresentationState({
+                key,
+                sessionId,
+                messageId,
+                status: actionErrors.length > 0 ? 'partial' : 'completed',
+                skippedSteps: actionErrors.length,
+            });
         } catch (err) {
+            publishPresentationState({
+                key,
+                sessionId,
+                messageId,
+                status: 'stopped',
+                error: err instanceof Error ? err.message : 'Agent presentation failed',
+            });
             setError(err instanceof Error ? err.message : 'Agent presentation failed');
         } finally {
             setRunningPresentationKey((current) => (current === key ? null : current));
@@ -2110,7 +2440,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
     if (!isOpen) return null;
 
     return (
-        <div className="absolute right-4 bottom-24 z-40 w-[min(440px,calc(100vw-24px))] max-h-[calc(100vh-140px)] rounded-lg border border-zinc-800 bg-black/85 backdrop-blur-xl shadow-2xl flex flex-col overflow-hidden">
+        <div className="absolute top-4 right-4 bottom-4 z-40 w-[min(456px,calc(100vw-24px))] rounded-lg border border-zinc-800 bg-black/85 backdrop-blur-xl shadow-2xl flex flex-col overflow-hidden">
             <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800">
                 <div className="flex items-center gap-2 min-w-0">
                     <Bot size={15} className="text-cyan-300 shrink-0" />
@@ -2199,7 +2529,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                                 <div className="space-y-1.5">
                                     {streamGroups.map((group, idx) => (
                                         group.type === 'text' ? (
-                                            <MarkdownBlock key={group.part.id} text={group.part.text || ''} />
+                                            <MarkdownBlock key={group.part.id} text={group.part.text || ''} onOpenSpyLinkClick={(href, label) => void openOpenSpyLink(href, label)} />
                                         ) : (
                                             <ToolGroup key={`tools-${idx}-${group.parts[0]?.id || idx}`} parts={group.parts} />
                                         )
@@ -2207,7 +2537,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                                 </div>
                             ) : (
                                 <div>
-                                    {message.content ? <MarkdownBlock text={message.content} /> : (message.role === 'assistant' && runningRunId ? <Loader2 size={14} className="animate-spin text-cyan-300" /> : '')}
+                                    {message.content ? <MarkdownBlock text={message.content} onOpenSpyLinkClick={(href, label) => void openOpenSpyLink(href, label)} /> : (message.role === 'assistant' && runningRunId ? <Loader2 size={14} className="animate-spin text-cyan-300" /> : '')}
                                 </div>
                             )}
                             {actions.length > 0 && activeSessionId && (

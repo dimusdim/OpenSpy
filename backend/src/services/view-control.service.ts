@@ -62,8 +62,46 @@ type TaxonomyNode = {
     metadata?: Record<string, any>;
 };
 
+const LEGEND_NODE_ALIASES: Record<string, string> = {
+    air: 'air',
+    aviation: 'air/aircraft',
+    aircraft: 'air/aircraft',
+    airspace: 'air/airspace',
+    jamming: 'air/jamming',
+    gnss_jamming: 'air/jamming',
+    sea: 'maritime',
+    maritime: 'maritime',
+    vessel: 'maritime/vessels',
+    vessels: 'maritime/vessels',
+    satellite: 'space/satellites',
+    satellites: 'space/satellites',
+    fires: 'ground-events/fires',
+    fire: 'ground-events/fires',
+    conflict: 'ground-events/conflicts',
+    conflicts: 'ground-events/conflicts',
+    disasters: 'ground-events/disasters',
+    infrastructure: 'infrastructure',
+    pipelines: 'infrastructure/oil-gas/pipelines',
+    pipeline: 'infrastructure/oil-gas/pipelines',
+    infrastructure_cables: 'infrastructure/telecom-infra/cables',
+    infrastructure_telecom: 'infrastructure/telecom-infra',
+    telecom_cables: 'infrastructure/telecom-infra/cables',
+    cables: 'infrastructure/telecom-infra/cables',
+    cable: 'infrastructure/telecom-infra/cables',
+    wifi: 'connectivity/wifi',
+    outages: 'connectivity/outages',
+    outage: 'connectivity/outages',
+};
+
 function cloneObject(value: any): Record<string, any> {
     return value && typeof value === 'object' && !Array.isArray(value) ? { ...value } : {};
+}
+
+function normalizeLegendNodeId(nodeId: string): string {
+    const raw = String(nodeId || '').trim();
+    if (!raw) return '';
+    const key = raw.replace(/-/g, '_').replace(/\//g, '_').toLowerCase();
+    return LEGEND_NODE_ALIASES[key] || raw;
 }
 
 function mergeViewState(current: ViewStatePayload, patch: Record<string, any>): ViewStatePayload {
@@ -129,9 +167,10 @@ export class ViewControlService {
     }
 
     async setLegendNodeState(nodeId: string, enabled: boolean, target: LegendTarget): Promise<ViewStatePayload> {
+        const normalizedNodeId = normalizeLegendNodeId(nodeId);
         const taxonomy = await this.catalogReadService.getUiTaxonomy();
         const nodes = this.flattenNodes(Array.isArray(taxonomy) ? taxonomy : (taxonomy as any)?.tree || []);
-        const targetNode = nodes.find((node) => node.node_id === nodeId || node.slug === nodeId);
+        const targetNode = nodes.find((node) => node.node_id === normalizedNodeId || node.slug === normalizedNodeId);
         if (!targetNode) {
             throw new Error(`Legend node not found: ${nodeId}`);
         }

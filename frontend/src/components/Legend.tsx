@@ -46,6 +46,7 @@ interface LayerNode {
     subtypes: SubtypeNode[];
     sources?: Array<{ sourceId: string; label: string }>;
     scope?: 'live-only';
+    scopeNote?: string;
     // special: instead of toggleVisibility, use a different store action
     special?: 'trajectories';
 }
@@ -211,6 +212,7 @@ const DOMAIN_TREE: DomainNode[] = [
                     { key: 'unknown', label: 'Unknown', icon: Wifi, color: 'text-zinc-400' },
                 ],
                 scope: 'live-only',
+                scopeNote: 'Live-only viewport layer below 300 m AGL. Stored observations are used for cache/audit, not replay hydration.',
             },
             {
                 layer: 'outages', label: 'Outages', icon: WifiOff,
@@ -225,11 +227,11 @@ const DOMAIN_TREE: DomainNode[] = [
     {
         domain: 'context', label: 'Context', icon: Globe2, color: 'text-zinc-400',
         children: [
-            { layer: 'traffic', label: 'Traffic', icon: Car, subtypes: [], scope: 'live-only' },
-            { layer: 'webcams', label: 'Cameras', icon: Camera, subtypes: [], scope: 'live-only' },
+            { layer: 'traffic', label: 'Traffic', icon: Car, subtypes: [], scope: 'live-only', scopeNote: 'Live-only raster traffic overlay. Historical traffic replay is not configured.' },
+            { layer: 'webcams', label: 'Cameras', icon: Camera, subtypes: [], scope: 'live-only', scopeNote: 'Live/current camera metadata. Camera history is not stored for replay.' },
             { layer: 'labels', label: 'Borders', icon: Globe2, subtypes: [] },
-            { layer: 'clouds', label: 'Cloud Cover', icon: Waves, subtypes: [], scope: 'live-only' },
-            { layer: 'satellite_imagery', label: 'Satellite Imagery', icon: Globe2, subtypes: [], scope: 'live-only' },
+            { layer: 'clouds', label: 'Cloud Cover', icon: Waves, subtypes: [], scope: 'live-only', scopeNote: 'Date-addressable NASA GIBS context overlay. It does not block replay hydration.' },
+            { layer: 'satellite_imagery', label: 'Satellite Imagery', icon: Globe2, subtypes: [], scope: 'live-only', scopeNote: 'Context imagery overlay. Use agent imagery actions for dated scenes.' },
         ],
     },
 ];
@@ -493,6 +495,7 @@ function DomainsTab({
                                     const isLayerExpanded = expandedLayers[layerNode.layer] !== false;
                                     const LayerIcon = layerNode.icon;
                                     const isLiveOnly = layerNode.scope === 'live-only';
+                                    const scopeNote = layerNode.scopeNote || 'Live/context layer. This layer does not block replay loading.';
 
                                     return (
                                         <div key={layerNode.layer}>
@@ -523,7 +526,7 @@ function DomainsTab({
                                                                         ? 'border-zinc-700 text-zinc-500'
                                                                         : 'border-cyan-900/60 text-cyan-500'
                                                                 }`}
-                                                                title="Live mode only. This layer does not block replay loading."
+                                                                title={scopeNote}
                                                             >
                                                                 <Radio size={8} />
                                                                 Live

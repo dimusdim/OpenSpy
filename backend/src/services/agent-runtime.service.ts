@@ -41,6 +41,10 @@ type AgentStreamPart = {
     text?: string;
     eventType?: string;
     name?: string;
+    toolUseId?: string;
+    rawType?: string;
+    input?: any;
+    output?: any;
     state?: 'started' | 'completed' | 'status';
     isError?: boolean;
 };
@@ -62,15 +66,26 @@ type ProviderLineState = {
     setAssistantText: (value: string) => void;
     getLastSnapshot: () => string;
     setLastSnapshot: (value: string) => void;
+    toolDrafts: Map<string, {
+        id: string;
+        indexKey: string;
+        name: string;
+        rawType: string;
+        inputJson: string;
+        input?: any;
+    }>;
 };
 
+// Explicit machine-action block used for presentation batches. Inline object,
+// area and replay references must use Markdown `ospy://` links instead of
+// frontend text guessing.
 const ACTION_BLOCK_RE_LIST = [
     /<ACTIONS_JSON>\s*([\s\S]*?)\s*<\/ACTIONS_JSON>/i,
     /```ACTIONS_JSON\s*([\s\S]*?)\s*```/i,
     /ACTIONS_JSON:?\s*```(?:json)?\s*([\s\S]*?)\s*```/i,
 ];
 const DEFAULT_CLAUDE_ALLOWED_TOOLS = [
-    'Bash(./.claude/skills/platform-cli/scripts/worldview-cli.sh *)',
+    'Bash(./.agents/tools/worldview-cli.sh *)',
     'Bash(./.agents/tools/backend-api.sh *)',
     'Bash(./.agents/tools/sql-readonly.sh *)',
     'Bash(./.agents/tools/source-fetch.sh *)',
@@ -284,6 +299,43 @@ function summarizeToolName(toolName: string, command: string): string {
     return 'Bash';
 }
 
+function compactToolPayload(value: any, maxChars = 8000): any {
+    if (value === undefined || value === null || value === '') return undefined;
+    if (typeof value === 'string') {
+        return value.length > maxChars
+            ? `${value.slice(0, maxChars)}\n…[truncated ${value.length - maxChars} chars]`
+            : value;
+    }
+    try {
+        const json = JSON.stringify(value);
+        if (json.length <= maxChars) return value;
+        return {
+            truncated: true,
+            preview: json.slice(0, maxChars),
+            original_chars: json.length,
+        };
+    } catch {
+        return String(value).slice(0, maxChars);
+    }
+}
+
+function toolResultOutput(result: any): any {
+    if (!result || typeof result !== 'object') return undefined;
+    const content = result.content ?? result.result ?? result.output ?? result.text;
+    if (Array.isArray(content)) {
+        return content.map((part) => {
+            if (typeof part === 'string') return part;
+            if (part && typeof part === 'object') {
+                if (typeof part.text === 'string') return part.text;
+                if (typeof part.content === 'string') return part.content;
+                return part;
+            }
+            return part;
+        });
+    }
+    return content;
+}
+
 function truthyEnv(value: string | undefined): boolean {
     return /^(1|true|yes|on)$/i.test(String(value || '').trim());
 }
@@ -473,6 +525,7 @@ export class AgentRuntimeService {
             setAssistantText: (value) => { assistantText = value; },
             getLastSnapshot: () => lastSnapshot,
             setLastSnapshot: (value) => { lastSnapshot = value; },
+            toolDrafts: new Map(),
         };
 
         const liveRun: LiveRun = {
@@ -668,10 +721,27 @@ export class AgentRuntimeService {
         const parts: AgentStreamPart[] = [];
         const ordered = [...events].sort((a, b) => Number(a.sequence_no || 0) - Number(b.sequence_no || 0));
         const toolNamesById = new Map<string, string>();
+        const appendText = (event: AgentRunEventRow, text: string) => {
+            if (!text) return;
+            const last = parts[parts.length - 1];
+            if (last?.type === 'text') {
+                last.text = `${last.text || ''}${text}`;
+                return;
+            }
+            parts.push({
+                id: `${runId}:${event.sequence_no}:message.delta`,
+                type: 'text',
+                text,
+            });
+        };
 
         for (const event of ordered) {
             const payload = event.payload || {};
             const isTool = event.event_type === 'tool.started' || event.event_type === 'tool.completed';
+            if (event.event_type === 'message.delta') {
+                appendText(event, String(payload.text || ''));
+                continue;
+            }
             if (!isTool) continue;
 
             const state = event.event_type === 'tool.started' ? 'started' : 'completed';
@@ -688,20 +758,45 @@ export class AgentRuntimeService {
                 type: 'tool',
                 eventType: event.event_type,
                 name,
+                toolUseId,
+                rawType: String(payload.raw_type || ''),
+                input: compactToolPayload(payload.input),
+                output: compactToolPayload(payload.output),
                 state,
                 isError: Boolean(payload.is_error),
                 text,
             });
         }
 
-        if (finalContent) {
+        const hasText = parts.some((part) => part.type === 'text' && String(part.text || '').trim());
+        if (!hasText && finalContent) {
             parts.push({
                 id: `${runId}:final:text`,
                 type: 'text',
                 text: finalContent,
             });
         }
-        return trimTrailingText(parts);
+
+        const actionStart = findActionBlockStart(parts
+            .filter((part) => part.type === 'text')
+            .map((part) => part.text || '')
+            .join(''));
+        if (actionStart < 0) return trimTrailingText(parts);
+
+        let remainingText = actionStart;
+        const visibleParts: AgentStreamPart[] = [];
+        for (const part of parts) {
+            if (part.type !== 'text') {
+                if (remainingText > 0) visibleParts.push(part);
+                continue;
+            }
+            const text = part.text || '';
+            if (remainingText <= 0) continue;
+            const visibleText = text.slice(0, remainingText);
+            remainingText = Math.max(0, remainingText - text.length);
+            if (visibleText) visibleParts.push({ ...part, text: visibleText });
+        }
+        return trimTrailingText(visibleParts);
     }
 
     private composePrompt(session: AgentSessionRow, userPrompt: string, options: StartRunOptions = {}): string {
@@ -734,7 +829,7 @@ export class AgentRuntimeService {
     private loadProductInstructionDocs(): string {
         if (this.instructionDocsCache !== null) return this.instructionDocsCache;
         const files = [
-            'AGENTS.md',
+            '.agents/instructions/product-osint.md',
             '.agents/skills/worldview-data/SKILL.md',
             '.agents/skills/worldview-sources/SKILL.md',
             '.agents/skills/worldview-map-control/SKILL.md',
@@ -905,7 +1000,7 @@ export class AgentRuntimeService {
             });
         }
 
-        const normalized = this.normalizeProviderEvent(session.provider, parsed, state.getLastSnapshot(), state.getAssistantText());
+        const normalized = this.normalizeProviderEvent(session.provider, parsed, state);
         if (normalized.snapshot) state.setLastSnapshot(normalized.snapshot);
         if (normalized.delta) {
             state.setAssistantText(state.getAssistantText() + normalized.delta);
@@ -945,19 +1040,71 @@ export class AgentRuntimeService {
         return '';
     }
 
-    private normalizeProviderEvent(provider: AgentProvider, event: any, lastSnapshot: string, currentText: string): {
+    private normalizeProviderEvent(provider: AgentProvider, event: any, state: ProviderLineState): {
         delta: string;
         snapshot: string | null;
         events: NormalizedEvent[];
     } {
         const events: NormalizedEvent[] = [];
         const raw = event?.type === 'stream_event' && event?.event ? event.event : event;
+        const lastSnapshot = state.getLastSnapshot();
+        const currentText = state.getAssistantText();
 
         const type = firstString(raw?.type, event?.type, raw?.msg?.type, raw?.event);
         const toolName = firstString(raw?.content_block?.name, raw?.name, raw?.tool_name, raw?.msg?.name);
         const toolUseId = firstString(raw?.content_block?.id, raw?.tool_use_id, raw?.id, raw?.msg?.id);
+        const toolIndexKey = raw?.index !== undefined ? `index:${raw.index}` : '';
+        const toolDraftKey = toolUseId || toolIndexKey;
         const toolCommand = firstString(raw?.content_block?.input?.command, raw?.input?.command, raw?.msg?.input?.command);
+        const toolInput = raw?.content_block?.input ?? raw?.input ?? raw?.msg?.input;
         const displayName = summarizeToolName(toolName, toolCommand);
+        if (provider === 'claude_code' && raw?.type === 'content_block_start' && raw?.content_block?.type === 'tool_use' && toolDraftKey && !toolCommand) {
+            const draft = {
+                id: toolUseId,
+                indexKey: toolIndexKey,
+                name: toolName || 'tool',
+                rawType: type,
+                inputJson: '',
+                input: toolInput,
+            };
+            state.toolDrafts.set(toolDraftKey, draft);
+            if (toolUseId && toolIndexKey) state.toolDrafts.set(toolIndexKey, draft);
+            return { delta: '', snapshot: null, events };
+        }
+        if (provider === 'claude_code' && raw?.type === 'content_block_delta') {
+            const draft = toolDraftKey ? state.toolDrafts.get(toolDraftKey) : undefined;
+            if (draft && typeof raw?.delta?.partial_json === 'string') {
+                draft.inputJson += raw.delta.partial_json;
+                return { delta: '', snapshot: null, events };
+            }
+        }
+        if (provider === 'claude_code' && raw?.type === 'content_block_stop' && toolDraftKey && state.toolDrafts.has(toolDraftKey)) {
+            const draft = state.toolDrafts.get(toolDraftKey)!;
+            state.toolDrafts.delete(toolDraftKey);
+            if (draft.id) state.toolDrafts.delete(draft.id);
+            if (draft.indexKey) state.toolDrafts.delete(draft.indexKey);
+            let parsedInput = draft.input;
+            if (draft.inputJson.trim()) {
+                try {
+                    parsedInput = JSON.parse(draft.inputJson);
+                } catch {
+                    parsedInput = { partial_json: draft.inputJson };
+                }
+            }
+            const command = firstString(parsedInput?.command);
+            events.push({
+                eventType: 'tool.started',
+                payload: {
+                    provider,
+                    raw_type: draft.rawType || type,
+                    name: summarizeToolName(draft.name, command),
+                    tool_name: draft.name,
+                    tool_use_id: draft.id || toolUseId,
+                    input: compactToolPayload(parsedInput),
+                },
+            });
+            return { delta: '', snapshot: null, events };
+        }
         const contentBlocks = Array.isArray(raw?.message?.content)
             ? raw.message.content
             : Array.isArray(event?.message?.content)
@@ -965,10 +1112,28 @@ export class AgentRuntimeService {
                 : Array.isArray(raw?.content)
                     ? raw.content
                     : [];
-        const toolResults = contentBlocks.filter((block: any) => block?.type === 'tool_result');
-        if (
+        const directToolResults = raw?.type === 'tool_result' ? [raw] : [];
+        const toolResults = [
+            ...contentBlocks.filter((block: any) => block?.type === 'tool_result'),
+            ...directToolResults,
+        ];
+        if (toolResults.length > 0) {
+            for (const result of toolResults) {
+                events.push({
+                    eventType: 'tool.completed',
+                    payload: {
+                        provider,
+                        raw_type: firstString(result?.type, 'tool_result'),
+                        name: firstString(result?.name, result?.tool_name, 'tool'),
+                        tool_use_id: firstString(result?.tool_use_id, result?.id),
+                        is_error: Boolean(result?.is_error),
+                        output: compactToolPayload(toolResultOutput(result)),
+                    },
+                });
+            }
+        } else if (
             (raw?.type === 'content_block_start' && raw?.content_block?.type === 'tool_use')
-            || (type && /tool/i.test(type))
+            || (type && /tool/i.test(type) && !/complete|finish|end|result/i.test(type))
         ) {
             events.push({
                 eventType: /complete|finish|end|result/i.test(type) ? 'tool.completed' : 'tool.started',
@@ -978,21 +1143,9 @@ export class AgentRuntimeService {
                     name: displayName,
                     tool_name: toolName,
                     tool_use_id: toolUseId,
+                    input: compactToolPayload(toolInput),
                 },
             });
-        } else if (toolResults.length > 0) {
-            for (const result of toolResults) {
-                events.push({
-                    eventType: 'tool.completed',
-                    payload: {
-                        provider,
-                        raw_type: 'tool_result',
-                        name: firstString(result?.name, result?.tool_name, 'tool'),
-                        tool_use_id: firstString(result?.tool_use_id, result?.id),
-                        is_error: Boolean(result?.is_error),
-                    },
-                });
-            }
         } else if (type && !/assistant|message|delta|result|system|content_block/i.test(type)) {
             events.push({
                 eventType: 'status.updated',

@@ -12,6 +12,13 @@ export type EntityQueryFilters = {
     limit?: number;
 };
 
+export type LiveStatusFilters = {
+    layerId?: string;
+    bbox?: [number, number, number, number];
+    freshnessMinutes?: number;
+    limit?: number;
+};
+
 export type EntityTrackFilters = {
     entityId: string;
     from?: string;
@@ -48,6 +55,21 @@ type TrackRow = {
     source_id: string | null;
     observed_at: string;
     geometry: any;
+    display_lat: number | null;
+    display_lng: number | null;
+    altitude_m: number | null;
+    heading_deg: number | null;
+    speed_mps: number | null;
+    properties: any;
+};
+
+type LiveStatusSampleRow = {
+    entity_id: string;
+    layer_id: string;
+    source_id: string | null;
+    subtype: string | null;
+    display_name: string | null;
+    observed_at: string;
     display_lat: number | null;
     display_lng: number | null;
     altitude_m: number | null;
@@ -134,6 +156,84 @@ export class EntityQueryService {
         );
 
         return result?.rows || [];
+    }
+
+    async getLiveStatus(filters: LiveStatusFilters) {
+        if (!this.database.isReady()) {
+            return {
+                layer_id: filters.layerId || null,
+                max_observed_at: null,
+                entities_total: 0,
+                entities_fresh: 0,
+                freshness_minutes: filters.freshnessMinutes || 30,
+                sample: [],
+            };
+        }
+
+        const params: unknown[] = [];
+        const clauses: string[] = [];
+        if (filters.layerId) {
+            params.push(filters.layerId);
+            clauses.push(`ls.layer_id = $${params.length}`);
+        }
+        if (filters.bbox) {
+            const [south, west, north, east] = filters.bbox;
+            params.push(west, south, east, north);
+            const start = params.length - 3;
+            clauses.push(`ls.geom IS NOT NULL AND ST_Intersects(ls.geom, ST_MakeEnvelope($${start}, $${start + 1}, $${start + 2}, $${start + 3}, 4326))`);
+        }
+        const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+        const freshnessMinutes = Math.max(1, Math.min(24 * 60, Math.trunc(filters.freshnessMinutes || 30)));
+        const limit = clampLimit(filters.limit, 20, 200);
+
+        const summaryParams = [...params, freshnessMinutes];
+        const freshnessParam = summaryParams.length;
+        const summary = await this.database.query(
+            `
+                SELECT
+                    MAX(ls.observed_at) AS max_observed_at,
+                    COUNT(*)::bigint AS entities_total,
+                    COUNT(*) FILTER (WHERE ls.observed_at >= now() - ($${freshnessParam}::int * interval '1 minute'))::bigint AS entities_fresh
+                FROM app.entity_live_states ls
+                ${whereSql}
+            `,
+            summaryParams,
+        );
+
+        const sampleParams = [...params, limit];
+        const result = await this.database.query<LiveStatusSampleRow>(
+            `
+                SELECT
+                    ls.entity_id,
+                    ls.layer_id,
+                    ls.source_id,
+                    e.subtype,
+                    e.display_name,
+                    ls.observed_at,
+                    CASE WHEN ls.geom IS NOT NULL THEN ST_Y(ls.geom) ELSE NULL END AS display_lat,
+                    CASE WHEN ls.geom IS NOT NULL THEN ST_X(ls.geom) ELSE NULL END AS display_lng,
+                    ls.altitude_m,
+                    ls.heading_deg,
+                    ls.speed_mps,
+                    COALESCE(ls.properties, e.properties) AS properties
+                FROM app.entity_live_states ls
+                LEFT JOIN core.entities e ON e.entity_id = ls.entity_id
+                ${whereSql}
+                ORDER BY ls.observed_at DESC NULLS LAST
+                LIMIT $${sampleParams.length}
+            `,
+            sampleParams,
+        );
+
+        const row = summary?.rows?.[0] || {};
+        return {
+            layer_id: filters.layerId || null,
+            max_observed_at: row.max_observed_at || null,
+            entities_total: Number(row.entities_total || 0),
+            entities_fresh: Number(row.entities_fresh || 0),
+            freshness_minutes: freshnessMinutes,
+            sample: result?.rows || [],
+        };
     }
 
     async listTrack(filters: EntityTrackFilters) {

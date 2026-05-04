@@ -129,7 +129,7 @@ export default function Home() {
                 <CameraHUD />
 
                 {/* Overlay: entity info panel */}
-                <EntityHUD />
+                <EntityHUD avoidRightPx={agentsOpen ? 472 : 0} />
 
                 {/* Settings modal */}
                 <SettingsPanel isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />

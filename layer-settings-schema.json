@@ -449,6 +449,7 @@
           "catalog_layer": "Wifi",
           "enabled_by_default": true,
           "live_only": true,
+          "replay_scope": "live_only_context",
           "sources": [
             {
               "source_id": "wigle",
@@ -503,6 +504,8 @@
           "title": "Traffic Flow",
           "catalog_layer": "Traffic",
           "enabled_by_default": false,
+          "live_only": true,
+          "replay_scope": "live_only_context",
           "note": "raster overlay, visible only below 100km altitude",
           "sources": [
             {
@@ -531,6 +534,8 @@
           "title": "Live Cameras",
           "catalog_layer": "Webcam",
           "enabled_by_default": false,
+          "live_only": true,
+          "replay_scope": "live_only_context",
           "sources": [
             { "source_id": "webcams_livenv", "title": "Live-Environment-Streams (5K+ cams)", "auth": [] },
             { "source_id": "webcams_caltrans", "title": "Caltrans (California DOT)", "auth": [] },
@@ -559,6 +564,8 @@
           "title": "Satellite Imagery",
           "catalog_layer": "Imagery overlay",
           "enabled_by_default": false,
+          "live_only": true,
+          "replay_scope": "live_only_context",
           "sources": [
             { "source_id": "nasa_gibs", "title": "NASA GIBS (MODIS cloud cover)", "auth": [] }
           ],
