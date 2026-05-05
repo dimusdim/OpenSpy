@@ -28,6 +28,19 @@ const getAviSVG = getAviIcon;
 
 const getShipSVG = getShipIcon;
 
+const LIVE_APPLY_BUDGET_MS = 8;
+const LIVE_APPLY_YIELD_EVERY = 500;
+
+function yieldToBrowser(): Promise<void> {
+    return new Promise(resolve => {
+        if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+            (window as any).requestIdleCallback(() => resolve(), { timeout: 16 });
+        } else {
+            setTimeout(resolve, 0);
+        }
+    });
+}
+
 // Metadata stored per aircraft for picking and EntityHUD.
 interface AircraftMeta {
     id: string;         // equals icao24 (primary key)
@@ -355,6 +368,7 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
             // seen by the resumed handler.
             let currentSubtypeVisibility = initialState.subtypeVisibility;
             let currentSources = initialState.sources;
+            let lastYieldAt = performance.now();
             const refreshState = (): boolean => {
                 if (!active) return false;
                 const freshState = useTimelineStore.getState();
@@ -362,6 +376,14 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                 currentSubtypeVisibility = freshState.subtypeVisibility;
                 currentSources = freshState.sources;
                 return true;
+            };
+            const yieldIfNeeded = async (index: number): Promise<boolean> => {
+                if (index % LIVE_APPLY_YIELD_EVERY !== 0) return refreshState();
+                const nowMs = performance.now();
+                if (nowMs - lastYieldAt < LIVE_APPLY_BUDGET_MS) return refreshState();
+                await yieldToBrowser();
+                lastYieldAt = performance.now();
+                return refreshState();
             };
 
             // ---- Aviation via BillboardCollection ----
@@ -375,6 +397,8 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
 
                 const aircrafts = data.aircrafts as any[];
                 for (let ai = 0; ai < aircrafts.length; ai++) {
+                    if (!(await yieldIfNeeded(ai))) return;
+                    if (!currentSources.aviation) break;
                     const ac = aircrafts[ai];
                     const pos = Cesium.Cartesian3.fromDegrees(ac.lng, ac.lat, ac.alt * 0.3048);
                     const rotation = Cesium.Math.toRadians(-(ac.heading || 0));
@@ -454,6 +478,8 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
 
             const vessels: any[] = data.vessels;
             for (let vi = 0; vi < vessels.length; vi++) {
+                if (!(await yieldIfNeeded(vi))) return;
+                if (!currentSources.maritime) break;
                 const v = vessels[vi];
                 marLastSeen.set(v.id, now);
                 const pos = Cesium.Cartesian3.fromDegrees(v.lng, v.lat, 0);

@@ -51,6 +51,7 @@ interface ProviderDef {
     layers: string[];
     // API key env vars (if any)
     envVars?: string[];
+    envVarNote?: string;
     registrationUrl?: string;
     registrationLabel?: string;
     // Is this provider always free / no auth needed?
@@ -71,7 +72,7 @@ const PROVIDERS: ProviderDef[] = [
     { id: 'usgs', name: 'USGS Earthquakes', description: 'M2.5+ earthquakes worldwide, updated every few minutes.', url: 'earthquake.usgs.gov', type: 'GeoJSON', poll: '5m', layers: ['disasters'], free: true },
     { id: 'eonet', name: 'NASA EONET', description: 'NASA natural events — wildfires, volcanoes, storms, icebergs.', url: 'eonet.gsfc.nasa.gov', type: 'REST', poll: '5m', layers: ['disasters'], free: true },
     // Conflicts
-    { id: 'acled', name: 'ACLED', description: 'Armed Conflict Location & Event Data. Battles, explosions, violence against civilians.', url: 'acleddata.com', type: 'REST', poll: '30m', layers: ['conflicts'], envVars: ['ACLED_KEY', 'ACLED_EMAIL'], registrationUrl: 'https://developer.acleddata.com/', registrationLabel: 'ACLED' },
+    { id: 'acled', name: 'ACLED', description: 'Armed Conflict Location & Event Data. Battles, explosions, violence against civilians.', url: 'acleddata.com', type: 'REST', poll: '30m', layers: ['conflicts'], envVars: ['ACLED_EMAIL', 'ACLED_PASSWORD', 'ACLED_KEY'], envVarNote: 'Use ACLED_EMAIL + ACLED_KEY for access-key accounts. Password OAuth requires explicit ACLED_AUTH_MODE=oauth or ACLED_ENABLE_PASSWORD_OAUTH=true.', registrationUrl: 'https://acleddata.com/api-documentation/getting-started', registrationLabel: 'ACLED' },
     { id: 'gdelt', name: 'GDELT', description: 'Global events database. Auto-updated from news, no auth needed.', url: 'gdeltproject.org', type: 'CSV', poll: '15m', layers: ['conflicts'], free: true },
     // Fires
     { id: 'firms', name: 'NASA FIRMS', description: 'VIIRS active fire hotspots, 3-hourly global updates.', url: 'firms.modaps.eosdis.nasa.gov', type: 'CSV', poll: '30m', layers: ['fires'], free: true },
@@ -99,6 +100,7 @@ const PROVIDERS: ProviderDef[] = [
     { id: 'naturalearth', name: 'Natural Earth', description: 'Country borders, coastlines, and major cities.', url: 'naturalearthdata.com', type: 'GeoJSON (static)', poll: 'on load', layers: ['labels'], free: true },
     // Imagery
     { id: 'nasa-gibs', name: 'NASA GIBS', description: 'MODIS satellite imagery and cloud cover overlays.', url: 'gibs.earthdata.nasa.gov', type: 'WMTS tiles', poll: 'daily', layers: ['clouds', 'satellite_imagery'], free: true },
+    { id: 'copernicus', name: 'Copernicus Data Space', description: 'Sentinel scene search and bounded imagery overlays via backend-owned OAuth credentials.', url: 'dataspace.copernicus.eu', type: 'STAC / Sentinel Hub', poll: 'on demand', layers: ['satellite_imagery'], envVars: ['COPERNICUS_CLIENT_ID', 'COPERNICUS_CLIENT_SECRET'], registrationUrl: 'https://shapps.dataspace.copernicus.eu/', registrationLabel: 'Copernicus Data Space' },
 ];
 
 // ---------------------------------------------------------------------------
@@ -219,7 +221,7 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                     </div>
                     <div className="flex-1 overflow-y-auto p-4">
                         {tab === 'sources' && (
-                            <SourcesTab providers={PROVIDERS} providerStatuses={providerStatuses} sources={sources} toggleSource={toggleSource} apiKeys={apiKeys}
+                        <SourcesTab providers={PROVIDERS} providerStatuses={providerStatuses} sources={sources} toggleSource={toggleSource} apiKeys={apiKeys}
                                 onKeysChanged={() => { fetch(`${API_URL}/api/keys`).then(r => r.json()).then(d => setApiKeys(d)).catch(() => {}); }} />
                         )}
                         {tab === 'display' && (
@@ -331,7 +333,7 @@ function ProviderRow({ provider, status, sources, toggleSource, apiKeys, onKeysC
 
                     {/* Inline API keys */}
                     {providerKeyInfo && Object.keys(providerKeyInfo).length > 0 && (
-                        <ApiKeyFields envVars={providerKeyInfo} registrationUrl={provider.registrationUrl} registrationLabel={provider.registrationLabel} onKeysChanged={onKeysChanged} />
+                        <ApiKeyFields envVars={providerKeyInfo} note={provider.envVarNote} registrationUrl={provider.registrationUrl} registrationLabel={provider.registrationLabel} onKeysChanged={onKeysChanged} />
                     )}
 
                     {/* Source toggle per layer */}
@@ -352,9 +354,9 @@ function ProviderRow({ provider, status, sources, toggleSource, apiKeys, onKeysC
 // ---------------------------------------------------------------------------
 // Inline API Key Fields
 // ---------------------------------------------------------------------------
-function ApiKeyFields({ envVars, registrationUrl, registrationLabel, onKeysChanged }: {
+function ApiKeyFields({ envVars, note, registrationUrl, registrationLabel, onKeysChanged }: {
     envVars: Record<string, { set: boolean; masked: string }>;
-    registrationUrl?: string; registrationLabel?: string; onKeysChanged: () => void;
+    note?: string; registrationUrl?: string; registrationLabel?: string; onKeysChanged: () => void;
 }) {
     const [editing, setEditing] = useState<Record<string, string>>({});
     const [revealed, setRevealed] = useState<Record<string, boolean>>({});
@@ -375,6 +377,7 @@ function ApiKeyFields({ envVars, registrationUrl, registrationLabel, onKeysChang
     return (
         <div className="space-y-1.5 pt-1 border-t border-zinc-800/40">
             <div className="text-[9px] font-mono text-zinc-600 uppercase tracking-wider">API Keys</div>
+            {note && <p className="text-[10px] text-zinc-500 leading-relaxed">{note}</p>}
             {Object.entries(envVars).map(([envVar, info]) => (
                 <div key={envVar} className="flex items-center gap-2">
                     <span className="text-[9px] font-mono text-zinc-500 w-36 truncate" title={envVar}>{envVar}</span>

@@ -42,6 +42,16 @@ interface LayerFlags {
   gfw: boolean;
 }
 
+function shallowRecordEqual(a: Record<string, any>, b: Record<string, any>): boolean {
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  for (const key of aKeys) {
+    if (!Object.prototype.hasOwnProperty.call(b, key) || !Object.is(a[key], b[key])) return false;
+  }
+  return true;
+}
+
 // Re-export flag name for external consumers (e.g. Legend section typing).
 export type LayerName = keyof LayerFlags;
 
@@ -228,6 +238,22 @@ export interface CurrentTimeUpdateMeta {
     reason: CurrentTimeUpdateReason;
 }
 
+export interface ImageryOverlayContext {
+  id: string;
+  mode: 'single' | 'compare';
+  source: string;
+  label: string;
+  layer?: string | null;
+  acquisitionTime?: string | null;
+  acquisitionLabel: string;
+  opacity?: number | null;
+  bbox?: number[] | null;
+  replayLinked: false;
+  replayTimeAtShow?: string | null;
+  shownAt: string;
+  note: string;
+}
+
 interface TimelineStore {
   mode: 'live' | 'playback';
   playbackKind: 'historical' | 'track' | null;
@@ -269,6 +295,7 @@ interface TimelineStore {
   tileMode: 'google' | 'osm' | 'modis';
   clusteringEnabled: boolean;
   satelliteRenderLimit: number | null;
+  activeImageryOverlay: ImageryOverlayContext | null;
   // Filter / isolation state
   prevFilterState: { visibility: LayerFlags; subtypeVisibility: Record<string, boolean> } | null;
   activeFilter: ActiveFilter | null;
@@ -278,6 +305,7 @@ interface TimelineStore {
   setTileMode: (mode: 'google' | 'osm' | 'modis') => void;
   toggleClustering: () => void;
   setSatelliteRenderLimit: (limit: number | null) => void;
+  setActiveImageryOverlay: (context: ImageryOverlayContext | null) => void;
   setMode: (mode: 'live' | 'playback') => void;
   setPlaybackKind: (kind: 'historical' | 'track' | null) => void;
   setCurrentTime: (time: Date, options?: CurrentTimeUpdateOptions) => void;
@@ -368,11 +396,9 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
   // GPU-batched Primitive, not an Entity.path, and has its own
   // separate `show` gating driven by the same `showTrajectories` flag.
   showTrajectories: false,
-  // Sources default: everything ON. The panel reflects user intent at
-  // a glance instead of hiding feature availability behind a click.
-  // Layers that need auth or fail their upstream still start "on" so
-  // the LayerManager surfaces the auth-missing / error state loud —
-  // the user sees immediately what's available and what to configure.
+  // Sources default: full live context. Product defaults must not disable data
+  // sources to hide startup or rendering regressions. Test scripts may narrow
+  // sources temporarily, but they must restore the user's state afterwards.
   sources: {
     satellites: true,
     satelliteFootprints: true,
@@ -395,10 +421,9 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
     airspace: true,
     gfw: true,
   },
-  // Visibility mirrors sources on boot. Toggling visibility hides the
-  // rendered primitive without stopping the fetch; toggling source
-  // stops the fetch AND hides (the effective show state for every
-  // layer hook is `sources && visibility`).
+  // Visibility controls what is drawn. Full live context starts visible so
+  // integration tests exercise the real product surface. Trajectory/orbit
+  // lines remain controlled separately by showTrajectories.
   visibility: {
     satellites: true,
     satelliteFootprints: true,
@@ -435,6 +460,7 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
   // артефактом ранней оптимизации и прятал 3.8× спутников. Пользователь
   // 2026-04-24: "5000 ровно это явно обрезка, проблема в логике".
   satelliteRenderLimit: null,
+  activeImageryOverlay: null,
   prevFilterState: null,
   activeFilter: null,
   activePreset: null,
@@ -456,6 +482,7 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
       saveSettingsToServer(next);
       return { satelliteRenderLimit: limit };
   }),
+  setActiveImageryOverlay: (activeImageryOverlay) => set({ activeImageryOverlay }),
   streamMetrics: {
       aviation: { label: 'OpenSky Network', source: 'api.opensky-network.org', type: 'REST Polling (global)', count: 0, speed: '0 bps', status: 'connecting', poll: '90s', upstream: '5–10s ADS-B' },
       maritime: { label: 'AISStream', source: 'wss://stream.aisstream.io', type: 'WebSocket (persistent)', count: 0, speed: '0 msgs/s', status: 'connecting', poll: 'live (~3m update)', upstream: '2–10s AIS' },
@@ -568,18 +595,25 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
       return { visibility: next.visibility, sources: next.sources };
   }),
   setSelectedEntityId: (id, data) => set({ selectedEntityId: id, selectedEntityData: data || null }),
-  setStreamMetric: (layer, data) => set(state => ({
-      streamMetrics: {
-          ...state.streamMetrics,
-          [layer]: { ...state.streamMetrics[layer], ...data }
-      }
-  })),
-  setStorageStatus: (data) => set(state => ({
-      storageStatus: {
+  setStreamMetric: (layer, data) => set(state => {
+      const current = state.streamMetrics[layer] || {};
+      const nextMetric = { ...current, ...data };
+      if (shallowRecordEqual(current as any, nextMetric as any)) return state as any;
+      return {
+          streamMetrics: {
+              ...state.streamMetrics,
+              [layer]: nextMetric,
+          }
+      };
+  }),
+  setStorageStatus: (data) => set(state => {
+      const nextStorageStatus = {
           ...state.storageStatus,
           ...data,
-      }
-  })),
+      };
+      if (shallowRecordEqual(state.storageStatus as any, nextStorageStatus as any)) return state as any;
+      return { storageStatus: nextStorageStatus };
+  }),
   toggleSubtype: (key) => set(state => {
       const subtypeVisibility = {
           ...state.subtypeVisibility,
@@ -603,6 +637,7 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
       const prefix = `${layer}:`;
       for (const k of Object.keys(next)) if (k.startsWith(prefix)) delete next[k];
       for (const [sub, n] of Object.entries(counts)) next[`${prefix}${sub}`] = n;
+      if (shallowRecordEqual(state.subtypeCounts, next)) return state as any;
       return { subtypeCounts: next };
   }),
   setSourceCounts: (layer, counts) => set(state => {
@@ -610,6 +645,7 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
       const prefix = `${layer}:`;
       for (const k of Object.keys(next)) if (k.startsWith(prefix)) delete next[k];
       for (const [sourceId, n] of Object.entries(counts)) next[`${prefix}${sourceId}`] = n;
+      if (shallowRecordEqual(state.sourceCounts, next)) return state as any;
       return { sourceCounts: next };
   }),
   // --- Filter / isolation actions ---

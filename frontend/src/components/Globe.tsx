@@ -16,9 +16,9 @@ import { useInfrastructureLayer, infraMetaMap, infraStripInstanceId } from '../c
 import { usePipelinesLayer, pipelineMetaMap, pipelineInstanceToLogical } from '../cesium/usePipelinesLayer';
 import { useOutagesLayer } from '../cesium/useOutagesLayer';
 import { useTrafficLayer } from '../cesium/useTrafficLayer';
-import { useConflictsLayer } from '../cesium/useConflictsLayer';
+import { useConflictsLayer, conflictMetaMap } from '../cesium/useConflictsLayer';
 import { useAirspaceLayer, airspaceMetaMap, airspaceInstanceToLogical } from '../cesium/useAirspaceLayer';
-import { useGFWLayer } from '../cesium/useGFWLayer';
+import { useGFWLayer, gfwMetaMap } from '../cesium/useGFWLayer';
 import { useWifiLayer, wifiMetaMap } from '../cesium/useWifiLayer';
 import { replayMetaMap, useReplayOverlay } from '../cesium/useReplayOverlay';
 import { fetchReplayRenderBatchMetadata, isReplayRenderBatchId, replayRenderBatchMetaMap } from '../cesium/replayRenderBatch';
@@ -416,6 +416,26 @@ export default function Globe() {
                         noradId: satMeta.noradId,
                         ...(satMeta.reconMeta ? { country: satMeta.reconMeta.country, sensorType: satMeta.reconMeta.sensorType, resolution: satMeta.reconMeta.resolution } : {}),
                         ...(satMeta.sensor ? { sensor: satMeta.sensor } : {}),
+                    });
+                    return;
+                }
+
+                const conflictMeta = conflictMetaMap.get(pickedObject.id);
+                if (conflictMeta) {
+                    useTimelineStore.getState().setSelectedEntityId(pickedObject.id, {
+                        name: conflictMeta.eventType || 'Conflict event',
+                        id: pickedObject.id,
+                        type: 'Conflict',
+                    });
+                    return;
+                }
+
+                const gfwMeta = gfwMetaMap.get(pickedObject.id);
+                if (gfwMeta) {
+                    useTimelineStore.getState().setSelectedEntityId(pickedObject.id, {
+                        name: 'GFW AIS signal gap',
+                        id: pickedObject.id,
+                        type: 'GFW',
                     });
                     return;
                 }

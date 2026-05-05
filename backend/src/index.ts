@@ -41,6 +41,7 @@ import { ACLEDService } from './services/acled.service';
 import { AirspaceService } from './services/airspace.service';
 import { GFWService } from './services/gfw.service';
 import { CloudflareService } from './services/cloudflare.service';
+import { CopernicusService } from './services/copernicus.service';
 import { WindyService } from './services/windy.service';
 import { GDELTService } from './services/gdelt.service';
 import { WigleService } from './services/wigle.service';
@@ -82,19 +83,116 @@ const corsOptions: cors.CorsOptions = {
     methods: ['GET', 'POST', 'DELETE'],
 };
 
+const SENSITIVE_QUERY_KEYS = new Set([
+    'access_token',
+    'api_key',
+    'apikey',
+    'client_secret',
+    'key',
+    'map_key',
+    'password',
+    'secret',
+    'token',
+]);
+
+function redactUrlForLog(value: unknown): string | undefined {
+    if (!value) return undefined;
+    const raw = String(value);
+    const redactParams = (params: URLSearchParams) => {
+        for (const key of [...params.keys()]) {
+            const normalized = key.toLowerCase();
+            if (SENSITIVE_QUERY_KEYS.has(normalized) || /(secret|token|password|credential|api[_-]?key|map[_-]?key)/i.test(key)) {
+                params.set(key, '[redacted]');
+            }
+        }
+    };
+    try {
+        const hasProtocol = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw);
+        const url = new URL(raw, hasProtocol ? undefined : 'http://openspy.local');
+        redactParams(url.searchParams);
+        const serialized = url.toString();
+        return hasProtocol ? serialized : serialized.replace(/^http:\/\/openspy\.local/, '');
+    } catch {
+        return raw.replace(/([?&][^=&]*(?:secret|token|password|credential|api[_-]?key|map[_-]?key|key)[^=&]*=)[^&]*/gi, '$1[redacted]').slice(0, 1000);
+    }
+}
+
+function redactStringForLog(value: string, maxLength = 1000): string {
+    return value
+        .replace(/([?&][^=&]*(?:secret|token|password|credential|api[_-]?key|map[_-]?key|key)[^=&]*=)[^&\s]*/gi, '$1[redacted]')
+        .replace(/(("?(?:access_token|api_key|apikey|client_secret|key|map_key|password|secret|token)"?\s*[:=]\s*)"?)[^",}\s]+/gi, '$1[redacted]')
+        .slice(0, maxLength);
+}
+
+function redactValueForLog(value: unknown, depth = 0): unknown {
+    if (value == null) return value;
+    if (typeof value === 'string') return redactStringForLog(value, depth === 0 ? 1000 : 500);
+    if (typeof value === 'number' || typeof value === 'boolean') return value;
+    if (depth >= 4) return '[redacted:depth]';
+    if (Array.isArray(value)) {
+        return value.slice(0, 25).map((item) => redactValueForLog(item, depth + 1));
+    }
+    if (typeof value === 'object') {
+        const output: Record<string, unknown> = {};
+        const entries = Object.entries(value as Record<string, unknown>);
+        const diagnosticKeys = /(error|code|status|reason|message|detail|description)/i;
+        const orderedEntries = [
+            ...entries.filter(([key]) => diagnosticKeys.test(key)),
+            ...entries.filter(([key]) => !diagnosticKeys.test(key)),
+        ];
+        for (const [key, item] of orderedEntries.slice(0, 50)) {
+            const normalized = key.toLowerCase();
+            output[key] = SENSITIVE_QUERY_KEYS.has(normalized) || /(secret|token|password|credential|api[_-]?key|map[_-]?key)/i.test(key)
+                ? '[redacted]'
+                : redactValueForLog(item, depth + 1);
+        }
+        return output;
+    }
+    return String(value).slice(0, 500);
+}
+
 // In production, raw err.message can leak Postgres column names, filesystem
 // paths, and upstream API bodies. sendError returns only a requestId to the
-// client and logs the full error server-side. In dev the message flows through
-// so local debugging keeps working. Used from ~44 handler catch blocks.
+// client and logs a redacted diagnostic summary server-side. In dev the
+// message flows through so local debugging keeps working.
+function safeErrorLog(err: any): Record<string, unknown> {
+    const responseData = err?.response?.data;
+    return {
+        name: err?.name,
+        message: err?.message || String(err),
+        code: err?.code,
+        status: err?.response?.status,
+        statusText: err?.response?.statusText,
+        method: err?.config?.method,
+        url: redactUrlForLog(err?.config?.url),
+        responseData: redactValueForLog(responseData),
+    };
+}
+
 function sendError(res: express.Response, err: any): void {
     if (res.headersSent) return;
     const requestId = Math.random().toString(36).slice(2, 10);
     const isProd = process.env.NODE_ENV === 'production';
-    console.error(`[error ${requestId}]`, err);
+    console.error(`[error ${requestId}]`, safeErrorLog(err));
     const body = isProd
         ? { error: 'Internal error', requestId }
         : { error: err?.message ?? 'unknown error', requestId };
     res.status(500).json(body);
+}
+
+function sendSelectionPredicateErrorOrFallback(res: express.Response, err: any): void {
+    const message = err?.message || String(err);
+    if (/selection bbox_order/i.test(message)) {
+        res.status(400).json({
+            status: 'error',
+            error: {
+                code: 'BAD_SELECTION_PREDICATE',
+                message,
+            },
+        });
+        return;
+    }
+    sendError(res, err);
 }
 
 function isLoopbackRequest(req: express.Request): boolean {
@@ -503,6 +601,26 @@ async function collectSourceIngestStatus() {
     });
 }
 
+async function countCurrentCanonicalEvents(layerId: string, sourceId: string): Promise<number> {
+    if (!databaseService.isReady()) return 0;
+    try {
+        const result = await databaseService.query<{ count: string }>(
+            `
+                SELECT COUNT(*)::text AS count
+                FROM core.events
+                WHERE layer_id = $1
+                  AND source_id = $2
+                  AND (valid_to IS NULL OR valid_to > now())
+            `,
+            [layerId, sourceId],
+        );
+        return Number(result?.rows?.[0]?.count || 0) || 0;
+    } catch (error: any) {
+        console.warn(`[status] failed to count ${sourceId}/${layerId} current events:`, error?.message || error);
+        return 0;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // User settings persistence (JSON file on disk)
 // ---------------------------------------------------------------------------
@@ -512,7 +630,6 @@ const agentRepository = new AgentRepository(databaseService);
 const catalogBootstrapService = new CatalogBootstrapService(databaseService);
 const catalogReadService = new CatalogReadService(databaseService);
 const viewControlService = new ViewControlService(viewStateRepository, catalogReadService);
-const agentToolService = new AgentToolService(databaseService, catalogReadService, selectionRepository, viewControlService);
 const agentRuntimeService = new AgentRuntimeService(agentRepository, getRepoRootFromBackend());
 const runtimeStateRepository = new RuntimeStateRepository(databaseService);
 const eventQueryService = new EventQueryService(databaseService);
@@ -520,6 +637,7 @@ const entityQueryService = new EntityQueryService(databaseService);
 const assetQueryService = new AssetQueryService(databaseService);
 const liveProjectionService = new LiveProjectionService(databaseService);
 const replayQueryService = new ReplayQueryService(databaseService);
+const agentToolService = new AgentToolService(databaseService, catalogReadService, selectionRepository, viewControlService, replayQueryService);
 const replayTileBuilderService = new ReplayTileBuilderService(databaseService, replayQueryService);
 const replayRenderBatchService = new ReplayRenderBatchService(replayQueryService, replayTileBuilderService);
 const liveIngestEnabled = process.env.DISABLE_LIVE_INGEST !== 'true';
@@ -735,8 +853,8 @@ app.post('/api/view-state/patch', async (req, res) => {
             res.status(400).json({ error: 'Missing patch object' });
             return;
         }
-        const state = await viewControlService.patchState(patch);
-        res.json({ updated: true, state });
+        const result = await viewControlService.patchStateWithExplanation(patch);
+        res.json({ updated: true, ...result });
     } catch (err: any) {
         sendError(res, err);
     }
@@ -751,8 +869,8 @@ app.post('/api/view-state/legend-node-state', async (req, res) => {
             res.status(400).json({ error: 'Missing nodeId' });
             return;
         }
-        const state = await viewControlService.setLegendNodeState(nodeId, enabled, target);
-        res.json({ updated: true, nodeId, target, state });
+        const result = await viewControlService.setLegendNodeStateWithExplanation(nodeId, enabled, target);
+        res.json({ updated: true, nodeId, target, ...result });
     } catch (err: any) {
         if (/not found/i.test(err.message || '')) {
             res.status(404).json({ error: err.message });
@@ -764,23 +882,55 @@ app.post('/api/view-state/legend-node-state', async (req, res) => {
 
 app.post('/api/selections', async (req, res) => {
     try {
+        const selectionId = typeof req.body?.selectionId === 'string'
+            ? req.body.selectionId
+            : typeof req.body?.selection_id === 'string'
+                ? req.body.selection_id
+                : undefined;
+        const layerId = typeof req.body?.layerId === 'string'
+            ? req.body.layerId
+            : typeof req.body?.layer_id === 'string'
+                ? req.body.layer_id
+                : typeof req.body?.layer === 'string'
+                    ? req.body.layer
+                    : null;
+        const normalizedLayerId = normalizeLayerId(layerId || undefined) || null;
+        const selectionMode = typeof req.body?.selectionMode === 'string'
+            ? req.body.selectionMode
+            : typeof req.body?.selection_mode === 'string'
+                ? req.body.selection_mode
+                : typeof req.body?.mode === 'string'
+                    ? req.body.mode
+                    : 'filter';
+        const predicate = req.body?.predicate && typeof req.body.predicate === 'object'
+            ? req.body.predicate
+            : req.body?.query_spec && typeof req.body.query_spec === 'object'
+                ? req.body.query_spec
+                : {};
         const selection = await selectionRepository.saveSelection({
-            selectionId: typeof req.body?.selectionId === 'string' ? req.body.selectionId : undefined,
-            layerId: typeof req.body?.layerId === 'string' ? req.body.layerId : null,
-            selectionMode: typeof req.body?.selectionMode === 'string' ? req.body.selectionMode : 'filter',
-            predicate: req.body?.predicate && typeof req.body.predicate === 'object' ? req.body.predicate : {},
+            selectionId,
+            layerId: normalizedLayerId,
+            selectionMode,
+            predicate,
             geometryJson: req.body?.geometry && typeof req.body.geometry === 'object' ? req.body.geometry : null,
             metadata: req.body?.metadata && typeof req.body.metadata === 'object' ? req.body.metadata : {},
+            expiresAt: typeof req.body?.expiresAt === 'string' ? req.body.expiresAt : undefined,
         });
+        const shouldMaterialize = req.body?.materialize === true || req.body?.metadata?.materialize === true;
+        const materialization = shouldMaterialize
+            ? await agentToolService.materializeSelection(selection.selection_id, { limit: req.body?.materializeLimit || req.body?.maxItems })
+            : null;
         res.json({
             selection_id: selection.selection_id,
             layer: selection.layer_id,
             query_spec: selection.predicate,
             geometry: selection.geometry_json,
             metadata: selection.metadata,
+            expires_at: selection.expires_at || null,
+            materialization,
         });
     } catch (err: any) {
-        sendError(res, err);
+        sendSelectionPredicateErrorOrFallback(res, err);
     }
 });
 
@@ -797,6 +947,9 @@ app.get('/api/selections/:selectionId', async (req, res) => {
             query_spec: selection.predicate,
             geometry: selection.geometry_json,
             metadata: selection.metadata,
+            expires_at: selection.expires_at || null,
+            materialized_count: selection.materialized_count || 0,
+            materialization_status: selection.materialization_status || 'none',
         });
     } catch (err: any) {
         sendError(res, err);
@@ -810,27 +963,87 @@ app.post('/api/selections/:selectionId/patch', async (req, res) => {
             res.status(404).json({ error: 'Selection not found' });
             return;
         }
+        const layerId = typeof req.body?.layerId === 'string'
+            ? req.body.layerId
+            : typeof req.body?.layer_id === 'string'
+                ? req.body.layer_id
+                : typeof req.body?.layer === 'string'
+                    ? req.body.layer
+                    : current.layer_id;
+        const normalizedLayerId = normalizeLayerId(layerId || undefined) || null;
+        const selectionMode = typeof req.body?.selectionMode === 'string'
+            ? req.body.selectionMode
+            : typeof req.body?.selection_mode === 'string'
+                ? req.body.selection_mode
+                : typeof req.body?.mode === 'string'
+                    ? req.body.mode
+                    : current.selection_mode;
+        const patchPredicate = req.body?.predicate && typeof req.body.predicate === 'object'
+            ? req.body.predicate
+            : req.body?.query_spec && typeof req.body.query_spec === 'object'
+                ? req.body.query_spec
+                : null;
         const selection = await selectionRepository.saveSelection({
             selectionId: current.selection_id,
-            layerId: typeof req.body?.layerId === 'string' ? req.body.layerId : current.layer_id,
-            selectionMode: typeof req.body?.selectionMode === 'string' ? req.body.selectionMode : current.selection_mode,
-            predicate: req.body?.predicate && typeof req.body.predicate === 'object'
-                ? { ...(current.predicate || {}), ...req.body.predicate }
+            layerId: normalizedLayerId,
+            selectionMode,
+            predicate: patchPredicate
+                ? { ...(current.predicate || {}), ...patchPredicate }
                 : current.predicate,
             geometryJson: req.body?.geometry && typeof req.body.geometry === 'object' ? req.body.geometry : current.geometry_json,
             metadata: req.body?.metadata && typeof req.body.metadata === 'object'
                 ? { ...(current.metadata || {}), ...req.body.metadata }
                 : current.metadata,
+            expiresAt: typeof req.body?.expiresAt === 'string' ? req.body.expiresAt : current.expires_at || undefined,
         });
+        const shouldMaterialize = req.body?.materialize === true || req.body?.metadata?.materialize === true;
+        const materialization = shouldMaterialize
+            ? await agentToolService.materializeSelection(selection.selection_id, { limit: req.body?.materializeLimit || req.body?.maxItems })
+            : null;
         res.json({
             selection_id: selection.selection_id,
             layer: selection.layer_id,
             query_spec: selection.predicate,
             geometry: selection.geometry_json,
             metadata: selection.metadata,
+            expires_at: selection.expires_at || null,
+            materialization,
         });
     } catch (err: any) {
-        sendError(res, err);
+        sendSelectionPredicateErrorOrFallback(res, err);
+    }
+});
+
+app.post('/api/selections/:selectionId/materialize', async (req, res) => {
+    try {
+        const data = await agentToolService.materializeSelection(req.params.selectionId, req.body || {});
+        res.json({ status: 'ok', data, warnings: [] });
+    } catch (err: any) {
+        res.status(400).json({
+            status: 'error',
+            error: {
+                code: 'SELECTION_MATERIALIZE_FAILED',
+                message: err.message || 'Failed to materialize selection',
+            },
+        });
+    }
+});
+
+app.get('/api/selections/:selectionId/items', async (req, res) => {
+    try {
+        const data = await agentToolService.listSelectionItems(req.params.selectionId, {
+            limit: req.query.limit,
+            offset: req.query.offset,
+        });
+        res.json({ status: 'ok', data, warnings: [] });
+    } catch (err: any) {
+        res.status(400).json({
+            status: 'error',
+            error: {
+                code: 'SELECTION_ITEMS_FAILED',
+                message: err.message || 'Failed to list selection items',
+            },
+        });
     }
 });
 
@@ -843,8 +1056,13 @@ app.post('/api/map/apply-selection', async (req, res) => {
             res.status(400).json({ error: 'Missing layer or selectionId' });
             return;
         }
-        const state = await viewControlService.applySelection(layer, selectionId, mode);
-        res.json({ applied: true, layer, selection_id: selectionId, mode, state });
+        const selection = await selectionRepository.getSelection(selectionId);
+        if (!selection) {
+            res.status(404).json({ error: 'Selection not found or expired' });
+            return;
+        }
+        const result = await viewControlService.applySelectionWithExplanation(layer, selectionId, mode);
+        res.json({ applied: true, layer, selection_id: selectionId, mode, ...result });
     } catch (err: any) {
         sendError(res, err);
     }
@@ -857,24 +1075,44 @@ app.post('/api/map/clear-selection', async (req, res) => {
             res.status(400).json({ error: 'Missing layer' });
             return;
         }
-        const state = await viewControlService.clearSelection(layer);
-        res.json({ cleared: true, layer, state });
+        const result = await viewControlService.clearSelectionWithExplanation(layer);
+        res.json({ cleared: true, layer, ...result });
     } catch (err: any) {
         sendError(res, err);
     }
 });
+
+function acledIngestCredentialsConfigured(): boolean {
+    const mode = (process.env.ACLED_AUTH_MODE || '').trim().toLowerCase();
+    const email = Boolean(process.env.ACLED_EMAIL);
+    const password = Boolean(process.env.ACLED_PASSWORD);
+    const key = Boolean(process.env.ACLED_KEY);
+    if (mode === 'oauth') return email && password;
+    if (mode === 'legacy-key') return email && key;
+    if (email && key) return true;
+    return email && password && process.env.ACLED_ENABLE_PASSWORD_OAUTH === 'true';
+}
 
 const SOURCE_FETCH_CAPABILITIES: Record<string, {
     source: string;
     status: 'available' | 'auth_required' | 'unsupported' | 'planned';
     history: string;
     notes: string;
+    policy?: Record<string, unknown>;
 }> = {
     'cloudflare-outages': {
         source: 'cloudflare_radar',
         status: process.env.CLOUDFLARE_API_TOKEN ? 'available' : 'auth_required',
         history: 'Provider supports time-window outage queries; backend connector is already present for live polling.',
         notes: 'Fetches and persists Cloudflare Radar outage annotations for the requested time window.',
+        policy: {
+            free_tier: 'Cloudflare Radar API access depends on the configured account/token.',
+            min_fetch_interval_ms: 60_000,
+            min_provider_request_interval_ms: Number.parseInt(process.env.CLOUDFLARE_MIN_REQUEST_INTERVAL_MS || '60000', 10) || 60_000,
+            max_window_hours: 24,
+            default_page_size: Number.parseInt(process.env.CLOUDFLARE_OUTAGE_PAGE_SIZE || process.env.CLOUDFLARE_OUTAGE_LIMIT || '100', 10) || 100,
+            max_pages: Number.parseInt(process.env.CLOUDFLARE_OUTAGE_MAX_PAGES || '50', 10) || 50,
+        },
     },
     'gfw-events': {
         source: 'gfw',
@@ -882,23 +1120,55 @@ const SOURCE_FETCH_CAPABILITIES: Record<string, {
         history: 'Provider can return vessel tracks/events when token and product access allow it.',
         notes: 'Fetches and persists GFW gap events for an explicit date window.',
     },
+    'acled-conflicts': {
+        source: 'acled',
+        status: acledIngestCredentialsConfigured() ? 'planned' : 'auth_required',
+        history: 'ACLED supports account/license-dependent event reads by timestamp/date filters. OpenSpy currently runs incremental ACLED ingest when credentials are configured.',
+        notes: 'This operation status refers only to arbitrary user-triggered ACLED historical data import, which is not executable yet. Local incremental ACLED ingest is a separate configured source capability and can populate conflict snapshots when credentials are present.',
+        policy: {
+            free_tier: 'ACLED requires a myACLED account/license; availability depends on account terms.',
+            live_poll_ms: 30 * 60 * 1000,
+            bootstrap_lookback_days: Number.parseInt(process.env.ACLED_BOOTSTRAP_LOOKBACK_DAYS || '7', 10) || 7,
+            incremental_overlap_hours: Number.parseFloat(process.env.ACLED_INCREMENTAL_OVERLAP_HOURS || '6') || 6,
+            page_size: Number.parseInt(process.env.ACLED_PAGE_SIZE || '5000', 10) || 5000,
+            max_pages: Number.parseInt(process.env.ACLED_MAX_PAGES || '100', 10) || 100,
+            provider_fetch_status: 'planned',
+            local_incremental_ingest_status: acledIngestCredentialsConfigured() ? 'available' : 'auth_required',
+        },
+    },
     'opensky-tracks': {
         source: 'opensky',
         status: process.env.OPENSKY_USERNAME && process.env.OPENSKY_PASSWORD ? 'planned' : 'auth_required',
         history: 'OpenSky track/history availability is account and credit dependent.',
         notes: 'Use local position_fixes for replay; provider history should fill gaps, not replace canonical replay.',
+        policy: {
+            free_tier: 'Authenticated OpenSky REST credits are limited; use local DB first and do not poll provider history during replay.',
+            current_state_poll_seconds: 90,
+            authenticated_state_history_limit: 'up to 1 hour in the past on the REST state endpoint',
+        },
     },
     'spacetrack-gp-history': {
         source: 'celestrak',
         status: process.env.SPACETRACK_EMAIL && process.env.SPACETRACK_PASSWORD ? 'planned' : 'auth_required',
         history: 'Space-Track GP history can provide historical orbital elements for satellites.',
         notes: 'Replay positions should be computed from the best historical TLE for the target time.',
+        policy: {
+            free_tier: 'Account-based public access; cache aggressively and respect Space-Track request limits.',
+            current_tle_cache_hours: 24,
+            provider_history_import: 'planned',
+        },
     },
     'firms-fires': {
         source: 'firms',
         status: process.env.FIRMS_MAP_KEY || process.env.NASA_FIRMS_MAP_KEY ? 'available' : 'auth_required',
         history: 'NASA FIRMS Area API exposes dated CSV fire products with MAP_KEY, source, bbox/world area, day range and date.',
         notes: 'Fetches VIIRS/MODIS active-fire CSV for an explicit date/day range and persists normalized fire events when credentials are configured.',
+        policy: {
+            free_tier: 'NASA FIRMS MAP_KEY is free by email and documents 5,000 transactions per 10 minutes.',
+            max_day_range: 10,
+            default_poll_minutes: 30,
+            upstream_granularity: 'VIIRS/MODIS active-fire products, not raw satellite imagery',
+        },
     },
     'usgs-earthquakes': {
         source: 'usgs',
@@ -935,26 +1205,159 @@ const SOURCE_FETCH_CAPABILITIES: Record<string, {
         status: 'available',
         history: 'NASA GIBS/Worldview provides date-addressable public WMTS/WMS imagery layers.',
         notes: 'UI can display time-aware NASA GIBS imagery overlays. This operation returns metadata and map actions, not raw pixels.',
+        policy: {
+            free_tier: 'Public NASA GIBS/Worldview WMTS/WMS imagery; no product key is required.',
+            selected_date_rule: 'default to yesterday UTC because same-day true-color tiles can be incomplete',
+            tile_cache: 'browser/provider tile cache only; no raw imagery is stored locally by default',
+        },
     },
     'imagery-search-latest': {
         source: 'nasa_gibs',
         status: 'available',
         history: 'NASA GIBS/Worldview provides public daily/date-addressable global imagery layers suitable for fresh context overlays.',
         notes: 'Returns a lightweight scene descriptor for the latest usable NASA GIBS date and UI actions for overlay/compare. It does not download raw pixels.',
+        policy: {
+            free_tier: 'Public NASA GIBS/Worldview WMTS/WMS imagery; no product key is required.',
+            selected_date_rule: 'default to yesterday UTC because same-day true-color tiles can be incomplete',
+            resolution: 'context imagery; use Copernicus Sentinel or Landsat for higher-resolution targeted scenes',
+        },
     },
     'copernicus-sentinel-imagery': {
         source: 'copernicus',
-        status: process.env.COPERNICUS_CLIENT_ID && process.env.COPERNICUS_CLIENT_SECRET ? 'planned' : 'auth_required',
+        status: process.env.COPERNICUS_CLIENT_ID && process.env.COPERNICUS_CLIENT_SECRET ? 'available' : 'auth_required',
         history: 'Copernicus Data Space can search Sentinel scenes by AOI/time after registration/auth.',
-        notes: 'Not executable yet. Needed for higher-resolution scene metadata, quicklook/render and Sentinel-1/Sentinel-2 overlays.',
+        notes: 'Searches Sentinel scene metadata and renders bounded Sentinel-2 optical previews through backend-owned Sentinel Hub APIs. Sentinel-1 metadata is searchable but is not exposed as a renderable scene until a radar renderer is added.',
+        policy: {
+            free_tier: 'Copernicus Data Space / Sentinel Hub general-user access is free after registration within request and processing-unit quotas.',
+            max_search_window_days: Number.parseInt(process.env.COPERNICUS_MAX_SEARCH_WINDOW_DAYS || '14', 10) || 14,
+            max_bbox_area_degrees2: Number.parseFloat(process.env.COPERNICUS_MAX_BBOX_AREA_DEG2 || '25') || 25,
+            max_results: Number.parseInt(process.env.COPERNICUS_MAX_SEARCH_RESULTS || '10', 10) || 10,
+            min_provider_request_interval_ms: Number.parseInt(process.env.COPERNICUS_MIN_REQUEST_INTERVAL_MS || '2500', 10) || 2500,
+            default_render_max_pixels: Number.parseInt(process.env.COPERNICUS_MAX_RENDER_PIXELS || '1024', 10) || 1024,
+        },
     },
     'landsat-stac-imagery': {
         source: 'usgs_landsat',
         status: 'planned',
         history: 'USGS Landsat STAC supports historical AOI/time scene search.',
         notes: 'Not executable yet. Useful for historical corroboration and before/after analysis, not freshest global imagery.',
+        policy: {
+            free_tier: 'USGS/Landsat archive access is free, but the OpenSpy connector is not implemented yet.',
+            product_status: 'planned',
+        },
     },
 };
+
+function envInt(name: string, fallback: number): number {
+    const parsed = Number.parseInt(process.env[name] || '', 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function envFloat(name: string, fallback: number): number {
+    const parsed = Number.parseFloat(process.env[name] || '');
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+const SOURCE_PROVIDER_POLICIES: Record<string, Record<string, unknown>> = {
+    cloudflare_radar: {
+        account_tier: 'configured Cloudflare account/token; Radar API access is free on available plans, subject to Cloudflare terms',
+        upstream_rate_limit_reference: 'Cloudflare global REST API limit is documented as 1,200 requests / 5 minutes per user/account token and 200 requests / second per IP; OpenSpy uses a stricter local gate.',
+        local_cadence: {
+            live_poll_ms: 15 * 60 * 1000,
+            source_fetch_min_interval_ms: envInt('CLOUDFLARE_MIN_REQUEST_INTERVAL_MS', 60_000),
+            source_fetch_max_window_hours: 24,
+            source_fetch_page_size: envInt('CLOUDFLARE_OUTAGE_PAGE_SIZE', 100),
+            source_fetch_max_pages: envInt('CLOUDFLARE_OUTAGE_MAX_PAGES', 50),
+        },
+        replay_rule: 'Replay reads local event snapshots; replay speed never increases Cloudflare provider polling.',
+        storage_rule: 'Persist raw audit payloads and normalized outage events when provider fetch executes.',
+    },
+    copernicus: {
+        account_tier: 'Copernicus Data Space / Sentinel Hub registration; general-user access is free within request and processing-unit quotas.',
+        upstream_rate_limit_reference: 'General user quotas include monthly/per-minute request and processing-unit limits; OpenSpy keeps AOI and render requests bounded.',
+        local_cadence: {
+            source_fetch_min_interval_ms: envInt('COPERNICUS_MIN_REQUEST_INTERVAL_MS', 2500),
+            search_cache_seconds: envInt('COPERNICUS_SEARCH_CACHE_SECONDS', 600),
+            render_cache_seconds: envInt('COPERNICUS_RENDER_CACHE_SECONDS', 3600),
+            max_search_window_days: envInt('COPERNICUS_MAX_SEARCH_WINDOW_DAYS', 14),
+            max_bbox_area_degrees2: envFloat('COPERNICUS_MAX_BBOX_AREA_DEG2', 25),
+            max_search_results: envInt('COPERNICUS_MAX_SEARCH_RESULTS', 10),
+            max_render_pixels: envInt('COPERNICUS_MAX_RENDER_PIXELS', 1024),
+        },
+        replay_rule: 'Sentinel imagery is a targeted visual overlay/action, not a replay-clock source and not canonical vector hydration.',
+        storage_rule: 'Store search/render cache only; raw Sentinel products are not imported into canonical storage by default.',
+    },
+    opensky: {
+        account_tier: 'OpenSky OAuth client; authenticated REST credits are limited.',
+        upstream_rate_limit_reference: 'Authenticated state-vector endpoint uses daily credits; standard account bucket is 4,000 credits/day.',
+        local_cadence: {
+            live_poll_seconds: 90,
+            provider_history_max_past_window: 'up to 1 hour for authenticated REST state vectors; deeper history requires OpenSky data infrastructure/licensing',
+        },
+        replay_rule: 'Aircraft replay reads local position_fixes. Provider history is a user-triggered gap-fill path only when implemented, never tied to replay speed.',
+        storage_rule: 'Store accepted aircraft fixes and entity snapshots locally.',
+    },
+    acled: {
+        account_tier: 'myACLED account/license; credentials required for the ACLED provider path.',
+        upstream_rate_limit_reference: 'ACLED access is account/license dependent. OpenSpy uses incremental timestamp windows and page caps.',
+        local_cadence: {
+            live_poll_ms: 30 * 60 * 1000,
+            bootstrap_lookback_days: envInt('ACLED_BOOTSTRAP_LOOKBACK_DAYS', 7),
+            incremental_overlap_hours: envFloat('ACLED_INCREMENTAL_OVERLAP_HOURS', 6),
+            page_size: envInt('ACLED_PAGE_SIZE', 5000),
+            max_pages: envInt('ACLED_MAX_PAGES', 100),
+        },
+        replay_rule: 'Conflict replay reads local event snapshots. ACLED provider ingest is incremental and independent from replay speed.',
+        storage_rule: 'Persist raw pages, deleted-event pages and normalized conflict events when credentials are configured.',
+    },
+    celestrak: {
+        account_tier: 'Public fallback for current satellite GP/TLE catalogs; no key.',
+        upstream_rate_limit_reference: 'CelesTrak checks for GP updates roughly every 2 hours and can block aggressive clients.',
+        local_cadence: {
+            current_tle_cache_hours: 24,
+            recommended_provider_refresh_hours: 2,
+        },
+        replay_rule: 'Satellite positions are computed from stored orbital elements; replay speed never downloads new TLEs.',
+        storage_rule: 'Store orbital element snapshots for replay and audit.',
+    },
+    space_track: {
+        account_tier: 'Space-Track account required for primary GP and GP_HISTORY.',
+        upstream_rate_limit_reference: 'Respect Space-Track request limits; cache aggressively and do not repeatedly query GP_HISTORY.',
+        local_cadence: {
+            current_tle_cache_hours: 24,
+            historical_gp_import: 'planned/auth-required until executable connector is completed',
+        },
+        replay_rule: 'Deep satellite replay requires stored historical GP/TLE epochs selected at or before the replay timestamp.',
+        storage_rule: 'Historical orbital elements must be stored in core.orbital_elements before being advertised as available replay evidence.',
+    },
+    firms: {
+        account_tier: 'Free NASA FIRMS MAP_KEY by email.',
+        upstream_rate_limit_reference: 'NASA FIRMS MAP_KEY documents 5,000 transactions / 10 minutes.',
+        local_cadence: {
+            default_poll_minutes: 30,
+            source_fetch_max_day_range: 10,
+        },
+        replay_rule: 'Fire replay reads local event snapshots; FIRMS source-fetch is user/action driven.',
+        storage_rule: 'Persist active-fire rows as normalized fire events and raw CSV audit payloads when fetched.',
+    },
+    nasa_gibs: {
+        account_tier: 'Public NASA GIBS/Worldview WMTS/WMS; no OpenSpy key required.',
+        upstream_rate_limit_reference: 'Use provider/browser tile caching. OpenSpy does not bulk-download global imagery tiles.',
+        local_cadence: {
+            selected_date_rule: 'default to yesterday UTC because same-day true-color tiles can be incomplete',
+            tile_cache: 'browser/provider cache',
+        },
+        replay_rule: 'GIBS is date-addressable context imagery and must not block replay hydration.',
+        storage_rule: 'No raw pixel storage by default.',
+    },
+};
+
+function providerPolicyForSource(sourceId: string): Record<string, unknown> | null {
+    if (SOURCE_PROVIDER_POLICIES[sourceId]) return SOURCE_PROVIDER_POLICIES[sourceId];
+    if (sourceId === 'space-track' || sourceId === 'spacetrack') return SOURCE_PROVIDER_POLICIES.space_track;
+    if (sourceId === 'space_track') return SOURCE_PROVIDER_POLICIES.space_track;
+    return null;
+}
 
 function authConfigured(manifest: any): boolean | null {
     const auth = manifest?.auth;
@@ -968,7 +1371,10 @@ function stableHash(value: unknown): string {
     return crypto.createHash('sha1').update(JSON.stringify(value)).digest('hex').slice(0, 16);
 }
 
-function parseToolBbox(value: unknown): [number, number, number, number] | null {
+type OpenSpyBbox = [number, number, number, number]; // west, south, east, north
+type ProviderBboxSwne = [number, number, number, number]; // south, west, north, east
+
+function parseOpenSpyBbox(value: unknown): OpenSpyBbox | null {
     if (!value) return null;
     const parts = Array.isArray(value)
         ? value
@@ -976,11 +1382,11 @@ function parseToolBbox(value: unknown): [number, number, number, number] | null 
     if (parts.length !== 4) return null;
     const parsed = parts.map((part) => Number(part));
     if (parsed.some((part) => !Number.isFinite(part))) return null;
-    const [south, west, north, east] = parsed;
+    const [west, south, east, north] = parsed;
     if (south < -90 || north > 90 || west < -180 || east > 180 || south >= north || west >= east) {
         return null;
     }
-    return [south, west, north, east];
+    return [west, south, east, north];
 }
 
 function isoDateOnly(value: string | null | undefined): string | null {
@@ -1209,7 +1615,7 @@ function buildGibsSceneDescriptor(input: {
         provider: 'NASA GIBS / NASA Worldview',
         imagery_kind: 'date_addressable_wmts',
         coverage: input.bbox
-            ? { scope: 'aoi_overlay', bbox: input.bbox, bbox_order: 'south,west,north,east' }
+            ? { scope: 'aoi_overlay', bbox: input.bbox, bbox_order: 'west,south,east,north' }
             : { scope: 'global_overlay' },
         requested_layer: layerAlias,
         layer_id: layerId,
@@ -1262,7 +1668,11 @@ async function buildSourceCapabilityMatrix() {
     const operationsBySource = new Map<string, Array<any>>();
     for (const [operation, capability] of Object.entries(SOURCE_FETCH_CAPABILITIES)) {
         if (!operationsBySource.has(capability.source)) operationsBySource.set(capability.source, []);
-        operationsBySource.get(capability.source)!.push({ operation, ...capability });
+        operationsBySource.get(capability.source)!.push({
+            operation,
+            ...capability,
+            provider_policy: providerPolicyForSource(capability.source),
+        });
     }
 
     const matrix = (sources || []).map((source: any) => {
@@ -1314,11 +1724,14 @@ async function buildSourceCapabilityMatrix() {
                 replay_supported: boundLayers.some((layer) => layer.replay),
                 live_only: boundLayers.length > 0 && boundLayers.every((layer) => layer.live_only_context),
             },
+            provider_policy: providerPolicyForSource(sourceId),
             source_fetch_operations: sourceFetchOperations.map((operation) => ({
                 operation: operation.operation,
                 status: operation.status,
                 history: operation.history,
                 notes: operation.notes,
+                policy: operation.policy || null,
+                provider_policy: operation.provider_policy || null,
             })),
             latest_ingest: ingest.map((row) => ({
                 layer_id: row.layerId,
@@ -1347,6 +1760,7 @@ async function buildSourceCapabilityMatrix() {
             .map(([operationId, capability]) => ({
                 operation: operationId,
                 ...capability,
+                provider_policy: providerPolicyForSource(capability.source),
             }))
             .sort((a, b) => a.operation.localeCompare(b.operation)),
         summary: {
@@ -1359,6 +1773,113 @@ async function buildSourceCapabilityMatrix() {
                 .filter((operation) => operation.status === 'available' || operation.status === 'auth_required').length,
         },
     };
+}
+
+function compactProviderPolicyForPrompt(policy: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
+    if (!policy) return null;
+    return {
+        account_tier: policy.account_tier || null,
+        replay_rule: policy.replay_rule || null,
+        storage_rule: policy.storage_rule || null,
+    };
+}
+
+function compactOperationPolicyForPrompt(policy: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
+    if (!policy) return null;
+    return {
+        free_tier: policy.free_tier || null,
+        max_window_hours: policy.max_window_hours || null,
+        max_search_window_days: policy.max_search_window_days || null,
+        max_bbox_area_degrees2: policy.max_bbox_area_degrees2 || null,
+        max_results: policy.max_results || null,
+        min_provider_request_interval_ms: policy.min_provider_request_interval_ms || null,
+        selected_date_rule: policy.selected_date_rule || null,
+        resolution: policy.resolution || null,
+        product_status: policy.product_status || null,
+    };
+}
+
+async function buildAgentSourceCapabilityPromptContext() {
+    try {
+        const matrix = await buildSourceCapabilityMatrix();
+        return {
+            generated_at: new Date().toISOString(),
+            contract: {
+                purpose: 'Run-start source capability snapshot for the OpenSpy agent.',
+                statuses: ['available', 'auth_required', 'planned', 'unsupported'],
+                usage: [
+                    'Use this context before deciding which source tools, imagery paths, storage claims or replay claims are possible.',
+                    'Do not write conditional phrases such as "if credentials are configured" for operations listed here; use the actual status and auth.configured values in this snapshot.',
+                    'Use source-fetch capabilities only when a full matrix or fresh detail is needed beyond this compact snapshot.',
+                    'Provider source-fetch calls are user/action driven and must respect provider_policy/local cadence; replay speed never increases upstream fetch frequency.',
+                ],
+            },
+            summary: matrix.summary,
+            operations: matrix.operations.map((operation: any) => ({
+                operation: operation.operation,
+                source: operation.source,
+                status: operation.status,
+                history: operation.history,
+                notes: operation.notes,
+                policy: compactOperationPolicyForPrompt(operation.policy),
+                provider_policy: compactProviderPolicyForPrompt(operation.provider_policy),
+            })),
+            sources: matrix.sources
+                .filter((source: any) => (
+                    !source.notes?.inactive_catalog_entry
+                    || (source.source_fetch_operations || []).length > 0
+                    || source.auth?.required
+                ))
+                .map((source: any) => ({
+                    source_id: source.source_id,
+                    display_name: source.display_name,
+                    provider: source.provider,
+                    category: source.category,
+                    auth: {
+                        required: source.auth?.required,
+                        configured: source.auth?.configured,
+                        method: source.auth?.method,
+                        env_keys: source.auth?.env_keys || [],
+                        limits: source.auth?.limits || null,
+                    },
+                    local_storage: {
+                        has_local_history: source.local_storage?.has_local_history,
+                        replay_supported: source.local_storage?.replay_supported,
+                        live_only: source.local_storage?.live_only,
+                        layers: (source.local_storage?.layers || []).slice(0, 4).map((layer: any) => ({
+                            layer_id: layer.layer_id,
+                            replay: layer.replay,
+                            live_only_context: layer.live_only_context,
+                            raw_capture_mode: layer.raw_capture_mode,
+                            storage_policy_id: layer.storage_policy_id,
+                        })),
+                    },
+                    provider_policy: compactProviderPolicyForPrompt(source.provider_policy),
+                    source_fetch_operations: (source.source_fetch_operations || []).map((operation: any) => ({
+                        operation: operation.operation,
+                        status: operation.status,
+                    })),
+                    latest_ingest: (source.latest_ingest || []).slice(0, 5).map((ingest: any) => ({
+                        layer_id: ingest.layer_id,
+                        status: ingest.status,
+                        completeness: ingest.completeness,
+                        latest_completed_at: ingest.latest_completed_at,
+                        normalized_count: ingest.normalized_count,
+                        error_message: ingest.error_message,
+                    })),
+                })),
+        };
+    } catch (err: any) {
+        return {
+            generated_at: new Date().toISOString(),
+            status: 'error',
+            error: {
+                code: 'SOURCE_CAPABILITY_CONTEXT_UNAVAILABLE',
+                message: err?.message || String(err),
+            },
+            instruction: 'If source capability context is unavailable, call source-fetch capabilities before making source or imagery recommendations.',
+        };
+    }
 }
 
 const agentRateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -1475,8 +1996,15 @@ app.post('/api/agent-tools/sql-query', async (req, res) => {
             });
             return;
         }
-        if (/SQL|SELECT|statement|allowed|required/i.test(err.message || '')) {
-            res.status(400).json({ status: 'error', error: { code: 'SQL_REJECTED', message: err.message } });
+        if (/SQL|SELECT|statement|allowed|required|operator|column|relation|syntax/i.test(err.message || '') || ['42601', '42703', '42804', '42883', '42P01'].includes(String(err.code || ''))) {
+            res.status(400).json({
+                status: 'error',
+                error: {
+                    code: 'SQL_REJECTED',
+                    message: err.message,
+                    hint: 'Fix the read-only SELECT or use a semantic OpenSpy query tool.',
+                },
+            });
             return;
         }
         if (err.code === '42501' && /role/i.test(err.message || '')) {
@@ -1542,13 +2070,17 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
             });
             return;
         }
+        const capabilityWithPolicy = {
+            ...capability,
+            provider_policy: providerPolicyForSource(capability.source),
+        };
         if (capability.status === 'auth_required' || capability.status === 'unsupported' || capability.status === 'planned') {
             res.json({
                 status: capability.status,
                 data: {
                     operation,
                     args,
-                    capability,
+                    capability: capabilityWithPolicy,
                 },
                 meta: {
                     executed: false,
@@ -1569,20 +2101,35 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
         const from = parseIsoDateOrNull(args.from ? String(args.from) : undefined);
         const to = parseIsoDateOrNull(args.to ? String(args.to) : undefined);
 
+        const requireMaxWindowHours = (operationId: string, start: string | null, end: string | null, maxHours: number): boolean => {
+            if (!start || !end) return true;
+            const hours = Math.max(0, (new Date(end).getTime() - new Date(start).getTime()) / 3_600_000);
+            if (hours <= maxHours) return true;
+            res.status(400).json({
+                status: 'error',
+                error: {
+                    code: 'WINDOW_TOO_LARGE',
+                    message: `${operationId} window is capped at ${maxHours} hours to protect provider rate limits.`,
+                },
+                data: { operation: operationId, from: start, to: end, max_hours: maxHours },
+            });
+            return false;
+        };
+
         if (operation === 'firms-fires') {
             if (!from && !args.date) {
                 res.status(400).json({ status: 'error', error: { code: 'BAD_WINDOW', message: 'firms-fires requires --from ISO timestamp or --date YYYY-MM-DD' } });
                 return;
             }
             const date = String(args.date || isoDateOnly(from) || '').slice(0, 10);
-            const bbox = parseToolBbox(args.bbox);
+            const bbox = parseOpenSpyBbox(args.bbox);
             const dayRange = Math.max(1, Math.min(10, Number.parseInt(String(args.day_range || args.dayRange || dayRangeFromWindow(from || `${date}T00:00:00.000Z`, to)), 10) || 1));
             const source = String(args.source || 'VIIRS_SNPP_NRT').trim();
-            const area = String(args.area || (bbox ? `${bbox[1]},${bbox[0]},${bbox[3]},${bbox[2]}` : 'world')).trim();
+            const area = String(args.area || (bbox ? bbox.join(',') : 'world')).trim();
             if (dryRun) {
                 res.json({
                     status: 'ok',
-                    data: { operation, source: capability.source, date, dayRange, firmsSource: source, area, capability },
+                    data: { operation, source: capability.source, date, dayRange, firmsSource: source, area, capability: capabilityWithPolicy },
                     meta: { executed: false, persisted: false, dry_run: true },
                     warnings: ['Dry run only. No provider request was sent and no local data was written.'],
                 });
@@ -1607,7 +2154,7 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
                 res.status(400).json({ status: 'error', error: { code: 'BAD_WINDOW', message: 'usgs-earthquakes requires --from and --to ISO timestamps' } });
                 return;
             }
-            const bbox = parseToolBbox(args.bbox);
+            const bbox = parseOpenSpyBbox(args.bbox);
             const params = new URLSearchParams({
                 format: 'geojson',
                 starttime: from,
@@ -1617,15 +2164,15 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
                 orderby: 'time',
             });
             if (bbox) {
-                params.set('minlatitude', String(bbox[0]));
-                params.set('minlongitude', String(bbox[1]));
-                params.set('maxlatitude', String(bbox[2]));
-                params.set('maxlongitude', String(bbox[3]));
+                params.set('minlatitude', String(bbox[1]));
+                params.set('minlongitude', String(bbox[0]));
+                params.set('maxlatitude', String(bbox[3]));
+                params.set('maxlongitude', String(bbox[2]));
             }
             if (dryRun) {
                 res.json({
                     status: 'ok',
-                    data: { operation, source: capability.source, query: Object.fromEntries(params.entries()), capability },
+                    data: { operation, source: capability.source, query: Object.fromEntries(params.entries()), capability: capabilityWithPolicy },
                     meta: { executed: false, persisted: false, dry_run: true },
                     warnings: ['Dry run only. No provider request was sent and no local data was written.'],
                 });
@@ -1659,18 +2206,18 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
                 res.status(400).json({ status: 'error', error: { code: 'BAD_WINDOW', message: 'eonet-events requires --from and --to ISO timestamps' } });
                 return;
             }
-            const bbox = parseToolBbox(args.bbox);
+            const bbox = parseOpenSpyBbox(args.bbox);
             const params = new URLSearchParams({
                 status: String(args.status || 'all'),
                 start: from.slice(0, 10),
                 end: to.slice(0, 10),
                 limit: String(args.limit || '500'),
             });
-            if (bbox) params.set('bbox', `${bbox[1]},${bbox[2]},${bbox[3]},${bbox[0]}`);
+            if (bbox) params.set('bbox', `${bbox[0]},${bbox[3]},${bbox[2]},${bbox[1]}`);
             if (dryRun) {
                 res.json({
                     status: 'ok',
-                    data: { operation, source: capability.source, query: Object.fromEntries(params.entries()), capability },
+                    data: { operation, source: capability.source, query: Object.fromEntries(params.entries()), capability: capabilityWithPolicy },
                     meta: { executed: false, persisted: false, dry_run: true },
                     warnings: ['Dry run only. No provider request was sent and no local data was written.'],
                 });
@@ -1712,7 +2259,7 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
             if (dryRun) {
                 res.json({
                     status: 'ok',
-                    data: { operation, source: capability.source, query, capability },
+                    data: { operation, source: capability.source, query, capability: capabilityWithPolicy },
                     meta: { executed: false, persisted: false, dry_run: true },
                     warnings: ['Dry run only. No provider request was sent and no local data was written.'],
                 });
@@ -1779,6 +2326,22 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
                 res.status(400).json({ status: 'error', error: { code: 'BAD_WINDOW', message: 'cloudflare-outages requires --from ISO timestamp' } });
                 return;
             }
+            if (!requireMaxWindowHours(operation, from, to || new Date().toISOString(), Number(capability.policy?.max_window_hours || 24))) return;
+            if (dryRun) {
+                res.json({
+                    status: 'ok',
+                    data: {
+                        operation,
+                        source: capability.source,
+                        from,
+                        to: to || null,
+                        capability: capabilityWithPolicy,
+                    },
+                    meta: { executed: false, persisted: false, dry_run: true },
+                    warnings: ['Dry run only. No Cloudflare provider request was sent and no local data was written.'],
+                });
+                return;
+            }
             const fetched = await cloudflareService.fetchOutagesWindow({ dateStart: from, dateEnd: to || undefined, persist });
             res.json({
                 status: 'ok',
@@ -1821,7 +2384,7 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
         if (operation === 'nasa-gibs-imagery' || operation === 'imagery-search-latest') {
             const date = String(args.date || args.time || (from ? from.slice(0, 10) : new Date().toISOString().slice(0, 10))).slice(0, 10);
             const layer = String(args.layer || 'viirs_true_color').trim();
-            const bbox = parseToolBbox(args.bbox);
+            const bbox = parseOpenSpyBbox(args.bbox);
             const scene = buildGibsSceneDescriptor({
                 operation,
                 date: operation === 'imagery-search-latest' && !args.date && !args.time && !from
@@ -1857,12 +2420,105 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
             return;
         }
 
+        if (operation === 'copernicus-sentinel-imagery') {
+            const bbox = parseOpenSpyBbox(args.bbox);
+            if (!bbox) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_BBOX', message: 'copernicus-sentinel-imagery requires --bbox west,south,east,north' } });
+                return;
+            }
+            const defaultTo = to || new Date().toISOString();
+            const defaultFrom = from || new Date(new Date(defaultTo).getTime() - 7 * 86_400_000).toISOString();
+            const collection = String(args.collection || args.dataset || 'sentinel-2-l2a');
+            const layer = String(args.layer || 'true_color');
+            const maxCloudCover = Number(args.max_cloud_cover ?? args.maxCloudCover ?? 40);
+            const limit = Number(args.limit || 5);
+            if (dryRun) {
+                res.json({
+                    status: 'ok',
+                    data: {
+                        operation,
+                        source: capability.source,
+                        bbox,
+                        from: defaultFrom,
+                        to: defaultTo,
+                        collection,
+                        layer,
+                        maxCloudCover,
+                        limit,
+                        capability: capabilityWithPolicy,
+                        policy: copernicusService.getPolicy(),
+                    },
+                    meta: { executed: false, persisted: false, dry_run: true },
+                    warnings: ['Dry run only. No Copernicus provider request was sent and no local data was written.'],
+                });
+                return;
+            }
+            const result = await copernicusService.searchScenes({
+                bbox,
+                from: defaultFrom,
+                to: defaultTo,
+                collection,
+                layer,
+                maxCloudCover,
+                limit,
+            });
+            const scenes = result.scenes.map((scene) => ({
+                ...scene,
+                action_payloads: scene.render ? {
+                    show_scene: {
+                        type: 'imagery.show_scene',
+                        label: `Show ${scene.collection} ${scene.datetime ? scene.datetime.slice(0, 10) : 'scene'}`,
+                        payload: {
+                            source: 'copernicus',
+                            scene_id: scene.scene_id,
+                            scene,
+                            bbox: scene.render.bbox,
+                            bbox_order: scene.render.bbox_order,
+                            collection: scene.render.collection,
+                            layer: scene.render.layer,
+                            from: scene.render.from,
+                            to: scene.render.to,
+                            maxCloudCover: scene.render.maxCloudCover,
+                            opacity: Number(args.opacity ?? 0.72),
+                        },
+                    },
+                } : {},
+            }));
+            res.json({
+                status: 'ok',
+                data: {
+                    operation,
+                    source: capability.source,
+                    scenes,
+                    scene: scenes[0] || null,
+                    rawCount: result.rawCount,
+                    query: result.query,
+                    policy: copernicusService.getPolicy(),
+                    ui_actions: ['imagery.show_scene', 'imagery.compare', 'imagery.clear'],
+                    action_payload_example: scenes[0]?.action_payloads?.show_scene || null,
+                },
+                meta: {
+                    executed: true,
+                    persisted: false,
+                    cached: result.cached,
+                    raw_pixels_downloaded: false,
+                },
+                warnings: [
+                    'Copernicus search returns scene metadata. Browser show-scene renders a bounded preview through the backend; raw Sentinel products are not stored locally by default.',
+                    ...(scenes.some((scene) => !scene.render_supported)
+                        ? ['Some returned Sentinel scenes are metadata-only because the current preview renderer supports Sentinel-2 L2A optical scenes only.']
+                        : []),
+                ],
+            });
+            return;
+        }
+
         res.json({
             status: 'unsupported',
             data: {
                 operation,
                 args,
-                capability,
+                capability: capabilityWithPolicy,
             },
             meta: {
                 executed: false,
@@ -1872,6 +2528,38 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
                 'This endpoint does not fabricate missing historical data.',
             ],
         });
+    } catch (err: any) {
+        sendError(res, err);
+    }
+});
+
+app.get('/api/imagery/copernicus/render', async (req, res) => {
+    try {
+        const bbox = parseOpenSpyBbox(req.query.bbox);
+        if (!bbox) {
+            res.status(400).json({ error: 'copernicus render requires bbox=west,south,east,north' });
+            return;
+        }
+        const to = parseIsoDateOrNull(req.query.to ? String(req.query.to) : undefined)
+            || parseIsoDateOrNull(req.query.time ? String(req.query.time) : undefined)
+            || new Date().toISOString();
+        const from = parseIsoDateOrNull(req.query.from ? String(req.query.from) : undefined)
+            || new Date(new Date(to).getTime() - 24 * 60 * 60 * 1000).toISOString();
+        const rendered = await copernicusService.renderScene({
+            bbox,
+            from,
+            to,
+            collection: String(req.query.collection || req.query.dataset || 'sentinel-2-l2a'),
+            layer: String(req.query.layer || 'true_color'),
+            maxCloudCover: Number(req.query.maxCloudCover || req.query.max_cloud_cover || 40),
+            width: req.query.width == null ? undefined : Number(req.query.width),
+            height: req.query.height == null ? undefined : Number(req.query.height),
+        });
+        res.setHeader('Content-Type', rendered.contentType);
+        res.setHeader('Cache-Control', `public, max-age=${rendered.cached ? 3600 : 900}`);
+        res.setHeader('X-OpenSpy-Imagery-Provider', 'copernicus');
+        res.setHeader('X-OpenSpy-Imagery-Cached', rendered.cached ? 'true' : 'false');
+        res.send(rendered.buffer);
     } catch (err: any) {
         sendError(res, err);
     }
@@ -1943,6 +2631,33 @@ app.post('/api/agent-tools/query/aggregate', async (req, res) => {
     }
 });
 
+app.post('/api/agent-tools/query/timeline', async (req, res) => {
+    try {
+        const data = await agentToolService.timeline(req.body || {});
+        res.json({ status: data.query_status?.status || 'ok', data, warnings: data.warnings || [] });
+    } catch (err: any) {
+        sendAgentToolError(res, err);
+    }
+});
+
+app.post('/api/agent-tools/query/related', async (req, res) => {
+    try {
+        const data = await agentToolService.related(req.body || {});
+        res.json({ status: data.query_status?.status || 'ok', data, warnings: [] });
+    } catch (err: any) {
+        sendAgentToolError(res, err);
+    }
+});
+
+app.post('/api/agent-tools/query/satellite-overpasses', async (req, res) => {
+    try {
+        const data = await agentToolService.satelliteOverpasses(req.body || {});
+        res.json({ status: data.status || 'ok', data, warnings: data.warnings || [] });
+    } catch (err: any) {
+        sendAgentToolError(res, err);
+    }
+});
+
 app.post('/api/agent-tools/geo/corridor', async (req, res) => {
     try {
         const data = await agentToolService.corridorSearch(req.body || {});
@@ -1952,9 +2667,48 @@ app.post('/api/agent-tools/geo/corridor', async (req, res) => {
     }
 });
 
+app.post('/api/agent-tools/geo/spatial-join', async (req, res) => {
+    try {
+        const data = await agentToolService.spatialJoin(req.body || {});
+        res.json({ status: data.query_status?.status || 'ok', data, warnings: [] });
+    } catch (err: any) {
+        sendAgentToolError(res, err);
+    }
+});
+
+app.post('/api/agent-tools/geo/simplify', async (req, res) => {
+    try {
+        const data = await agentToolService.simplifiedGeometry(req.body || {});
+        res.json({ status: data.count > 0 ? 'ok' : 'empty', data, warnings: data.count > 0 ? [] : ['No geometry matched these filters.'] });
+    } catch (err: any) {
+        sendAgentToolError(res, err);
+    }
+});
+
 app.get('/api/agent-tools/selections/:selectionId/preview', async (req, res) => {
     try {
         const data = await agentToolService.previewSelection(req.params.selectionId);
+        res.json({ status: 'ok', data, warnings: [] });
+    } catch (err: any) {
+        sendAgentToolError(res, err);
+    }
+});
+
+app.post('/api/agent-tools/selections/:selectionId/materialize', async (req, res) => {
+    try {
+        const data = await agentToolService.materializeSelection(req.params.selectionId, req.body || {});
+        res.json({ status: data.materialization_status === 'empty' ? 'empty' : 'ok', data, warnings: [] });
+    } catch (err: any) {
+        sendAgentToolError(res, err);
+    }
+});
+
+app.get('/api/agent-tools/selections/:selectionId/items', async (req, res) => {
+    try {
+        const data = await agentToolService.listSelectionItems(req.params.selectionId, {
+            limit: req.query.limit,
+            offset: req.query.offset,
+        });
         res.json({ status: 'ok', data, warnings: [] });
     } catch (err: any) {
         sendAgentToolError(res, err);
@@ -2090,8 +2844,13 @@ app.post('/api/agent-tools/map-command', async (req, res) => {
                 res.status(400).json({ status: 'error', error: { code: 'BAD_SELECTION_ACTION', message: 'selection.apply requires layer and selection_id' } });
                 return;
             }
-            const state = await viewControlService.applySelection(layer, selectionId, mode);
-            res.json({ status: 'ok', data: { command, layer, selection_id: selectionId, mode, state } });
+            const selection = await selectionRepository.getSelection(selectionId);
+            if (!selection) {
+                res.status(404).json({ status: 'error', error: { code: 'SELECTION_NOT_FOUND', message: 'Selection not found or expired' } });
+                return;
+            }
+            const result = await viewControlService.applySelectionWithExplanation(layer, selectionId, mode);
+            res.json({ status: 'ok', data: { command, layer, selection_id: selectionId, mode, ...result } });
             return;
         }
 
@@ -2101,8 +2860,8 @@ app.post('/api/agent-tools/map-command', async (req, res) => {
                 res.status(400).json({ status: 'error', error: { code: 'BAD_SELECTION_CLEAR', message: 'selection.clear requires layer' } });
                 return;
             }
-            const state = await viewControlService.clearSelection(layer);
-            res.json({ status: 'ok', data: { command, layer, state } });
+            const result = await viewControlService.clearSelectionWithExplanation(layer);
+            res.json({ status: 'ok', data: { command, layer, ...result } });
             return;
         }
 
@@ -2114,8 +2873,8 @@ app.post('/api/agent-tools/map-command', async (req, res) => {
                 res.status(400).json({ status: 'error', error: { code: 'BAD_LEGEND_ACTION', message: 'legend.set_node_state requires node' } });
                 return;
             }
-            const state = await viewControlService.setLegendNodeState(nodeId, enabled, target);
-            res.json({ status: 'ok', data: { command, node_id: nodeId, enabled, target, state } });
+            const result = await viewControlService.setLegendNodeStateWithExplanation(nodeId, enabled, target);
+            res.json({ status: 'ok', data: { command, node_id: nodeId, enabled, target, ...result } });
             return;
         }
 
@@ -2125,8 +2884,8 @@ app.post('/api/agent-tools/map-command', async (req, res) => {
                 res.status(400).json({ status: 'error', error: { code: 'BAD_VIEW_PATCH', message: 'view.patch requires a patch object' } });
                 return;
             }
-            const state = await viewControlService.patchState(patch);
-            res.json({ status: 'ok', data: { command, patch, state } });
+            const result = await viewControlService.patchStateWithExplanation(patch);
+            res.json({ status: 'ok', data: { command, patch, ...result } });
             return;
         }
 
@@ -2136,8 +2895,8 @@ app.post('/api/agent-tools/map-command', async (req, res) => {
                 res.status(400).json({ status: 'error', error: { code: 'BAD_LAYER_STATE_ACTION', message: `${command} requires layer/source/visibility payload` } });
                 return;
             }
-            const state = await viewControlService.patchState(patch);
-            res.json({ status: 'ok', data: { command, patch, state } });
+            const result = await viewControlService.patchStateWithExplanation(patch, payload);
+            res.json({ status: 'ok', data: { command, patch, ...result } });
             return;
         }
 
@@ -2171,7 +2930,7 @@ app.post('/api/agent-tools/map-command', async (req, res) => {
                 selectionId: typeof payload.selection_id === 'string' ? payload.selection_id
                     : typeof payload.selectionId === 'string' ? payload.selectionId
                         : undefined,
-                layerId: layer,
+                layerId: normalizeLayerId(layer) || layer,
                 selectionMode: 'filter',
                 predicate,
                 geometryJson: payload.geometry && typeof payload.geometry === 'object' ? payload.geometry : null,
@@ -2179,9 +2938,15 @@ app.post('/api/agent-tools/map-command', async (req, res) => {
                     source: 'agent-layer-filter',
                     label: payload.label || null,
                     createdBy: 'agent',
+                    materialize: true,
+                    expiresAt: payload.expires_at || payload.expiresAt || new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
                 },
+                expiresAt: payload.expires_at || payload.expiresAt || new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
             });
-            const state = await viewControlService.applySelection(layer, selection.selection_id, mode);
+            const materialization = await agentToolService.materializeSelection(selection.selection_id, {
+                limit: payload.materialize_limit || payload.max_items || payload.limit || 5000,
+            });
+            const result = await viewControlService.applySelectionWithExplanation(layer, selection.selection_id, mode);
             res.json({
                 status: 'ok',
                 data: {
@@ -2191,7 +2956,9 @@ app.post('/api/agent-tools/map-command', async (req, res) => {
                     mode,
                     predicate,
                     geometry: selection.geometry_json,
-                    state,
+                    expires_at: selection.expires_at || null,
+                    materialization,
+                    ...result,
                 },
             });
             return;
@@ -2231,7 +2998,7 @@ app.post('/api/agent-tools/map-command', async (req, res) => {
             ],
         });
     } catch (err: any) {
-        sendError(res, err);
+        sendSelectionPredicateErrorOrFallback(res, err);
     }
 });
 
@@ -2303,7 +3070,11 @@ app.post('/api/agents/sessions/:sessionId/messages', async (req, res) => {
         const requestContext = req.body?.context && typeof req.body.context === 'object' && !Array.isArray(req.body.context)
             ? req.body.context
             : null;
-        const result = await agentRuntimeService.startRun(req.params.sessionId, prompt, { requestContext });
+        const sourceCapabilityContext = await buildAgentSourceCapabilityPromptContext();
+        const result = await agentRuntimeService.startRun(req.params.sessionId, prompt, {
+            requestContext,
+            sourceCapabilityContext,
+        });
         res.json({ status: 'ok', data: result });
     } catch (err: any) {
         if (/not found|Prompt is required|Database is required|already has a running request|cannot resume sessions/i.test(err.message || '')) {
@@ -2435,11 +3206,12 @@ const API_KEY_DEFS: Record<string, { label: string; envVars: string[] }> = {
     satellites: { label: 'Space-Track.org', envVars: ['SPACETRACK_EMAIL', 'SPACETRACK_PASSWORD'] },
     webcams: { label: 'Windy API', envVars: ['WINDY_API_KEY'] },
     traffic: { label: 'TomTom', envVars: ['TOMTOM_API_KEY'] },
-    conflicts: { label: 'ACLED', envVars: ['ACLED_KEY', 'ACLED_EMAIL'] },
+    conflicts: { label: 'ACLED', envVars: ['ACLED_EMAIL', 'ACLED_PASSWORD', 'ACLED_KEY'] },
     airspace: { label: 'OpenAIP', envVars: ['OPENAIP_API_KEY'] },
     gfw: { label: 'Global Fishing Watch', envVars: ['GFW_TOKEN'] },
     outages: { label: 'Cloudflare Radar', envVars: ['CLOUDFLARE_API_TOKEN'] },
     wifi: { label: 'WiGLE', envVars: ['WIGLE_API_NAME', 'WIGLE_API_TOKEN'] },
+    imagery: { label: 'Copernicus Data Space', envVars: ['COPERNICUS_CLIENT_ID', 'COPERNICUS_CLIENT_SECRET'] },
 };
 
 app.get('/api/keys', (_req, res) => {
@@ -2556,15 +3328,19 @@ const CALLSIGN_RE = /^[A-Z0-9]{1,8}$/i;
 const INT_RE = /^-?\d+$/;
 
 /**
- * Parse a 4-number bbox string in one of two orderings: south,west,north,east
- * (OSM/Overpass convention) or west,south,east,north (Tile/OpenInfraMap
- * convention). `order` picks which ordering to enforce. Returns null for:
+ * Parse a 4-number bbox string into the internal/provider tuple shape:
+ * south,west,north,east. Public OpenSpy endpoints should not rely on this
+ * helper's default. They should call parsePublicBbox, which defaults to the
+ * OpenSpy public contract west,south,east,north and only accepts legacy
+ * south,west,north,east when the caller names that order explicitly.
+ *
+ * Returns null for:
  *   - wrong number of components or non-finite values
  *   - latitudes outside [-90,90] or longitudes outside [-180,180]
  *   - inverted boxes (south >= north or west >= east)
  */
 type BboxOrder = 'swne' | 'wsen';
-function parseBbox(bbox: string | undefined, order: BboxOrder = 'swne'): [number, number, number, number] | null {
+function parseBbox(bbox: string | undefined, order: BboxOrder = 'swne'): ProviderBboxSwne | null {
     if (!bbox) return null;
     const parts = bbox.split(',').map(Number);
     if (parts.length !== 4 || parts.some(n => !Number.isFinite(n))) return null;
@@ -2588,16 +3364,68 @@ function parseBbox(bbox: string | undefined, order: BboxOrder = 'swne'): [number
     // layer already handles this by skipping antimeridian viewports.
     if (south >= north || west >= east) return null;
 
-    // Return the numbers back in the input order so callers can destructure
-    // as they already do. This keeps existing `[south, west, north, east]`
-    // and `[w, s, e, n]` destructures at call sites working.
-    return parts as [number, number, number, number];
+    return [south, west, north, east];
+}
+
+function parseBboxOrder(value: unknown): BboxOrder | null {
+    const normalized = String(value || '').trim().toLowerCase().replace(/\s+/g, '');
+    if (!normalized) return null;
+    if (normalized === 'wsen' || normalized === 'west,south,east,north') return 'wsen';
+    if (normalized === 'swne' || normalized === 'south,west,north,east') return 'swne';
+    return null;
+}
+
+function parsePublicBbox(bbox: string | undefined, orderValue?: unknown): ProviderBboxSwne | null {
+    const rawOrder = String(orderValue || '').trim();
+    const parsedOrder = parseBboxOrder(orderValue);
+    if (rawOrder && !parsedOrder) return null;
+    return parseBbox(bbox, parsedOrder || 'wsen');
+}
+
+function parseBboxWsen(bbox: string | undefined, order: BboxOrder = 'wsen'): OpenSpyBbox | null {
+    const parsed = parseBbox(bbox, order);
+    if (!parsed) return null;
+    const [south, west, north, east] = parsed;
+    return [west, south, east, north];
 }
 
 function normalizeLayerId(layerId: string | undefined): string | undefined {
     if (!layerId) return layerId;
-    if (layerId === 'satellites') return 'satellite';
-    return layerId;
+    const key = layerId.trim().toLowerCase().replace(/\s+/g, '_');
+    const aliases: Record<string, string> = {
+        aviation: 'aircraft',
+        aircraft: 'aircraft',
+        plane: 'aircraft',
+        planes: 'aircraft',
+        maritime: 'vessel',
+        vessels: 'vessel',
+        vessel: 'vessel',
+        ships: 'vessel',
+        ais: 'vessel',
+        satellites: 'satellite',
+        satellite: 'satellite',
+        dark_vessels: 'dark-vessel',
+        'dark-vessels': 'dark-vessel',
+        dark_vessel: 'dark-vessel',
+        'dark-vessel': 'dark-vessel',
+        fires: 'fire',
+        fire: 'fire',
+        outages: 'outage',
+        outage: 'outage',
+        conflicts: 'conflict',
+        conflict: 'conflict',
+        disasters: 'disasters',
+        disaster: 'disasters',
+        pipelines: 'pipeline',
+        pipeline: 'pipeline',
+        cables: 'cable',
+        cable: 'cable',
+        webcams: 'webcam',
+        webcam: 'webcam',
+        borders: 'border',
+        border: 'border',
+    };
+    return aliases[key] || layerId;
 }
 
 function parseLayerScopeList(value: string | undefined): string[] {
@@ -2636,6 +3464,13 @@ function parsePositiveLimit(value: string | undefined, fallback = 200): number {
     return Math.max(1, Math.trunc(parsed));
 }
 
+function parseNonNegativeOffset(value: string | undefined): number {
+    if (!value) return 0;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < 0) return 0;
+    return Math.max(0, Math.trunc(parsed));
+}
+
 function parseOptionalPositiveLimit(value: string | undefined): number | undefined {
     if (!value || value === 'all') return undefined;
     const parsed = Number(value);
@@ -2654,6 +3489,74 @@ function parseIsoDateOrNull(value: string | undefined): string | null {
     if (!value) return null;
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function queryItemTime(item: any): string | null {
+    return item?.position_observed_at
+        || item?.observed_at
+        || item?.valid_from
+        || item?.last_observed_at
+        || item?.first_observed_at
+        || item?.updated_at
+        || item?.created_at
+        || null;
+}
+
+function buildQuerySearchResponse(
+    kind: 'entities' | 'events' | 'assets',
+    filters: Record<string, any>,
+    rawItems: any[],
+    requestedLimit: number,
+    offset: number,
+) {
+    const hasMore = rawItems.length > requestedLimit;
+    const items = hasMore ? rawItems.slice(0, requestedLimit) : rawItems;
+    const times = items
+        .map(queryItemTime)
+        .filter((value): value is string => Boolean(value))
+        .map((value) => new Date(value).getTime())
+        .filter(Number.isFinite);
+    const sourceIds = Array.from(new Set(items.map((item) => item.source_id).filter(Boolean))).sort();
+    const layerIds = Array.from(new Set(items.map((item) => item.layer_id).filter(Boolean))).sort();
+    const status = items.length === 0 ? 'empty' : hasMore ? 'partial' : 'ok';
+    const warnings = items.length === 0
+        ? ['No rows matched these filters in local OpenSpy storage. Check coverage or source capability before interpreting this as absence in the real world.']
+        : hasMore
+            ? ['More rows are available. Use pagination.next_offset to continue.']
+            : [];
+    return {
+        status,
+        mode: 'latest',
+        kind,
+        filters: {
+            ...filters,
+            limit: requestedLimit,
+            offset,
+        },
+        query_status: {
+            status,
+            complete: !hasMore,
+            reason: items.length === 0 ? 'empty_result' : hasMore ? 'limit_exceeded' : 'within_limit',
+        },
+        pagination: {
+            limit: requestedLimit,
+            offset,
+            returned: items.length,
+            has_more: hasMore,
+            next_offset: hasMore ? offset + items.length : null,
+        },
+        coverage: {
+            returned_count: items.length,
+            source_ids: sourceIds,
+            layer_ids: layerIds,
+            min_time: times.length > 0 ? new Date(Math.min(...times)).toISOString() : null,
+            max_time: times.length > 0 ? new Date(Math.max(...times)).toISOString() : null,
+            basis: 'returned_rows',
+        },
+        count: items.length,
+        items,
+        warnings,
+    };
 }
 
 const server = http.createServer(app);
@@ -2708,6 +3611,7 @@ const gdeltService = new GDELTService(sourcePersistenceService);
 const airspaceService = new AirspaceService(sourcePersistenceService);
 const gfwService = new GFWService(sourcePersistenceService);
 const cloudflareService = new CloudflareService(sourcePersistenceService);
+const copernicusService = new CopernicusService();
 const wigleService = new WigleService(databaseService);
 
 // AI Vision — image generation via OpenRouter Gemini Flash Image
@@ -2782,9 +3686,9 @@ app.get('/api/replay/events', async (req, res) => {
         return;
     }
 
-    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    const bbox = parsePublicBbox(req.query.bbox as string | undefined, req.query.bbox_order || req.query.bboxOrder);
     if (req.query.bbox && !bbox) {
-        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        res.status(400).json({ error: 'Invalid bbox (expected west,south,east,north)' });
         return;
     }
 
@@ -2899,9 +3803,9 @@ app.post('/api/replay/render-chunks/prewarm', async (req, res) => {
     const bboxRaw = Array.isArray(body.bbox)
         ? body.bbox.join(',')
         : (typeof body.bbox === 'string' ? body.bbox : undefined);
-    const bbox = parseBbox(bboxRaw, 'swne');
+    const bbox = parsePublicBbox(bboxRaw, body.bbox_order || body.bboxOrder);
     if (body.bbox && !bbox) {
-        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        res.status(400).json({ error: 'Invalid bbox (expected west,south,east,north)' });
         return;
     }
 
@@ -2975,9 +3879,9 @@ app.get('/api/replay/render-chunks', async (req, res) => {
     const from = parseIsoDateOrNull(req.query.from as string | undefined) || at;
     const to = parseIsoDateOrNull(req.query.to as string | undefined) || at;
 
-    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    const bbox = parsePublicBbox(req.query.bbox as string | undefined, req.query.bbox_order || req.query.bboxOrder);
     if (req.query.bbox && !bbox) {
-        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        res.status(400).json({ error: 'Invalid bbox (expected west,south,east,north)' });
         return;
     }
 
@@ -3131,9 +4035,9 @@ app.get('/api/replay/render-point-deltas', async (req, res) => {
         res.status(400).json({ error: 'Invalid since timestamp' });
         return;
     }
-    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    const bbox = parsePublicBbox(req.query.bbox as string | undefined, req.query.bbox_order || req.query.bboxOrder);
     if (req.query.bbox && !bbox) {
-        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        res.status(400).json({ error: 'Invalid bbox (expected west,south,east,north)' });
         return;
     }
     const layers = parseLayerScopeList(req.query.layers as string | undefined);
@@ -3256,9 +4160,9 @@ app.get('/api/replay/manifest', async (req, res) => {
         return;
     }
 
-    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    const bbox = parsePublicBbox(req.query.bbox as string | undefined, req.query.bbox_order || req.query.bboxOrder);
     if (req.query.bbox && !bbox) {
-        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        res.status(400).json({ error: 'Invalid bbox (expected west,south,east,north)' });
         return;
     }
 
@@ -3472,9 +4376,9 @@ app.get('/api/replay/satellite-tle', async (req, res) => {
         return;
     }
 
-    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    const bbox = parsePublicBbox(req.query.bbox as string | undefined, req.query.bbox_order || req.query.bboxOrder);
     if (req.query.bbox && !bbox) {
-        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        res.status(400).json({ error: 'Invalid bbox (expected west,south,east,north)' });
         return;
     }
 
@@ -3531,9 +4435,9 @@ app.get('/api/replay/state', async (req, res) => {
         return;
     }
 
-    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    const bbox = parsePublicBbox(req.query.bbox as string | undefined, req.query.bbox_order || req.query.bboxOrder);
     if (req.query.bbox && !bbox) {
-        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        res.status(400).json({ error: 'Invalid bbox (expected west,south,east,north)' });
         return;
     }
 
@@ -3867,9 +4771,9 @@ app.get('/api/query/events/latest', async (req, res) => {
         return;
     }
 
-    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    const bbox = parsePublicBbox(req.query.bbox as string | undefined, req.query.bbox_order || req.query.bboxOrder);
     if (req.query.bbox && !bbox) {
-        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        res.status(400).json({ error: 'Invalid bbox (expected west,south,east,north)' });
         return;
     }
 
@@ -3881,6 +4785,8 @@ app.get('/api/query/events/latest', async (req, res) => {
     }
 
     try {
+        const limit = parsePositiveLimit(req.query.limit as string | undefined, 200);
+        const offset = parseNonNegativeOffset(req.query.offset as string | undefined);
         const filters = {
             layerId: normalizeLayerId((req.query.layerId as string | undefined) || (req.query.layer as string | undefined)),
             sourceId: req.query.sourceId as string | undefined,
@@ -3890,15 +4796,11 @@ app.get('/api/query/events/latest', async (req, res) => {
             from: from || undefined,
             to: to || undefined,
             bbox: bbox || undefined,
-            limit: parsePositiveLimit(req.query.limit as string | undefined, 200),
+            limit: limit + 1,
+            offset,
         };
         const items = await eventQueryService.listLatest(filters);
-        res.json({
-            mode: 'latest',
-            filters,
-            count: items.length,
-            items,
-        });
+        res.json(buildQuerySearchResponse('events', filters, items, limit, offset));
     } catch (err: any) {
         sendError(res, err);
     }
@@ -3910,9 +4812,9 @@ app.get('/api/query/entities/latest', async (req, res) => {
         return;
     }
 
-    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    const bbox = parsePublicBbox(req.query.bbox as string | undefined, req.query.bbox_order || req.query.bboxOrder);
     if (req.query.bbox && !bbox) {
-        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        res.status(400).json({ error: 'Invalid bbox (expected west,south,east,north)' });
         return;
     }
 
@@ -3924,6 +4826,8 @@ app.get('/api/query/entities/latest', async (req, res) => {
     }
 
     try {
+        const limit = parsePositiveLimit(req.query.limit as string | undefined, 200);
+        const offset = parseNonNegativeOffset(req.query.offset as string | undefined);
         const filters = {
             layerId: normalizeLayerId((req.query.layerId as string | undefined) || (req.query.layer as string | undefined)),
             sourceId: req.query.sourceId as string | undefined,
@@ -3933,15 +4837,11 @@ app.get('/api/query/entities/latest', async (req, res) => {
             from: from || undefined,
             to: to || undefined,
             bbox: bbox || undefined,
-            limit: parsePositiveLimit(req.query.limit as string | undefined, 200),
+            limit: limit + 1,
+            offset,
         };
         const items = await entityQueryService.listLatest(filters);
-        res.json({
-            mode: 'latest',
-            filters,
-            count: items.length,
-            items,
-        });
+        res.json(buildQuerySearchResponse('entities', filters, items, limit, offset));
     } catch (err: any) {
         sendError(res, err);
     }
@@ -3953,9 +4853,9 @@ app.get('/api/query/entities/live-status', async (req, res) => {
         return;
     }
 
-    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    const bbox = parsePublicBbox(req.query.bbox as string | undefined, req.query.bbox_order || req.query.bboxOrder);
     if (req.query.bbox && !bbox) {
-        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        res.status(400).json({ error: 'Invalid bbox (expected west,south,east,north)' });
         return;
     }
 
@@ -4025,9 +4925,9 @@ app.get('/api/query/assets/latest', async (req, res) => {
         return;
     }
 
-    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    const bbox = parsePublicBbox(req.query.bbox as string | undefined, req.query.bbox_order || req.query.bboxOrder);
     if (req.query.bbox && !bbox) {
-        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        res.status(400).json({ error: 'Invalid bbox (expected west,south,east,north)' });
         return;
     }
 
@@ -4039,6 +4939,8 @@ app.get('/api/query/assets/latest', async (req, res) => {
     }
 
     try {
+        const limit = parsePositiveLimit(req.query.limit as string | undefined, 200);
+        const offset = parseNonNegativeOffset(req.query.offset as string | undefined);
         const filters = {
             layerId: normalizeLayerId((req.query.layerId as string | undefined) || (req.query.layer as string | undefined)),
             sourceId: req.query.sourceId as string | undefined,
@@ -4048,15 +4950,11 @@ app.get('/api/query/assets/latest', async (req, res) => {
             from: from || undefined,
             to: to || undefined,
             bbox: bbox || undefined,
-            limit: parsePositiveLimit(req.query.limit as string | undefined, 200),
+            limit: limit + 1,
+            offset,
         };
         const items = await assetQueryService.listLatest(filters);
-        res.json({
-            mode: 'latest',
-            filters,
-            count: items.length,
-            items,
-        });
+        res.json(buildQuerySearchResponse('assets', filters, items, limit, offset));
     } catch (err: any) {
         sendError(res, err);
     }
@@ -4068,9 +4966,9 @@ app.get('/api/replay/assets', async (req, res) => {
         return;
     }
 
-    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    const bbox = parsePublicBbox(req.query.bbox as string | undefined, req.query.bbox_order || req.query.bboxOrder);
     if (req.query.bbox && !bbox) {
-        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        res.status(400).json({ error: 'Invalid bbox (expected west,south,east,north)' });
         return;
     }
 
@@ -4144,9 +5042,9 @@ app.get('/api/fires', async (req, res) => {
         res.status(503).json({ error: 'Query database is not ready' });
         return;
     }
-    const bbox = parseBbox(req.query.bbox as string | undefined, 'swne');
+    const bbox = parsePublicBbox(req.query.bbox as string | undefined, req.query.bbox_order || req.query.bboxOrder);
     if (req.query.bbox && !bbox) {
-        res.status(400).json({ error: 'Invalid bbox (expected south,west,north,east)' });
+        res.status(400).json({ error: 'Invalid bbox (expected west,south,east,north)' });
         return;
     }
     const gridDegrees = parseOptionalPositiveGridDegrees(req.query.gridDegrees as string | undefined);
@@ -4208,8 +5106,8 @@ function overpassViewportBudgetMs(primaryRecords: readonly unknown[]): number {
 }
 
 function bboxArea(a: number, b: number, c: number, d: number): number {
-    // parseBbox accepts either south,west,north,east or west,south,east,north.
-    // Either way, |latA-latC| × |lonB-lonD| gives the right magnitude.
+    // Called with normalized south,west,north,east values after the public
+    // west,south,east,north contract has been parsed at the endpoint boundary.
     return Math.abs(a - c) * Math.abs(b - d);
 }
 
@@ -4221,9 +5119,9 @@ function bboxArea(a: number, b: number, c: number, d: number): number {
 // response still carries `overpassTimedOut` so incomplete enrichment is visible
 // to diagnostics instead of being silently masked.
 app.get('/api/infrastructure', async (req, res) => {
-    const parsed = parseBbox(req.query.bbox as string | undefined, 'swne');
+    const parsed = parsePublicBbox(req.query.bbox as string | undefined, req.query.bbox_order || req.query.bboxOrder);
     if (!parsed) {
-        res.status(400).json({ error: 'Missing or invalid bbox (expected south,west,north,east; lat +/-90, lng +/-180; south<north; west<east)' });
+        res.status(400).json({ error: 'Missing or invalid bbox (expected west,south,east,north; lat +/-90, lng +/-180; south<north; west<east)' });
         return;
     }
     const [south, west, north, east] = parsed;
@@ -4284,7 +5182,7 @@ app.get('/api/infrastructure', async (req, res) => {
 // frontend can hand off its own viewport ordering directly.
 app.get('/api/power-infra', async (req, res) => {
     const bbox = req.query.bbox as string | undefined;
-    const parsed = parseBbox(bbox, 'wsen');
+    const parsed = parseBboxWsen(bbox);
     if (!parsed || !bbox) {
         res.status(400).json({ error: 'Missing or invalid bbox (expected west,south,east,north; lat ±90, lng ±180; south<north; west<east)' });
         return;
@@ -4363,9 +5261,9 @@ app.get('/api/power-infra', async (req, res) => {
 // payload includes only render-critical fields; descriptive metadata remains
 // behind /api/live/details/pipeline/:id.
 app.get('/api/pipelines', async (req, res) => {
-    const parsed = parseBbox(req.query.bbox as string | undefined, 'swne');
+    const parsed = parsePublicBbox(req.query.bbox as string | undefined, req.query.bbox_order || req.query.bboxOrder);
     if (!parsed) {
-        res.status(400).json({ error: 'Missing or invalid bbox (expected south,west,north,east; lat +/-90, lng +/-180; south<north; west<east)' });
+        res.status(400).json({ error: 'Missing or invalid bbox (expected west,south,east,north; lat +/-90, lng +/-180; south<north; west<east)' });
         return;
     }
     const [south, west, north, east] = parsed;
@@ -4418,9 +5316,9 @@ app.get('/api/pipelines', async (req, res) => {
 // is render-only; SSID/channel/encryption detail is loaded through
 // /api/live/details/wifi/:id after the user selects an observation.
 app.get('/api/wifi', async (req, res) => {
-    const parsed = parseBbox(req.query.bbox as string | undefined, 'swne');
+    const parsed = parsePublicBbox(req.query.bbox as string | undefined, req.query.bbox_order || req.query.bboxOrder);
     if (!parsed) {
-        res.status(400).json({ error: 'Missing or invalid bbox (expected south,west,north,east; lat +/-90, lng +/-180; south<north; west<east)' });
+        res.status(400).json({ error: 'Missing or invalid bbox (expected west,south,east,north; lat +/-90, lng +/-180; south<north; west<east)' });
         return;
     }
     const [south, west, north, east] = parsed;
@@ -4646,7 +5544,7 @@ app.get('/api/cloudflare-outages', async (_req, res) => {
 
 // HERE Traffic Flow v7
 app.get('/api/here-traffic', async (req, res) => {
-    const parsed = parseBbox(req.query.bbox as string | undefined, 'wsen');
+    const parsed = parseBboxWsen(req.query.bbox as string | undefined);
     if (!parsed) {
         res.status(400).json({ error: 'Missing or invalid bbox (expected west,south,east,north; lat ±90, lng ±180; south<north; west<east)' });
         return;
@@ -4694,8 +5592,26 @@ app.get('/api/windy-webcams', async (req, res) => {
 // based on actual upstream success.
 app.get('/api/status', async (_req, res) => {
     const envCheck = (key: string) => !!(process.env[key] && process.env[key]!.length > 0);
-const adsbHealth = liveStreamService.getHealth();
+    const adsbHealth = liveStreamService.getHealth();
     const extendedHealth = extendedService.getHealth();
+    const acledH = acledService.getHealth();
+    const gdeltH = gdeltService.getHealth();
+    const gdeltPersistedCount = gdeltH.status === 'streaming'
+        ? 0
+        : await countCurrentCanonicalEvents('conflict', 'gdelt');
+    const gdeltPersistedFreshnessMs = 45 * 60 * 1000;
+    const gdeltHasFreshFetch = typeof gdeltH.lastSuccessfulFetchAgeMs === 'number'
+        && gdeltH.lastSuccessfulFetchAgeMs <= gdeltPersistedFreshnessMs;
+    const effectiveGdeltH = gdeltH.status === 'streaming' || gdeltPersistedCount <= 0 || !gdeltHasFreshFetch
+        ? gdeltH
+        : {
+            ...gdeltH,
+            status: 'streaming' as const,
+            count: Math.max(Number(gdeltH.count || 0), gdeltPersistedCount),
+            note: `serving ${gdeltPersistedCount} persisted current events from a recent successful GDELT fetch; latest live fetch ${gdeltH.status}${gdeltH.note ? `: ${gdeltH.note}` : ''}`,
+            upstreamStatus: gdeltH.status,
+            upstreamNote: gdeltH.note,
+        };
 
     // Outages are an aggregate of two independent upstreams (Cloudflare Radar +
     // IODA). Report the best-of-two status and surface per-source detail in
@@ -4763,6 +5679,24 @@ const adsbHealth = liveStreamService.getHealth();
         }
     }
 
+    const conflictCount = Number(acledH.count || 0) + Number(effectiveGdeltH.count || 0);
+    const conflictsStatus = effectiveGdeltH.status === 'streaming' || acledH.status === 'streaming'
+        ? 'streaming'
+        : acledH.status === 'auth-missing'
+            ? 'auth-missing'
+            : 'error';
+    const conflictsNote = [
+        effectiveGdeltH.status === 'streaming' ? `GDELT streaming${effectiveGdeltH.note ? ` (${effectiveGdeltH.note})` : ''}` : effectiveGdeltH.note ? `GDELT ${effectiveGdeltH.status}: ${effectiveGdeltH.note}` : `GDELT ${effectiveGdeltH.status}`,
+        acledH.status === 'streaming' ? 'ACLED streaming' : acledH.note ? `ACLED ${acledH.status}: ${acledH.note}` : `ACLED ${acledH.status}`,
+    ].join('; ');
+    const conflictsHealth = {
+        status: conflictsStatus,
+        note: conflictsNote,
+        count: conflictCount,
+        completeness: acledH.status === 'streaming' && effectiveGdeltH.status === 'streaming' ? 'complete' : 'incomplete',
+        providers: { acled: acledH, gdelt: effectiveGdeltH },
+    };
+
     const statusPayload = {
         database: databaseService.getHealth(),
         satellites: satelliteService.getHealth(),
@@ -4772,8 +5706,9 @@ const adsbHealth = liveStreamService.getHealth();
         fires: extendedHealth.fires,
         jamming: gpsJamService.getHealth(),
         airspace: airspaceService.getHealth(),
-        conflicts: acledService.getHealth(),
-        gdelt: gdeltService.getHealth(),
+        acled: acledH,
+        conflicts: conflictsHealth,
+        gdelt: effectiveGdeltH,
         gfw: gfwService.getHealth(),
         outages: {
             status: outagesStatus,

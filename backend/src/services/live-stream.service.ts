@@ -13,13 +13,36 @@ import { LiveProjectionService, type LiveAircraftRecord, type LiveVesselRecord }
 // in for a previously-seen MMSI we already know its class.
 const VESSEL_TYPES_CACHE_FILE = path.join(__dirname, '../../vessel_types_cache.json');
 const VESSEL_TYPES_CACHE_MAX = 50_000;
-// Debounce disk writes — we don't need to fsync every static-data message.
-const VESSEL_TYPES_FLUSH_INTERVAL_MS = 60_000;
+// This is a warm-start cache, not the canonical AIS history store. Global AIS
+// static messages can keep discovering/changing vessels forever, so writing
+// the whole 50k-entry cache every minute is unnecessary CPU/IO churn.
+const DEFAULT_VESSEL_TYPES_FLUSH_INTERVAL_MS = 15 * 60_000;
 const DEFAULT_AIS_VESSEL_THROTTLE_MS = 60_000;
 
 function positiveIntFromEnv(name: string, fallback: number): number {
     const value = Number(process.env[name]);
     return Number.isFinite(value) && value > 0 ? Math.trunc(value) : fallback;
+}
+
+function vesselPersistentStaticData(value: VesselStaticData): VesselStaticData {
+    return {
+        cls: value.cls,
+        name: value.name,
+        callSign: value.callSign,
+        imo: value.imo,
+        length: value.length,
+        beam: value.beam,
+    };
+}
+
+function vesselPersistentStaticDataEqual(a: VesselStaticData | undefined, b: VesselStaticData): boolean {
+    return Boolean(a)
+        && a!.cls === b.cls
+        && a!.name === b.name
+        && a!.callSign === b.callSign
+        && a!.imo === b.imo
+        && a!.length === b.length
+        && a!.beam === b.beam;
 }
 
 // Common military / state-aircraft callsign prefixes (USAF, RAF, Russian VKS,
@@ -189,6 +212,7 @@ export class LiveStreamService {
     private vesselReportCount = new Map<string, number>();    // MMSI → # position reports received
     private darkVessels = new Map<string, DarkVessel>();
     private readonly aisVesselThrottleMs = positiveIntFromEnv('AIS_VESSEL_THROTTLE_MS', DEFAULT_AIS_VESSEL_THROTTLE_MS);
+    private readonly vesselTypesFlushIntervalMs = positiveIntFromEnv('VESSEL_TYPES_FLUSH_INTERVAL_MS', DEFAULT_VESSEL_TYPES_FLUSH_INTERVAL_MS);
     
     constructor(
         io: Server,
@@ -224,7 +248,7 @@ export class LiveStreamService {
         });
 
         // Periodic disk flush of the vessel-type cache (only when dirty).
-        setInterval(() => this.flushVesselTypesCache(), VESSEL_TYPES_FLUSH_INTERVAL_MS);
+        setInterval(() => this.flushVesselTypesCache(), this.vesselTypesFlushIntervalMs);
 
         // Dark vessel detection: every 30s, scan vesselLastSeen for vessels
         // that haven't reported in >1h despite having had >3 position reports.
@@ -256,16 +280,6 @@ export class LiveStreamService {
             this.aircraftsDirty = false;
         }
 
-        // Не awaitим flushPendingVesselPositions: он под нагрузкой AISStream
-        // может зависнуть в DB-insert и тогда broadcastInFlight навсегда
-        // остаётся true — клиенты перестают получать live-update. Persistence
-        // сам себя планирует (scheduleVesselFlush), broadcast от ETL не
-        // зависит.
-        if (this.persistence) {
-            void this.persistence.flushPendingVesselPositions().catch((err) => {
-                console.warn('[LiveSocket] vessel flush failed:', err?.message || err);
-            });
-        }
         if (
             force ||
             this.vesselsDirty ||
@@ -383,14 +397,19 @@ export class LiveStreamService {
             if (fs.existsSync(VESSEL_TYPES_CACHE_FILE)) {
                 const raw = fs.readFileSync(VESSEL_TYPES_CACHE_FILE, 'utf-8');
                 const parsed = JSON.parse(raw) as Record<string, string | VesselStaticData>;
+                let needsMigrationFlush = false;
                 for (const [mmsi, val] of Object.entries(parsed)) {
                     // Backward compat: old cache stored plain class string
                     if (typeof val === 'string') {
                         this.vesselTypes.set(mmsi, { cls: val });
                     } else {
-                        this.vesselTypes.set(mmsi, val);
+                        this.vesselTypes.set(mmsi, vesselPersistentStaticData(val));
+                        if (val.destination !== undefined || val.eta !== undefined || val.draught !== undefined) {
+                            needsMigrationFlush = true;
+                        }
                     }
                 }
+                if (needsMigrationFlush) this.vesselTypesDirty = true;
                 console.log(`[VesselCache] Loaded ${this.vesselTypes.size} cached vessel classes from disk.`);
             }
         } catch (err: any) {
@@ -411,7 +430,7 @@ export class LiveStreamService {
                 }
             }
             const obj: Record<string, VesselStaticData> = {};
-            this.vesselTypes.forEach((v, k) => { obj[k] = v; });
+            this.vesselTypes.forEach((v, k) => { obj[k] = vesselPersistentStaticData(v); });
             fs.writeFileSync(VESSEL_TYPES_CACHE_FILE, JSON.stringify(obj));
             this.vesselTypesDirty = false;
             console.log(`[VesselCache] Flushed ${this.vesselTypes.size} entries to disk.`);
@@ -690,8 +709,11 @@ export class LiveStreamService {
                              length: (dim.A && dim.B) ? dim.A + dim.B : undefined,
                              beam: (dim.C && dim.D) ? dim.C + dim.D : undefined,
                          };
+                         const previousStaticData = this.vesselTypes.get(id);
+                         if (!vesselPersistentStaticDataEqual(previousStaticData, staticData)) {
+                             this.vesselTypesDirty = true;
+                         }
                          this.vesselTypes.set(id, staticData);
-                         this.vesselTypesDirty = true;
                          // Update live vessel with new static data
                          const existing = this.vessels.get(id);
                          if (existing) {

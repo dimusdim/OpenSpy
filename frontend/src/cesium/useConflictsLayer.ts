@@ -8,6 +8,19 @@ import { getConflictIcon } from '../icons/map-icons';
 import { safeCartesianFromDegrees } from './position-utils';
 import { getLayerSourceVisibilityKey, normalizeLayerSourceId } from '../lib/source-visibility';
 
+export interface ConflictMeta {
+    id: string;
+    lat: number;
+    lng: number;
+    subtype: string;
+    source: string;
+    eventType: string;
+    subEventType?: string;
+    fatalities?: number;
+}
+
+export const conflictMetaMap = new Map<string, ConflictMeta>();
+
 function getSubtypeKey(eventType: string): string {
     if (eventType.includes('Explosions') || eventType.includes('Remote violence')) return 'explosions';
     if (eventType === 'Battles' || eventType === 'Fight') return 'battles';
@@ -26,21 +39,27 @@ export function useConflictsLayer(viewer: Cesium.Viewer | null) {
     const mode = useTimelineStore(s => s.mode);
     const subtypeVisibility = useTimelineStore(s => s.subtypeVisibility);
     const secondaryReleased = useSecondaryLoadGate();
-    const dsRef = useRef<Cesium.CustomDataSource | null>(null);
+    const collectionRef = useRef<Cesium.BillboardCollection | null>(null);
 
     // ---- Effect 1: scene lifetime ----
-    // CustomDataSource lives for the viewer's lifetime. Source toggles
-    // only gate the fetch loop below; existing entities stay on screen.
+    // BillboardCollection lives for the viewer's lifetime. Source toggles
+    // only gate the fetch loop below.
     useEffect(() => {
         if (!viewer) return;
-        const ds = new Cesium.CustomDataSource('conflicts');
-        viewer.dataSources.add(ds);
-        dsRef.current = ds;
+        const billboards = new Cesium.BillboardCollection({
+            scene: viewer.scene,
+            blendOption: Cesium.BlendOption.TRANSLUCENT,
+        });
+        viewer.scene.primitives.add(billboards);
+        collectionRef.current = billboards;
         return () => {
-            if (viewer && !viewer.isDestroyed()) {
-                viewer.dataSources.remove(ds);
+            if (collectionRef.current === billboards) {
+                conflictMetaMap.clear();
+                collectionRef.current = null;
             }
-            dsRef.current = null;
+            if (viewer && !viewer.isDestroyed()) {
+                viewer.scene.primitives.remove(billboards);
+            }
         };
     }, [viewer]);
 
@@ -50,8 +69,8 @@ export function useConflictsLayer(viewer: Cesium.Viewer | null) {
         let active = true;
 
         async function fetchConflicts() {
-            const ds = dsRef.current;
-            if (!ds) return;
+            const billboards = collectionRef.current;
+            if (!billboards) return;
             try {
                 // Fetch ACLED + GDELT in parallel, merge results
                 const [acledRes, gdeltRes] = await Promise.allSettled([
@@ -82,36 +101,32 @@ export function useConflictsLayer(viewer: Cesium.Viewer | null) {
                     status: events.length > 0 ? 'streaming' : 'connecting',
                 });
 
-                ds.entities.removeAll();
+                billboards.removeAll();
+                conflictMetaMap.clear();
 
                 for (const ev of events) {
                     if (ev.lat == null || ev.lng == null || isNaN(ev.lat) || isNaN(ev.lng)) continue;
                     const position = safeCartesianFromDegrees(ev.lng, ev.lat, 50);
                     if (!position) continue;
                     const subtypeKey = getSubtypeKey(ev.event_type);
+                    const id = String(ev.id);
 
-                    ds.entities.add({
-                        id: ev.id,
-                        name: ev.event_type || 'Conflict event',
+                    billboards.add({
+                        id,
                         position,
-                        properties: new Cesium.PropertyBag({
-                            layer: 'Conflict',
-                            subtype: subtypeKey,
-                            source: ev.source,
-                            event_type: ev.event_type,
-                            sub_event_type: ev.sub_event_type,
-                            fatalities: ev.fatalities,
-                        }),
-                        billboard: {
-                            image: getConflictIcon(ev.event_type),
-                            scale: ev.fatalities > 10 ? 1.4 : ev.fatalities > 0 ? 1.1 : 0.9,
-                        },
-                        // Per-event ellipse removed 2026-04-22 — 5000
-                        // conflict entities × 1 ellipse each dominated the
-                        // BillboardVisualizer / typed-array hot path. The
-                        // 15-30 km circle barely rendered at global zoom.
-                        // Bring it back via a dedicated PrimitiveCollection
-                        // +EllipseGeometry if close-zoom context needs it.
+                        image: getConflictIcon(ev.event_type),
+                        scale: ev.fatalities > 10 ? 1.4 : ev.fatalities > 0 ? 1.1 : 0.9,
+                        verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+                    });
+                    conflictMetaMap.set(id, {
+                        id,
+                        lat: ev.lat,
+                        lng: ev.lng,
+                        subtype: subtypeKey,
+                        source: ev.source,
+                        eventType: ev.event_type || 'Conflict event',
+                        subEventType: ev.sub_event_type,
+                        fatalities: ev.fatalities,
                     });
                 }
 
@@ -134,38 +149,41 @@ export function useConflictsLayer(viewer: Cesium.Viewer | null) {
         return () => {
             active = false;
             clearInterval(interval);
-            // Do NOT remove the datasource — Effect 1 owns its lifetime so
-            // already-loaded conflict events stay visible on source-off.
+            // Keep the collection — Effect 1 owns its lifetime.
         };
     }, [viewer, isSourceOn, secondaryReleased]);
 
     // ---- Effect 3: visibility toggle ----
     // Effective show = sources && visibility.
     useEffect(() => {
-        if (dsRef.current) dsRef.current.show = mode !== 'playback' && isSourceOn && isVisible;
+        if (collectionRef.current) collectionRef.current.show = mode !== 'playback' && isSourceOn && isVisible;
     }, [isSourceOn, isVisible, mode]);
 
     // ---- Effect 4: per-subtype visibility ----
     const sourceVisibility = useTimelineStore(s => s.sourceVisibility);
     const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
     useEffect(() => {
-        if (!dsRef.current) return;
+        const collection = collectionRef.current;
+        if (!collection) return;
         const sourceCounts: Record<string, number> = {};
-        dsRef.current.entities.values.forEach(e => {
-            const sub = (e.properties as any)?.subtype?.getValue?.() ?? 'violence';
-            const source = normalizeLayerSourceId('conflicts', (e.properties as any)?.source?.getValue?.());
+        for (let i = 0; i < collection.length; i++) {
+            const bb = collection.get(i);
+            const meta = conflictMetaMap.get(bb.id as string);
+            const sub = meta?.subtype ?? 'violence';
+            const source = normalizeLayerSourceId('conflicts', meta?.source);
             const subtypeOk = subtypeVisibility[`conflicts:${sub}`] !== false;
             if (source) sourceCounts[source] = (sourceCounts[source] || 0) + 1;
             const sourceOk = !source || sourceVisibility[getLayerSourceVisibilityKey('conflicts', source)] !== false;
-            e.show = subtypeOk && sourceOk && (!isolatedEntityId || isolatedEntityId === e.id);
-        });
+            bb.show = subtypeOk && sourceOk && (!isolatedEntityId || isolatedEntityId === bb.id);
+        }
         useTimelineStore.getState().setSourceCounts('conflicts', sourceCounts);
     }, [subtypeVisibility, sourceVisibility, isolatedEntityId]);
 
     // ---- Effect 5: source-off scene clear ----
     useEffect(() => {
         if (isSourceOn) return;
-        if (dsRef.current) dsRef.current.entities.removeAll();
+        collectionRef.current?.removeAll();
+        conflictMetaMap.clear();
         useTimelineStore.getState().setSubtypeCounts('conflicts' as any, {});
         useTimelineStore.getState().setSourceCounts('conflicts', {});
         useTimelineStore.getState().setStreamMetric('conflicts', {

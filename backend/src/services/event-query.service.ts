@@ -10,6 +10,7 @@ export type EventQueryFilters = {
     to?: string;
     bbox?: [number, number, number, number]; // south, west, north, east
     limit?: number;
+    offset?: number;
 };
 
 type EventSnapshotRow = {
@@ -93,7 +94,11 @@ export class EventQueryService {
         if (!this.database.isReady()) return [];
 
         const { clauses, params } = this.buildWhere(filters, 's');
-        params.push(clampLimit(filters.limit));
+        const limit = clampLimit(filters.limit);
+        const offset = Math.max(0, Math.trunc(Number(filters.offset || 0)));
+        params.push(limit, offset);
+        const limitParam = params.length - 1;
+        const offsetParam = params.length;
         const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
         const result = await this.database.query<EventSnapshotRow>(
@@ -117,7 +122,7 @@ export class EventQueryService {
                 FROM core.event_snapshots s
                 ${whereSql}
                 ORDER BY COALESCE(s.observed_at, s.valid_from, s.created_at) DESC NULLS LAST, s.created_at DESC
-                LIMIT $${params.length}
+                LIMIT $${limitParam} OFFSET $${offsetParam}
             `,
             params,
         );
@@ -129,7 +134,11 @@ export class EventQueryService {
         if (!this.database.isReady()) return [];
 
         const { clauses, params } = this.buildWhere(filters, 'e');
-        params.push(clampLimit(filters.limit));
+        const limit = clampLimit(filters.limit);
+        const offset = Math.max(0, Math.trunc(Number(filters.offset || 0)));
+        params.push(limit, offset);
+        const limitParam = params.length - 1;
+        const offsetParam = params.length;
         const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
         const result = await this.database.query<LatestEventRow>(
@@ -154,7 +163,7 @@ export class EventQueryService {
                 FROM core.events e
                 ${whereSql}
                 ORDER BY COALESCE(e.observed_at, e.valid_from, e.updated_at) DESC NULLS LAST, e.updated_at DESC
-                LIMIT $${params.length}
+                LIMIT $${limitParam} OFFSET $${offsetParam}
             `,
             params,
         );

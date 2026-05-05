@@ -30,6 +30,7 @@ export class CloudflareService {
     private lastError: string | null = null;
     private lastSourceWindow: Record<string, unknown> | null = null;
     private lastPagination: Record<string, unknown> | null = null;
+    private lastProviderFetchAt = 0;
 
     constructor(private readonly persistence?: SourcePersistenceService) {}
 
@@ -79,6 +80,15 @@ export class CloudflareService {
         return null;
     }
 
+    private async waitSourceFetchGate(): Promise<void> {
+        const minIntervalMs = this.positiveIntFromEnv(['CLOUDFLARE_MIN_REQUEST_INTERVAL_MS'], 60_000);
+        const elapsed = Date.now() - this.lastProviderFetchAt;
+        if (elapsed < minIntervalMs) {
+            await new Promise((resolve) => setTimeout(resolve, minIntervalMs - elapsed));
+        }
+        this.lastProviderFetchAt = Date.now();
+    }
+
     async fetchOutagesWindow(input: { dateStart?: string; dateEnd?: string; persist?: boolean } = {}): Promise<{
         records: CloudflareOutage[];
         rawCount: number;
@@ -89,8 +99,12 @@ export class CloudflareService {
         if (!token) throw new Error('CLOUDFLARE_API_TOKEN is required for Cloudflare source fetch');
 
         const dateStart = input.dateStart || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-        const dateEnd = input.dateEnd;
+        let dateEnd = input.dateEnd || new Date().toISOString();
+        if (new Date(dateEnd).getTime() <= new Date(dateStart).getTime()) {
+            dateEnd = new Date(new Date(dateStart).getTime() + 60_000).toISOString();
+        }
         try {
+            await this.waitSourceFetchGate();
             const effectivePageSize = this.positiveIntFromEnv(
                 ['CLOUDFLARE_OUTAGE_PAGE_SIZE', 'CLOUDFLARE_OUTAGE_LIMIT'],
                 100,

@@ -77,6 +77,14 @@ export interface OverturePipelineDetails {
 
 export type OverturePipelineSubstance = 'oil' | 'gas' | 'water' | 'other';
 
+type OvertureQueryTask = {
+    priority: number;
+    seq: number;
+    run: () => Promise<unknown>;
+    resolve: (value: unknown) => void;
+    reject: (reason?: unknown) => void;
+};
+
 // ---------------------------------------------------------------------------
 // Configuration — what to extract from Overture
 // ---------------------------------------------------------------------------
@@ -272,10 +280,13 @@ export interface OvertureStatus {
 export class OvertureService {
     private db: any = null;
     private ready = false;
-    // Mutex queue: DuckDB Node.js binding deadlocks when multiple
-    // db.all() calls run concurrently on the same Database handle.
-    // This queue serializes all queries so only one runs at a time.
-    private _queryQueue: Promise<any> = Promise.resolve();
+    // DuckDB Node.js binding can deadlock when multiple db.all() calls overlap
+    // on the same Database handle. Keep one active query, but use priorities so
+    // small render-critical viewport requests are not starved behind slower
+    // infrastructure enrichment scans.
+    private _queryQueue: OvertureQueryTask[] = [];
+    private _queryRunning = false;
+    private _querySeq = 0;
     private readonly version: string;
 
     // Observable status
@@ -873,7 +884,7 @@ export class OvertureService {
                   AND south <= ${north}
                   AND north >= ${south}
                 LIMIT ${QUERY_LIMIT}
-            `);
+            `, [], 10);
         } catch (err: any) {
             throw new Error(`Overture pipeline cache schema is not available; cache refresh is required: ${err?.message || err}`);
         }
@@ -954,28 +965,53 @@ export class OvertureService {
     // Helpers
     // -----------------------------------------------------------------------
 
-    private exec(sql: string, params: unknown[] = []): Promise<void> {
+    private exec(sql: string, params: unknown[] = [], priority = 0): Promise<void> {
         const run = () => new Promise<void>((resolve, reject) => {
             if (!this.db) return reject(new Error('DuckDB not initialized'));
             this.db.run(sql, ...params, (err: Error | null) => {
                 if (err) reject(err); else resolve();
             });
         });
-        this._queryQueue = this._queryQueue.then(() => run(), () => run());
-        return this._queryQueue as Promise<void>;
+        return this.enqueueDbOperation(run, priority);
     }
 
-    private query<T = any>(sql: string, params: unknown[] = []): Promise<T[]> {
-        // Serialize through the queue — DuckDB's Node.js binding deadlocks
-        // when multiple db.all() calls overlap on a single Database handle.
+    private query<T = any>(sql: string, params: unknown[] = [], priority = 0): Promise<T[]> {
         const run = () => new Promise<T[]>((resolve, reject) => {
             if (!this.db) return reject(new Error('DuckDB not initialized'));
             this.db.all(sql, ...params, (err: Error | null, rows: T[]) => {
                 if (err) reject(err); else resolve(rows ?? []);
             });
         });
-        this._queryQueue = this._queryQueue.then(() => run(), () => run());
-        return this._queryQueue as Promise<T[]>;
+        return this.enqueueDbOperation(run, priority);
+    }
+
+    private enqueueDbOperation<T>(run: () => Promise<T>, priority = 0): Promise<T> {
+        return new Promise<T>((resolve, reject) => {
+            this._queryQueue.push({
+                priority,
+                seq: this._querySeq++,
+                run: run as () => Promise<unknown>,
+                resolve: (value: unknown) => resolve(value as T),
+                reject,
+            });
+            this._queryQueue.sort((left, right) => (
+                right.priority - left.priority || left.seq - right.seq
+            ));
+            this.drainDbQueue();
+        });
+    }
+
+    private drainDbQueue(): void {
+        if (this._queryRunning) return;
+        const task = this._queryQueue.shift();
+        if (!task) return;
+        this._queryRunning = true;
+        task.run()
+            .then(task.resolve, task.reject)
+            .finally(() => {
+                this._queryRunning = false;
+                this.drainDbQueue();
+            });
     }
 
     private async countTable(table: string): Promise<number> {

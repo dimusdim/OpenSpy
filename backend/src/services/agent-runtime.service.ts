@@ -30,11 +30,6 @@ type NormalizedEvent = {
     payload: Record<string, any>;
 };
 
-type ParsedActions = {
-    content: string;
-    contentJson: Record<string, any> | null;
-};
-
 type AgentStreamPart = {
     id: string;
     type: 'text' | 'tool' | 'status';
@@ -43,6 +38,8 @@ type AgentStreamPart = {
     name?: string;
     toolUseId?: string;
     rawType?: string;
+    providerToolName?: string;
+    command?: string;
     input?: any;
     output?: any;
     state?: 'started' | 'completed' | 'status';
@@ -59,6 +56,14 @@ type LaunchConfig = {
 
 type StartRunOptions = {
     requestContext?: Record<string, any> | null;
+    sourceCapabilityContext?: Record<string, any> | null;
+};
+
+type ParsedActionContract = {
+    visible: string;
+    actions: Record<string, any>[];
+    contentJson: Record<string, any> | null;
+    incomplete: boolean;
 };
 
 type ProviderLineState = {
@@ -76,14 +81,6 @@ type ProviderLineState = {
     }>;
 };
 
-// Explicit machine-action block used for presentation batches. Inline object,
-// area and replay references must use Markdown `ospy://` links instead of
-// frontend text guessing.
-const ACTION_BLOCK_RE_LIST = [
-    /<ACTIONS_JSON>\s*([\s\S]*?)\s*<\/ACTIONS_JSON>/i,
-    /```ACTIONS_JSON\s*([\s\S]*?)\s*```/i,
-    /ACTIONS_JSON:?\s*```(?:json)?\s*([\s\S]*?)\s*```/i,
-];
 const DEFAULT_CLAUDE_ALLOWED_TOOLS = [
     'Bash(./.agents/tools/worldview-cli.sh *)',
     'Bash(./.agents/tools/backend-api.sh *)',
@@ -139,10 +136,11 @@ function isCodexProviderEnabled(): boolean {
     return process.env.AGENT_ENABLE_CODEX_PROVIDER === 'true';
 }
 
-function commandExists(command: string): boolean {
+function commandExists(command: string, cwd?: string): boolean {
     if (command.includes('/')) {
+        const candidate = path.isAbsolute(command) ? command : path.resolve(cwd || process.cwd(), command);
         try {
-            fs.accessSync(command, fs.constants.X_OK);
+            fs.accessSync(candidate, fs.constants.X_OK);
             return true;
         } catch {
             return false;
@@ -166,37 +164,205 @@ function ensureUuid(value: string | null | undefined): string {
     return crypto.randomUUID();
 }
 
-function extractActions(content: string): ParsedActions {
-    let match: RegExpMatchArray | null = null;
-    let pattern: RegExp | null = null;
-    for (const candidate of ACTION_BLOCK_RE_LIST) {
-        match = content.match(candidate);
-        if (match) {
-            pattern = candidate;
-            break;
-        }
-    }
-    if (!match || !pattern) return { content: content.trim(), contentJson: null };
-    const visible = content.replace(pattern, '').trim();
+function normalizeAgentActions(value: any): Record<string, any>[] {
+    if (!Array.isArray(value)) return [];
+    return value
+        .filter((item) => item && typeof item === 'object' && typeof item.type === 'string')
+        .map((item) => ({
+            ...item,
+            type: String(item.type),
+            label: typeof item.label === 'string' ? item.label : undefined,
+            payload: item.payload && typeof item.payload === 'object' ? item.payload : undefined,
+        }));
+}
+
+function cappedActionRaw(raw: string, maxChars = 4000): string {
+    const value = String(raw || '');
+    if (value.length <= maxChars) return value;
+    return `${value.slice(0, maxChars)}\n...[truncated ${value.length - maxChars} chars]`;
+}
+
+function parseActionJson(raw: string): Omit<ParsedActionContract, 'visible'> {
     try {
-        const parsed = JSON.parse(match[1] || '{}');
+        const parsed = JSON.parse(raw || '{}');
+        const actions = normalizeAgentActions(parsed?.actions);
         return {
-            content: visible,
-            contentJson: parsed && typeof parsed === 'object' ? parsed : null,
+            actions,
+            contentJson: parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+                ? { ...parsed, actions }
+                : { actions },
+            incomplete: false,
         };
-    } catch (error: any) {
+    } catch (err: any) {
         return {
-            content: visible,
+            actions: [],
             contentJson: {
-                actions_parse_error: error?.message || 'Invalid ACTIONS_JSON',
-                raw_actions: match[1],
+                actions_parse_error: err?.message || 'Invalid ACTIONS_JSON',
+                raw_actions: cappedActionRaw(raw),
             },
+            incomplete: false,
         };
     }
 }
 
+function findCompleteFenceActionBlock(content: string): {
+    start: number;
+    end: number;
+    rawStart: number;
+    rawEnd: number;
+    incomplete: boolean;
+} | null {
+    const pattern = /(^|\n)((?:```ACTIONS_JSON|ACTIONS_JSON\s*:?\s*```(?:json)?)\s*)([\s\S]*?)(\s*```)/i;
+    const match = pattern.exec(content);
+    if (!match || match.index == null) return null;
+    const leading = match[1] || '';
+    const prefix = match[2] || '';
+    const raw = match[3] || '';
+    const suffix = match[4] || '';
+    const start = match.index + leading.length;
+    const rawStart = start + prefix.length;
+    const rawEnd = rawStart + raw.length;
+    const end = rawEnd + suffix.length;
+    return { start, end, rawStart, rawEnd, incomplete: false };
+}
+
+function isActionFenceStart(line: string): boolean {
+    const trimmed = line.trim();
+    const upper = trimmed.toUpperCase();
+    if (upper === '```ACTIONS_JSON') return true;
+    if (!upper.startsWith('ACTIONS_JSON')) return false;
+    let rest = upper.slice('ACTIONS_JSON'.length).trim();
+    if (rest.startsWith(':')) rest = rest.slice(1).trim();
+    return rest === '```' || rest === '```JSON';
+}
+
+function findFenceActionBlock(content: string): {
+    start: number;
+    end: number;
+    rawStart: number;
+    rawEnd: number;
+    incomplete: boolean;
+} | null {
+    const complete = findCompleteFenceActionBlock(content);
+    if (complete) return complete;
+
+    const lines = content.split('\n');
+    let offset = 0;
+    for (let idx = 0; idx < lines.length; idx += 1) {
+        const line = lines[idx];
+        const hasNewline = idx < lines.length - 1;
+        const lineStart = offset;
+        const lineEnd = lineStart + line.length;
+        const nextOffset = lineEnd + (hasNewline ? 1 : 0);
+        if (!isActionFenceStart(line)) {
+            offset = nextOffset;
+            continue;
+        }
+        let innerOffset = nextOffset;
+        for (let endIdx = idx + 1; endIdx < lines.length; endIdx += 1) {
+            const endLine = lines[endIdx];
+            const endHasNewline = endIdx < lines.length - 1;
+            const endLineStart = innerOffset;
+            const endLineEnd = endLineStart + endLine.length;
+            const endNextOffset = endLineEnd + (endHasNewline ? 1 : 0);
+            if (endLine.trim().startsWith('```')) {
+                return {
+                    start: lineStart,
+                    end: endNextOffset,
+                    rawStart: nextOffset,
+                    rawEnd: endLineStart,
+                    incomplete: false,
+                };
+            }
+            innerOffset = endNextOffset;
+        }
+        return {
+            start: lineStart,
+            end: content.length,
+            rawStart: nextOffset,
+            rawEnd: content.length,
+            incomplete: true,
+        };
+    }
+    return null;
+}
+
+function findXmlActionBlock(content: string): {
+    start: number;
+    end: number;
+    rawStart: number;
+    rawEnd: number;
+    incomplete: boolean;
+} | null {
+    const open = '<ACTIONS_JSON>';
+    const close = '</ACTIONS_JSON>';
+    const lower = content.toLowerCase();
+    const start = lower.indexOf(open.toLowerCase());
+    if (start < 0) return null;
+    const rawStart = start + open.length;
+    const closeStart = lower.indexOf(close.toLowerCase(), rawStart);
+    if (closeStart < 0) {
+        return {
+            start,
+            end: content.length,
+            rawStart,
+            rawEnd: content.length,
+            incomplete: true,
+        };
+    }
+    return {
+        start,
+        end: closeStart + close.length,
+        rawStart,
+        rawEnd: closeStart,
+        incomplete: false,
+    };
+}
+
+function extractActionContract(content: string): ParsedActionContract {
+    const source = String(content || '');
+    const candidates = [findXmlActionBlock(source), findFenceActionBlock(source)]
+        .filter(Boolean) as NonNullable<ReturnType<typeof findXmlActionBlock>>[];
+    if (candidates.length === 0) {
+        return {
+            visible: source.trim(),
+            actions: [],
+            contentJson: null,
+            incomplete: false,
+        };
+    }
+    const block = candidates.sort((a, b) => a.start - b.start)[0];
+    const visible = stripActionBlocks(`${source.slice(0, block.start)}${block.incomplete ? '' : source.slice(block.end)}`).trim();
+    if (block.incomplete) {
+        return {
+            visible,
+            actions: [],
+            contentJson: null,
+            incomplete: true,
+        };
+    }
+    const parsed = parseActionJson(source.slice(block.rawStart, block.rawEnd).trim());
+    return {
+        ...parsed,
+        visible,
+        incomplete: false,
+    };
+}
+
+function stripActionBlocks(value: string): string {
+    let output = String(value || '');
+    for (let i = 0; i < 20; i += 1) {
+        const block = [findXmlActionBlock(output), findFenceActionBlock(output)]
+            .filter(Boolean)
+            .sort((a, b) => a!.start - b!.start)[0];
+        if (!block) break;
+        output = `${output.slice(0, block.start)}${block.incomplete ? '' : output.slice(block.end)}`;
+    }
+    return output;
+}
+
 function normalizeAssistantVisibleText(text: string): string {
-    return String(text || '').trim();
+    return extractActionContract(text).visible.trim();
 }
 
 function finalAssistantTextAfterLastTool(events: AgentRunEventRow[], fallback: string): string {
@@ -207,6 +373,7 @@ function finalAssistantTextAfterLastTool(events: AgentRunEventRow[], fallback: s
             : max
     ), -1);
     if (lastToolSequence < 0) return fallback;
+
     const finalText = ordered
         .filter((event) => event.event_type === 'message.delta' && Number(event.sequence_no || 0) > lastToolSequence)
         .map((event) => String(event.payload?.text || ''))
@@ -230,21 +397,14 @@ function sanitizeJsonForPrompt(value: any, maxChars = 6000): Record<string, any>
     }
 }
 
-function formatRequestContextForPrompt(value: any): string {
-    const context = sanitizeJsonForPrompt(value);
+function formatJsonForPrompt(value: any, maxChars = 6000): string {
+    const context = sanitizeJsonForPrompt(value, maxChars);
     if (!context) return '';
     return JSON.stringify(context, null, 2);
 }
 
-function findActionBlockStart(content: string): number {
-    let first = -1;
-    for (const pattern of ACTION_BLOCK_RE_LIST) {
-        const match = content.match(pattern);
-        if (match && typeof match.index === 'number') {
-            first = first === -1 ? match.index : Math.min(first, match.index);
-        }
-    }
-    return first;
+function formatRequestContextForPrompt(value: any): string {
+    return formatJsonForPrompt(value, 6000);
 }
 
 function trimTrailingText(parts: AgentStreamPart[]): AgentStreamPart[] {
@@ -283,7 +443,12 @@ function firstString(...values: any[]): string {
 }
 
 function summarizeToolName(toolName: string, command: string): string {
-    if (toolName !== 'Bash' || !command) return toolName || 'tool';
+    const rawToolName = String(toolName || '').trim();
+    const canSummarizeShellCommand = Boolean(command) && (
+        rawToolName === 'Bash'
+        || /worldview command|open.?spy command|ai worldview command/i.test(rawToolName)
+    );
+    if (!canSummarizeShellCommand) return rawToolName || 'tool';
     const tokens = command.trim().split(/\s+/).filter(Boolean);
     const scriptIndex = tokens.findIndex((token) => /worldview-cli\.sh$/.test(token));
     if (scriptIndex >= 0) {
@@ -297,6 +462,10 @@ function summarizeToolName(toolName: string, command: string): string {
     const backendIndex = tokens.findIndex((token) => /backend-api\.sh$/.test(token));
     if (backendIndex >= 0) return ['backend-api', ...tokens.slice(backendIndex + 1, backendIndex + 3)].join(' ').trim();
     return 'Bash';
+}
+
+function toolCommandFromInput(input: any): string {
+    return firstString(input?.command, input?.cmd);
 }
 
 function compactToolPayload(value: any, maxChars = 8000): any {
@@ -362,20 +531,21 @@ export class AgentRuntimeService {
     listProviders(): ProviderInfo[] {
         if (this.providerCache) return this.providerCache;
         const claudeCommand = process.env.AGENT_CLAUDE_COMMAND || 'claude';
+        const codexCommand = process.env.AGENT_CODEX_COMMAND || 'codex';
         this.providerCache = [
             {
                 provider: 'claude_code',
                 label: 'Claude Code',
                 command: claudeCommand,
-                available: commandExists(claudeCommand),
-                notes: 'Uses AI Worldview project tools for OSINT data, source checks, map actions and replay.',
+                available: commandExists(claudeCommand, this.repoRoot),
+                notes: 'Uses OpenSpy project tools for OSINT data, source checks, map actions and replay.',
             },
             ...(isCodexProviderEnabled() ? [{
                 provider: 'codex_cli',
                 label: 'Codex CLI',
-                command: 'codex',
-                available: commandExists('codex'),
-                notes: 'Hidden unless explicitly enabled for a separate AI Worldview acceptance pass.',
+                command: codexCommand,
+                available: commandExists(codexCommand, this.repoRoot),
+                notes: 'Hidden unless explicitly enabled for a separate OpenSpy acceptance pass.',
             } satisfies ProviderInfo] : []),
         ];
         return this.providerCache;
@@ -470,9 +640,10 @@ export class AgentRuntimeService {
         }
 
         const requestContext = sanitizeJsonForPrompt(options.requestContext);
-        const launch = this.buildLaunch(session, userPrompt, { requestContext });
+        const sourceCapabilityContext = sanitizeJsonForPrompt(options.sourceCapabilityContext, 12000);
+        const launch = this.buildLaunch(session, userPrompt, { requestContext, sourceCapabilityContext });
         if (launch.resumeMode === 'unsupported') {
-            throw new Error(`Agent provider ${session.provider} cannot resume sessions with the current AI Worldview configuration`);
+            throw new Error(`Agent provider ${session.provider} cannot resume sessions with the current OpenSpy configuration`);
         }
 
         const { run } = await this.repository.createRunForPrompt({
@@ -481,12 +652,14 @@ export class AgentRuntimeService {
             messageMetadata: {
                 source: 'frontend',
                 requestContext,
+                sourceCapabilityContext,
             },
             runMetadata: {
                 provider: session.provider,
                 startedBy: 'frontend',
                 resumeMode: launch.resumeMode,
                 requestContext,
+                sourceCapabilityContext,
             },
         });
         const emitter = new EventEmitter();
@@ -760,6 +933,8 @@ export class AgentRuntimeService {
                 name,
                 toolUseId,
                 rawType: String(payload.raw_type || ''),
+                providerToolName: String(payload.tool_name || ''),
+                command: String(payload.command || toolCommandFromInput(payload.input) || ''),
                 input: compactToolPayload(payload.input),
                 output: compactToolPayload(payload.output),
                 state,
@@ -777,44 +952,32 @@ export class AgentRuntimeService {
             });
         }
 
-        const actionStart = findActionBlockStart(parts
-            .filter((part) => part.type === 'text')
-            .map((part) => part.text || '')
-            .join(''));
-        if (actionStart < 0) return trimTrailingText(parts);
-
-        let remainingText = actionStart;
-        const visibleParts: AgentStreamPart[] = [];
-        for (const part of parts) {
-            if (part.type !== 'text') {
-                if (remainingText > 0) visibleParts.push(part);
-                continue;
-            }
-            const text = part.text || '';
-            if (remainingText <= 0) continue;
-            const visibleText = text.slice(0, remainingText);
-            remainingText = Math.max(0, remainingText - text.length);
-            if (visibleText) visibleParts.push({ ...part, text: visibleText });
-        }
-        return trimTrailingText(visibleParts);
+        return trimTrailingText(parts);
     }
 
     private composePrompt(session: AgentSessionRow, userPrompt: string, options: StartRunOptions = {}): string {
         const providerInstruction = session.provider === 'claude_code'
-            ? 'This is a non-interactive Claude Code subprocess launched by AI Worldview.'
-            : 'This is a non-interactive Codex CLI subprocess launched by AI Worldview.';
+            ? 'This is a non-interactive Claude Code subprocess launched by OpenSpy.'
+            : 'This is a non-interactive Codex CLI subprocess launched by OpenSpy.';
         const productInstructions = this.loadProductInstructionDocs();
         const requestContext = formatRequestContextForPrompt(options.requestContext);
+        const sourceCapabilityContext = formatJsonForPrompt(options.sourceCapabilityContext, 12000);
         return [
-            'You are an AI Worldview OSINT agent.',
+            'You are an OpenSpy OSINT agent.',
             '',
             providerInstruction,
-            'The product contract below is loaded from AI Worldview Markdown instructions and skills. Use it as the source of truth for data access, source capability checks, map actions and replay presentation.',
+            'The product contract below is loaded from OpenSpy Markdown instructions and skills. Use it as the source of truth for data access, source capability checks, map actions and replay presentation.',
             '',
             '<AI_WORLDVIEW_MARKDOWN_INSTRUCTIONS>',
             productInstructions,
             '</AI_WORLDVIEW_MARKDOWN_INSTRUCTIONS>',
             '',
+            ...(sourceCapabilityContext ? [
+                '<OPENSPY_SOURCE_CAPABILITY_CONTEXT>',
+                sourceCapabilityContext,
+                '</OPENSPY_SOURCE_CAPABILITY_CONTEXT>',
+                '',
+            ] : []),
             ...(requestContext ? [
                 '<AI_WORLDVIEW_REQUEST_CONTEXT>',
                 requestContext,
@@ -1100,6 +1263,7 @@ export class AgentRuntimeService {
                     name: summarizeToolName(draft.name, command),
                     tool_name: draft.name,
                     tool_use_id: draft.id || toolUseId,
+                    command,
                     input: compactToolPayload(parsedInput),
                 },
             });
@@ -1125,6 +1289,7 @@ export class AgentRuntimeService {
                         provider,
                         raw_type: firstString(result?.type, 'tool_result'),
                         name: firstString(result?.name, result?.tool_name, 'tool'),
+                        tool_name: firstString(result?.name, result?.tool_name),
                         tool_use_id: firstString(result?.tool_use_id, result?.id),
                         is_error: Boolean(result?.is_error),
                         output: compactToolPayload(toolResultOutput(result)),
@@ -1143,6 +1308,7 @@ export class AgentRuntimeService {
                     name: displayName,
                     tool_name: toolName,
                     tool_use_id: toolUseId,
+                    command: toolCommand,
                     input: compactToolPayload(toolInput),
                 },
             });
@@ -1213,36 +1379,35 @@ export class AgentRuntimeService {
         if (live?.completed) return;
         if (live) live.completed = true;
 
-        const events = await this.repository.listRunEvents(runId).catch(() => [] as AgentRunEventRow[]);
-        const finalAssistantText = status === 'completed'
-            ? finalAssistantTextAfterLastTool(events, assistantText)
-            : assistantText;
-        const parsedRaw = extractActions(finalAssistantText);
-        const parsed: ParsedActions = {
-            content: normalizeAssistantVisibleText(parsedRaw.content),
-            contentJson: parsedRaw.contentJson,
-        };
-        if (parsed.content || parsed.contentJson) {
+        const runEvents = await this.repository.listRunEvents(runId, 0);
+        const candidateAssistantText = finalAssistantTextAfterLastTool(runEvents, assistantText);
+        const actionContract = extractActionContract(candidateAssistantText);
+        const finalAssistantText = actionContract.visible.trim();
+        const finalContentJson = actionContract.contentJson && !actionContract.incomplete
+            ? actionContract.contentJson
+            : null;
+        const finalActions = normalizeAgentActions(finalContentJson?.actions);
+        if (finalAssistantText || finalActions.length > 0) {
             await this.repository.addMessage({
                 sessionId,
                 role: 'assistant',
-                content: parsed.content,
-                contentJson: parsed.contentJson,
+                content: finalAssistantText,
+                contentJson: finalContentJson,
                 metadata: {
                     run_id: runId,
                     status,
                 },
             });
-            if (parsed.contentJson?.actions) {
-                await this.emitRunEvent(runId, emitter, 'action.created', {
-                    actions: parsed.contentJson.actions,
-                });
-            }
             await this.emitRunEvent(runId, emitter, 'message.completed', {
                 role: 'assistant',
-                content: parsed.content,
-                content_json: parsed.contentJson,
+                content: finalAssistantText,
+                content_json: finalContentJson,
             });
+            if (finalActions.length > 0) {
+                await this.emitRunEvent(runId, emitter, 'action.created', {
+                    actions: finalActions,
+                });
+            }
         }
 
         await this.repository.completeRun(runId, status, metadata);
@@ -1280,3 +1445,8 @@ export class AgentRuntimeService {
 export function getRepoRootFromBackend(): string {
     return path.resolve(__dirname, '../../..');
 }
+
+export const agentRuntimeTestHooks = {
+    extractActionContract,
+    finalAssistantTextAfterLastTool,
+};

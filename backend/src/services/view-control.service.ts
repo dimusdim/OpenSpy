@@ -3,6 +3,14 @@ import { ViewStateRepository, type ViewStatePayload } from '../repositories/view
 
 type LegendTarget = 'sources' | 'visibility';
 
+export type ViewStateMutationResult = {
+    requested: Record<string, any>;
+    effective: Record<string, any>;
+    changed: Record<string, { before: any; after: any }>;
+    explanation: string;
+    state: ViewStatePayload;
+};
+
 const LAYER_KEY_BY_LAYER_ID: Record<string, string> = {
     aircraft: 'aviation',
     vessel: 'maritime',
@@ -121,6 +129,55 @@ function mergeViewState(current: ViewStatePayload, patch: Record<string, any>): 
     return next;
 }
 
+function getPathValue(value: any, path: string[]): any {
+    let cursor = value;
+    for (const key of path) {
+        if (!cursor || typeof cursor !== 'object') return undefined;
+        cursor = cursor[key];
+    }
+    return cursor;
+}
+
+function collectLeafPaths(value: any, prefix: string[] = []): string[][] {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return [prefix];
+    const entries = Object.entries(value);
+    if (entries.length === 0) return [prefix];
+    const paths: string[][] = [];
+    for (const [key, child] of entries) {
+        paths.push(...collectLeafPaths(child, [...prefix, key]));
+    }
+    return paths;
+}
+
+function describePatchChange(patch: Record<string, any>, before: ViewStatePayload, after: ViewStatePayload): Record<string, { before: any; after: any }> {
+    const changed: Record<string, { before: any; after: any }> = {};
+    for (const path of collectLeafPaths(patch)) {
+        const key = path.join('.');
+        const beforeValue = getPathValue(before, path);
+        const afterValue = getPathValue(after, path);
+        if (JSON.stringify(beforeValue) !== JSON.stringify(afterValue)) {
+            changed[key] = { before: beforeValue, after: afterValue };
+        }
+    }
+    return changed;
+}
+
+function buildMutationResult(
+    requested: Record<string, any>,
+    patch: Record<string, any>,
+    before: ViewStatePayload,
+    after: ViewStatePayload,
+    explanation: string,
+): ViewStateMutationResult {
+    return {
+        requested,
+        effective: patch,
+        changed: describePatchChange(patch, before, after),
+        explanation,
+        state: after,
+    };
+}
+
 export class ViewControlService {
     constructor(
         private readonly viewStateRepository: ViewStateRepository,
@@ -136,6 +193,19 @@ export class ViewControlService {
         const next = mergeViewState(current, patch);
         await this.viewStateRepository.saveDefaultViewState(next);
         return next;
+    }
+
+    async patchStateWithExplanation(patch: Record<string, any>, requested: Record<string, any> = patch): Promise<ViewStateMutationResult> {
+        const current = await this.viewStateRepository.loadDefaultViewState();
+        const next = mergeViewState(current, patch);
+        await this.viewStateRepository.saveDefaultViewState(next);
+        return buildMutationResult(
+            requested,
+            patch,
+            current,
+            next,
+            'Applied the requested view-state patch. Effective state shows the normalized layer keys persisted by OpenSpy.',
+        );
     }
 
     async applySelection(layer: string, selectionId: string, mode: 'replace' | 'append' | 'exclude' | 'only'): Promise<ViewStatePayload> {
@@ -154,6 +224,26 @@ export class ViewControlService {
         return next;
     }
 
+    async applySelectionWithExplanation(layer: string, selectionId: string, mode: 'replace' | 'append' | 'exclude' | 'only'): Promise<ViewStateMutationResult> {
+        const current = await this.viewStateRepository.loadDefaultViewState();
+        const appliedSelections = cloneObject(current.appliedSelections);
+        appliedSelections[layer] = {
+            selectionId,
+            mode,
+            updatedAt: new Date().toISOString(),
+        };
+        const patch = { appliedSelections: { [layer]: appliedSelections[layer] } };
+        const next = mergeViewState(current, { appliedSelections });
+        await this.viewStateRepository.saveDefaultViewState(next);
+        return buildMutationResult(
+            { layer, selection_id: selectionId, mode },
+            patch,
+            current,
+            next,
+            `Applied selection ${selectionId} to layer ${layer} with mode ${mode}.`,
+        );
+    }
+
     async clearSelection(layer: string): Promise<ViewStatePayload> {
         const current = await this.viewStateRepository.loadDefaultViewState();
         const appliedSelections = cloneObject(current.appliedSelections);
@@ -164,6 +254,25 @@ export class ViewControlService {
         };
         await this.viewStateRepository.saveDefaultViewState(next);
         return next;
+    }
+
+    async clearSelectionWithExplanation(layer: string): Promise<ViewStateMutationResult> {
+        const current = await this.viewStateRepository.loadDefaultViewState();
+        const appliedSelections = cloneObject(current.appliedSelections);
+        delete appliedSelections[layer];
+        const patch = { appliedSelections };
+        const next = {
+            ...current,
+            appliedSelections,
+        };
+        await this.viewStateRepository.saveDefaultViewState(next);
+        return buildMutationResult(
+            { layer },
+            patch,
+            current,
+            next,
+            `Cleared the applied selection for layer ${layer}.`,
+        );
     }
 
     async setLegendNodeState(nodeId: string, enabled: boolean, target: LegendTarget): Promise<ViewStatePayload> {
@@ -198,6 +307,48 @@ export class ViewControlService {
             ...(Object.keys(visibilityPatch).length > 0 ? { visibility: visibilityPatch } : {}),
             ...(Object.keys(subtypePatch).length > 0 ? { subtypeVisibility: subtypePatch } : {}),
         });
+    }
+
+    async setLegendNodeStateWithExplanation(nodeId: string, enabled: boolean, target: LegendTarget): Promise<ViewStateMutationResult> {
+        const normalizedNodeId = normalizeLegendNodeId(nodeId);
+        const taxonomy = await this.catalogReadService.getUiTaxonomy();
+        const nodes = this.flattenNodes(Array.isArray(taxonomy) ? taxonomy : (taxonomy as any)?.tree || []);
+        const targetNode = nodes.find((node) => node.node_id === normalizedNodeId || node.slug === normalizedNodeId);
+        if (!targetNode) {
+            throw new Error(`Legend node not found: ${nodeId}`);
+        }
+
+        const affectedNodes = nodes.filter((node) => node.node_id === targetNode.node_id || node.node_id.startsWith(`${targetNode.node_id}/`));
+        const sourcePatch: Record<string, boolean> = {};
+        const visibilityPatch: Record<string, boolean> = {};
+        const subtypePatch: Record<string, boolean> = {};
+
+        for (const node of affectedNodes) {
+            const layerKey = this.resolveLayerKey(node);
+            if (node.node_kind === 'subtype' && layerKey) {
+                const subtypeId = String(node.metadata?.id || '').trim();
+                if (subtypeId) subtypePatch[`${layerKey}:${subtypeId}`] = enabled;
+                continue;
+            }
+            if (!layerKey) continue;
+
+            if (target === 'sources') sourcePatch[layerKey] = enabled;
+            if (target === 'visibility') visibilityPatch[layerKey] = enabled;
+        }
+
+        const patch = {
+            ...(Object.keys(sourcePatch).length > 0 ? { sources: sourcePatch } : {}),
+            ...(Object.keys(visibilityPatch).length > 0 ? { visibility: visibilityPatch } : {}),
+            ...(Object.keys(subtypePatch).length > 0 ? { subtypeVisibility: subtypePatch } : {}),
+        };
+        const result = await this.patchStateWithExplanation(
+            patch,
+            { node_id: nodeId, normalized_node_id: normalizedNodeId, enabled, target },
+        );
+        return {
+            ...result,
+            explanation: `Legend node ${normalizedNodeId} changed ${target}. Effective patch lists every layer/subtype affected by that semantic node.`,
+        };
     }
 
     private flattenNodes(tree: any[]): TaxonomyNode[] {

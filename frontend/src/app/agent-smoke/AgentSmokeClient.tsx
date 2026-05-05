@@ -2,6 +2,7 @@
 
 import { useEffect } from 'react';
 import AgentPanel from '../../components/AgentPanel';
+import { ImageryContextBadge } from '../../components/ImageryPanel';
 import { useTimelineStore } from '../../store/useTimelineStore';
 
 export default function AgentSmokeClient() {
@@ -18,6 +19,7 @@ export default function AgentSmokeClient() {
                 isPlaying: state.isPlaying,
                 selectedEntityId: state.selectedEntityId,
                 selectedEntityData: state.selectedEntityData,
+                activeImageryOverlay: state.activeImageryOverlay,
             };
         };
 
@@ -84,6 +86,9 @@ export default function AgentSmokeClient() {
 
     return (
         <main className="relative min-h-screen bg-zinc-950 text-white">
+            <div className="absolute left-4 top-4 z-20 w-80">
+                <ImageryContextBadge />
+            </div>
             <AgentPanel isOpen={true} onClose={() => {}} />
         </main>
     );

@@ -14,6 +14,7 @@ import SystemStorageStatus from '../components/SystemStorageStatus';
 import RenderPerfStatus from '../components/RenderPerfStatus';
 import AIImagePanel, { AIImageToggle } from '../components/AIImagePanel';
 import AgentPanel, { AgentToggle } from '../components/AgentPanel';
+import ImageryPanel, { ImageryContextBadge, ImageryToggle } from '../components/ImageryPanel';
 import { useAIImageStore } from '../store/useAIImageStore';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { useStatusPoller } from '../hooks/useStatusPoller';
@@ -27,6 +28,7 @@ export default function Home() {
   const aiActive = useAIImageStore((s) => s.isActive);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [agentsOpen, setAgentsOpen] = useState(false);
+  const [imageryOpen, setImageryOpen] = useState(false);
 
   // Status polling — always-on, independent of which panels are open
   useStatusPoller();
@@ -109,6 +111,8 @@ export default function Home() {
                     <RenderPerfStatus />
                     <SearchBar />
                     <TileModeToggle />
+                    <ImageryToggle onClick={() => setImageryOpen(true)} />
+                    <ImageryContextBadge />
                     <AIImageToggle />
                     <AgentToggle onClick={() => setAgentsOpen(true)} />
                     <button
@@ -132,6 +136,7 @@ export default function Home() {
                 <EntityHUD avoidRightPx={agentsOpen ? 472 : 0} />
 
                 {/* Settings modal */}
+                <ImageryPanel isOpen={imageryOpen} onClose={() => setImageryOpen(false)} />
                 <SettingsPanel isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
                 <AgentPanel isOpen={agentsOpen} onClose={() => setAgentsOpen(false)} />
             </>

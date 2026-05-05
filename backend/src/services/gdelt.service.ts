@@ -108,6 +108,7 @@ export class GDELTService {
     private health: 'streaming' | 'error' | 'connecting' = 'connecting';
     private lastError: string | null = null;
     private lastFetchUrl: string = '';
+    private lastSuccessfulFetchAt: number | null = null;
 
     constructor(private readonly persistence?: SourcePersistenceService) {}
 
@@ -123,10 +124,18 @@ export class GDELTService {
     }
 
     getHealth() {
+        const lastSuccessfulFetchAgeMs = this.lastSuccessfulFetchAt == null
+            ? null
+            : Math.max(0, Date.now() - this.lastSuccessfulFetchAt);
         return {
             status: this.health,
             note: this.lastError || undefined,
             count: this.events.length,
+            lastSuccessfulFetchAt: this.lastSuccessfulFetchAt
+                ? new Date(this.lastSuccessfulFetchAt).toISOString()
+                : null,
+            lastSuccessfulFetchAgeMs,
+            lastFetchUrl: this.lastFetchUrl || null,
         };
     }
 
@@ -146,7 +155,12 @@ export class GDELTService {
             const url = parts[parts.length - 1];
 
             // Skip if same URL as last fetch
-            if (url === this.lastFetchUrl && this.events.length > 0) return;
+            if (url === this.lastFetchUrl && this.events.length > 0) {
+                this.lastSuccessfulFetchAt = Date.now();
+                this.health = 'streaming';
+                this.lastError = null;
+                return;
+            }
 
             // Step 2: download and decompress ZIP
             const zipRes = await axios.get(url, {
@@ -197,6 +211,7 @@ export class GDELTService {
 
             this.events = parsed;
             this.lastFetchUrl = url;
+            this.lastSuccessfulFetchAt = Date.now();
             this.health = 'streaming';
             this.lastError = null;
             await this.persistence?.persistGdeltConflicts(parsed);

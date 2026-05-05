@@ -33,16 +33,16 @@ export class ACLEDService {
     private lastError: string | null = null;
     private lastSuccessfulTimestampSec: number | null = null;
     private lastCompleteness: 'complete' | 'incomplete' | 'unavailable' = 'unavailable';
+    private accessToken: string | null = null;
+    private accessTokenExpiresAtMs = 0;
 
     constructor(private readonly persistence?: SourcePersistenceService) {}
 
     start() {
-        const email = process.env.ACLED_EMAIL;
-        const key = process.env.ACLED_KEY;
-
-        if (!email || !key) {
-            console.warn('[ACLED] API key not configured, skipping');
+        if (!this.getAuthMode()) {
+            console.warn('[ACLED] credentials not configured, skipping');
             this.health = 'auth-missing';
+            this.lastError = 'Set ACLED_EMAIL plus ACLED_KEY for legacy key access, or explicitly set ACLED_AUTH_MODE=oauth / ACLED_ENABLE_PASSWORD_OAUTH=true with ACLED_EMAIL plus ACLED_PASSWORD';
             return;
         }
 
@@ -66,9 +66,7 @@ export class ACLEDService {
     }
 
     private async fetchEvents() {
-        const email = process.env.ACLED_EMAIL;
-        const key = process.env.ACLED_KEY;
-        if (!email || !key) return;
+        if (!this.getAuthMode()) return;
 
         try {
             const now = new Date();
@@ -107,15 +105,12 @@ export class ACLEDService {
 
             for (let page = 1; page <= effectiveMaxPages; page += 1) {
                 const params = new URLSearchParams({
-                    key,
-                    email,
                     limit: String(effectivePageSize),
                     timestamp: String(startTimestampSec),
                     timestamp_where: '>=',
                     page: String(page),
                 });
-                const url = `https://api.acleddata.com/acled/read?${params.toString()}`;
-                const res = await retryWithBackoff(() => axios.get(url, { timeout: 30000 }), {
+                const res = await retryWithBackoff(() => this.requestReadEndpoint('acled/read', params), {
                     label: 'ACLED',
                     maxAttempts: 3,
                     baseDelayMs: 1000,
@@ -136,15 +131,12 @@ export class ACLEDService {
 
             for (let page = 1; page <= effectiveMaxPages; page += 1) {
                 const params = new URLSearchParams({
-                    key,
-                    email,
                     limit: String(effectivePageSize),
                     deleted_timestamp: String(startTimestampSec),
                     deleted_timestamp_where: '>=',
                     page: String(page),
                 });
-                const url = `https://api.acleddata.com/deleted/read?${params.toString()}`;
-                const res = await retryWithBackoff(() => axios.get(url, { timeout: 30000 }), {
+                const res = await retryWithBackoff(() => this.requestReadEndpoint('deleted/read', params), {
                     label: 'ACLED deleted',
                     maxAttempts: 3,
                     baseDelayMs: 1000,
@@ -306,6 +298,72 @@ export class ACLEDService {
             this.health = 'error';
             this.lastError = err.message;
         }
+    }
+
+    private getAuthMode(): 'oauth' | 'legacy-key' | null {
+        const mode = (process.env.ACLED_AUTH_MODE || '').trim().toLowerCase();
+        const email = process.env.ACLED_EMAIL;
+        const password = process.env.ACLED_PASSWORD;
+        const key = process.env.ACLED_KEY;
+        const passwordOauthEnabled = process.env.ACLED_ENABLE_PASSWORD_OAUTH === 'true';
+        if (mode === 'oauth') return email && password ? 'oauth' : null;
+        if (mode === 'legacy-key') return email && key ? 'legacy-key' : null;
+        if (email && key) return 'legacy-key';
+        if (email && password && passwordOauthEnabled) return 'oauth';
+        return null;
+    }
+
+    private async requestReadEndpoint(endpoint: 'acled/read' | 'deleted/read', params: URLSearchParams) {
+        const authMode = this.getAuthMode();
+        if (authMode === 'oauth') {
+            const token = await this.getAccessToken();
+            const baseUrl = (process.env.ACLED_API_BASE_URL || 'https://acleddata.com/api').replace(/\/+$/, '');
+            const url = `${baseUrl}/${endpoint}?${params.toString()}`;
+            return axios.get(url, {
+                timeout: 30000,
+                headers: { Authorization: `Bearer ${token}` },
+            });
+        }
+
+        if (authMode === 'legacy-key') {
+            const legacyParams = new URLSearchParams(params);
+            legacyParams.set('key', process.env.ACLED_KEY || '');
+            legacyParams.set('email', process.env.ACLED_EMAIL || '');
+            const baseUrl = (process.env.ACLED_LEGACY_API_BASE_URL || 'https://api.acleddata.com').replace(/\/+$/, '');
+            const url = `${baseUrl}/${endpoint}?${legacyParams.toString()}`;
+            return axios.get(url, { timeout: 30000 });
+        }
+
+        throw new Error('ACLED credentials not configured');
+    }
+
+    private async getAccessToken(): Promise<string> {
+        const now = Date.now();
+        if (this.accessToken && this.accessTokenExpiresAtMs - now > 60_000) return this.accessToken;
+
+        const email = process.env.ACLED_EMAIL;
+        const password = process.env.ACLED_PASSWORD;
+        if (!email || !password) throw new Error('ACLED OAuth requires ACLED_EMAIL and ACLED_PASSWORD');
+
+        const tokenUrl = process.env.ACLED_TOKEN_URL || 'https://acleddata.com/oauth/token';
+        const clientId = process.env.ACLED_CLIENT_ID || 'acled';
+        const body = new URLSearchParams({
+            username: email,
+            password,
+            grant_type: 'password',
+            client_id: clientId,
+        });
+
+        const res = await axios.post(tokenUrl, body.toString(), {
+            timeout: 30000,
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        });
+        const token = res.data?.access_token;
+        if (!token || typeof token !== 'string') throw new Error('ACLED OAuth did not return an access_token');
+        const expiresInSec = Number(res.data?.expires_in || 86400);
+        this.accessToken = token;
+        this.accessTokenExpiresAtMs = now + Math.max(60, expiresInSec) * 1000;
+        return token;
     }
 }
 

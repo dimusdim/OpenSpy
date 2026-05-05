@@ -264,6 +264,7 @@ for (const d of DOMAIN_TREE) {
 type Tab = 'domains' | 'missions' | 'all';
 
 export default function Legend() {
+    const sources = useTimelineStore(s => s.sources);
     const visibility = useTimelineStore(s => s.visibility);
     const counts = useTimelineStore(s => s.subtypeCounts);
     const sourceCounts = useTimelineStore(s => s.sourceCounts);
@@ -303,11 +304,11 @@ export default function Legend() {
     const toggleDomainVisibility = useCallback((domain: string) => {
         const layers = DOMAIN_LAYERS[domain];
         if (!layers) return;
-        const allOn = layers.every(l => visibility[l]);
+        const allOn = layers.every(l => sources[l] && visibility[l]);
         for (const l of layers) {
-            if (allOn || !visibility[l]) toggleVisibility(l);
+            if (allOn || !(sources[l] && visibility[l])) toggleVisibility(l);
         }
-    }, [visibility, toggleVisibility]);
+    }, [sources, visibility, toggleVisibility]);
 
     // Count totals for a layer
     const layerCount = useCallback((layer: LayerName, subtypes: SubtypeNode[]) => {
@@ -390,6 +391,7 @@ export default function Legend() {
                     toggleDomain={toggleDomain}
                     toggleLayerExpand={toggleLayerExpand}
                     toggleDomainVisibility={toggleDomainVisibility}
+                    sources={sources}
                     visibility={visibility}
                     subtypeVisibility={subtypeVisibility}
                     sourceVisibility={sourceVisibility}
@@ -414,6 +416,7 @@ export default function Legend() {
                     searchQuery={searchQuery}
                     setSearchQuery={setSearchQuery}
                     filteredAll={filteredAll}
+                    sources={sources}
                     visibility={visibility}
                     subtypeVisibility={subtypeVisibility}
                     counts={counts}
@@ -431,7 +434,7 @@ export default function Legend() {
 // ---------------------------------------------------------------------------
 function DomainsTab({
     expandedDomains, expandedLayers, toggleDomain, toggleLayerExpand,
-    toggleDomainVisibility, visibility, subtypeVisibility, sourceVisibility, counts, sourceCounts, streamMetrics,
+    toggleDomainVisibility, sources, visibility, subtypeVisibility, sourceVisibility, counts, sourceCounts, streamMetrics,
     toggleVisibility, toggleSubtype, toggleSourceVisibility, layerCount, showTrajectories, toggleTrajectories, mode,
 }: {
     expandedDomains: Record<string, boolean>;
@@ -439,6 +442,7 @@ function DomainsTab({
     toggleDomain: (d: string) => void;
     toggleLayerExpand: (l: string) => void;
     toggleDomainVisibility: (d: string) => void;
+    sources: any;
     visibility: any;
     subtypeVisibility: Record<string, boolean>;
     sourceVisibility: Record<string, boolean>;
@@ -457,8 +461,8 @@ function DomainsTab({
         <div className="p-2 flex flex-col gap-0.5">
             {DOMAIN_TREE.map(domain => {
                 const isExpanded = expandedDomains[domain.domain] !== false;
-                const allOn = DOMAIN_LAYERS[domain.domain].every(l => visibility[l]);
-                const someOn = DOMAIN_LAYERS[domain.domain].some(l => visibility[l]);
+                const allOn = DOMAIN_LAYERS[domain.domain].every(l => sources[l] && visibility[l]);
+                const someOn = DOMAIN_LAYERS[domain.domain].some(l => sources[l] && visibility[l]);
                 const DomainIcon = domain.icon;
 
                 return (
@@ -488,7 +492,8 @@ function DomainsTab({
                         {isExpanded && (
                             <div className="pl-4 flex flex-col gap-0">
                                 {domain.children.map(layerNode => {
-                                    const layerOn = visibility[layerNode.layer];
+                                    const layerSourceOn = sources[layerNode.layer];
+                                    const layerOn = layerSourceOn && visibility[layerNode.layer];
                                     const metric = streamMetrics[layerNode.layer];
                                     const lCount = layerCount(layerNode.layer, layerNode.subtypes);
                                     const hasSubtypes = layerNode.subtypes.length > 0;
@@ -665,12 +670,13 @@ function MissionsTab({ activePreset, applyMissionPreset }: {
 // All Tab (searchable flat list)
 // ---------------------------------------------------------------------------
 function AllTab({
-    searchQuery, setSearchQuery, filteredAll, visibility, subtypeVisibility,
+    searchQuery, setSearchQuery, filteredAll, sources, visibility, subtypeVisibility,
     counts, toggleVisibility, toggleSubtype, mode,
 }: {
     searchQuery: string;
     setSearchQuery: (q: string) => void;
     filteredAll: typeof ALL_SUBTYPES;
+    sources: any;
     visibility: any;
     subtypeVisibility: Record<string, boolean>;
     counts: Record<string, number>;
@@ -703,7 +709,7 @@ function AllTab({
             <div className="p-1 flex flex-col gap-0">
                 {filteredAll.map(item => {
                     const isLayerToggle = !item.subtypeKey;
-                    const layerOn = visibility[item.layer];
+                    const layerOn = sources[item.layer] && visibility[item.layer];
                     const fullKey = item.subtypeKey ? `${item.layer}:${item.subtypeKey}` : '';
                     const subOn = fullKey ? subtypeVisibility[fullKey] !== false : layerOn;
                     const n = fullKey ? (counts[fullKey] || 0) : 0;

@@ -287,10 +287,10 @@ export function useFiresLayer(viewer: Cesium.Viewer | null) {
                 const rect = viewer.camera.computeViewRectangle();
                 const bbox = rect
                     ? [
-                        Cesium.Math.toDegrees(rect.south),
                         Cesium.Math.toDegrees(rect.west),
-                        Cesium.Math.toDegrees(rect.north),
+                        Cesium.Math.toDegrees(rect.south),
                         Cesium.Math.toDegrees(rect.east),
+                        Cesium.Math.toDegrees(rect.north),
                     ]
                     : null;
                 // Clustering toggle is authoritative. When OFF, force raw

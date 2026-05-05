@@ -18,6 +18,7 @@ import {
     X,
 } from 'lucide-react';
 import { API_URL } from '../lib/config';
+import { clearOpenSpyImageryLayers, showOpenSpyImageryCompare, showOpenSpyImageryLayer } from '../lib/imageryOverlay';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { replayMetaMap } from '../cesium/useReplayOverlay';
 
@@ -43,7 +44,7 @@ type AgentMessage = {
     agent_message_id: string;
     role: string;
     content: string;
-    content_json?: { actions?: AgentAction[] } | null;
+    content_json?: { actions?: AgentAction[]; actions_parse_error?: string; raw_actions?: string } | null;
     created_at?: string;
     metadata?: Record<string, any>;
 };
@@ -62,25 +63,20 @@ type AgentStreamPart = {
     name?: string;
     toolUseId?: string;
     rawType?: string;
+    providerToolName?: string;
+    command?: string;
     input?: any;
     output?: any;
     state?: 'started' | 'completed' | 'status';
     isError?: boolean;
 };
 
-// Explicit machine-action block used for presentation batches. Inline object,
-// area and replay references must use Markdown `ospy://` links instead of
-// frontend text guessing.
-const ACTION_BLOCK_RE_LIST = [
-    /<ACTIONS_JSON>\s*([\s\S]*?)\s*<\/ACTIONS_JSON>/i,
-    /```ACTIONS_JSON\s*([\s\S]*?)\s*```/i,
-    /ACTIONS_JSON:?\s*```(?:json)?\s*([\s\S]*?)\s*```/i,
-];
-const ACTION_BLOCK_START_RE_LIST = [
-    /<ACTIONS_JSON\b/i,
-    /```ACTIONS_JSON\b/i,
-    /ACTIONS_JSON:?\s*```(?:json)?/i,
-];
+type ParsedActionContract = {
+    visible: string;
+    actions: AgentAction[];
+    contentJson: { actions?: AgentAction[]; actions_parse_error?: string; raw_actions?: string } | null;
+    incomplete: boolean;
+};
 
 const LAYER_KEY_ALIASES: Record<string, string> = {
     aircraft: 'aviation',
@@ -164,8 +160,6 @@ type TrackPoint = {
     source?: string;
 };
 
-let agentImageryLayers: Cesium.ImageryLayer[] = [];
-
 type AgentPanelProps = {
     isOpen: boolean;
     onClose: () => void;
@@ -197,7 +191,200 @@ function getActionIcon(type: string) {
 }
 
 function cleanVisibleText(text: string): string {
-    return String(text || '').trim();
+    return extractActionContract(text).visible.trim();
+}
+
+function normalizeAgentActions(value: any): AgentAction[] {
+    if (!Array.isArray(value)) return [];
+    return value
+        .filter((item) => item && typeof item === 'object' && typeof item.type === 'string')
+        .map((item) => ({
+            ...item,
+            type: String(item.type),
+            label: typeof item.label === 'string' ? item.label : undefined,
+            payload: item.payload && typeof item.payload === 'object' ? item.payload : undefined,
+        }));
+}
+
+function cappedActionRaw(raw: string, maxChars = 4000): string {
+    const value = String(raw || '');
+    if (value.length <= maxChars) return value;
+    return `${value.slice(0, maxChars)}\n...[truncated ${value.length - maxChars} chars]`;
+}
+
+function parseActionJson(raw: string): ParsedActionContract {
+    try {
+        const parsed = JSON.parse(raw || '{}');
+        const actions = normalizeAgentActions(parsed?.actions);
+        return {
+            visible: '',
+            actions,
+            contentJson: parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+                ? { ...parsed, actions }
+                : { actions },
+            incomplete: false,
+        };
+    } catch (err) {
+        return {
+            visible: '',
+            actions: [],
+            contentJson: {
+                actions_parse_error: err instanceof Error ? err.message : 'Invalid ACTIONS_JSON',
+                raw_actions: cappedActionRaw(raw),
+            },
+            incomplete: false,
+        };
+    }
+}
+
+function findCompleteFenceActionBlock(content: string): {
+    start: number;
+    end: number;
+    rawStart: number;
+    rawEnd: number;
+    incomplete: boolean;
+} | null {
+    const pattern = /(^|\n)((?:```ACTIONS_JSON|ACTIONS_JSON\s*:?\s*```(?:json)?)\s*)([\s\S]*?)(\s*```)/i;
+    const match = pattern.exec(content);
+    if (!match || match.index == null) return null;
+    const leading = match[1] || '';
+    const prefix = match[2] || '';
+    const raw = match[3] || '';
+    const suffix = match[4] || '';
+    const start = match.index + leading.length;
+    const rawStart = start + prefix.length;
+    const rawEnd = rawStart + raw.length;
+    const end = rawEnd + suffix.length;
+    return { start, end, rawStart, rawEnd, incomplete: false };
+}
+
+function isActionFenceStart(line: string): boolean {
+    const trimmed = line.trim();
+    const upper = trimmed.toUpperCase();
+    if (upper === '```ACTIONS_JSON') return true;
+    if (!upper.startsWith('ACTIONS_JSON')) return false;
+    let rest = upper.slice('ACTIONS_JSON'.length).trim();
+    if (rest.startsWith(':')) rest = rest.slice(1).trim();
+    return rest === '```' || rest === '```JSON';
+}
+
+function findFenceActionBlock(content: string): {
+    start: number;
+    end: number;
+    rawStart: number;
+    rawEnd: number;
+    incomplete: boolean;
+} | null {
+    const complete = findCompleteFenceActionBlock(content);
+    if (complete) return complete;
+
+    const lines = content.split('\n');
+    let offset = 0;
+    for (let idx = 0; idx < lines.length; idx += 1) {
+        const line = lines[idx];
+        const hasNewline = idx < lines.length - 1;
+        const lineStart = offset;
+        const lineEnd = lineStart + line.length;
+        const nextOffset = lineEnd + (hasNewline ? 1 : 0);
+        if (!isActionFenceStart(line)) {
+            offset = nextOffset;
+            continue;
+        }
+        let innerOffset = nextOffset;
+        for (let endIdx = idx + 1; endIdx < lines.length; endIdx += 1) {
+            const endLine = lines[endIdx];
+            const endHasNewline = endIdx < lines.length - 1;
+            const endLineStart = innerOffset;
+            const endLineEnd = endLineStart + endLine.length;
+            const endNextOffset = endLineEnd + (endHasNewline ? 1 : 0);
+            if (endLine.trim().startsWith('```')) {
+                return {
+                    start: lineStart,
+                    end: endNextOffset,
+                    rawStart: nextOffset,
+                    rawEnd: endLineStart,
+                    incomplete: false,
+                };
+            }
+            innerOffset = endNextOffset;
+        }
+        return {
+            start: lineStart,
+            end: content.length,
+            rawStart: nextOffset,
+            rawEnd: content.length,
+            incomplete: true,
+        };
+    }
+    return null;
+}
+
+function findXmlActionBlock(content: string): {
+    start: number;
+    end: number;
+    rawStart: number;
+    rawEnd: number;
+    incomplete: boolean;
+} | null {
+    const open = '<ACTIONS_JSON>';
+    const close = '</ACTIONS_JSON>';
+    const lower = content.toLowerCase();
+    const start = lower.indexOf(open.toLowerCase());
+    if (start < 0) return null;
+    const rawStart = start + open.length;
+    const closeStart = lower.indexOf(close.toLowerCase(), rawStart);
+    if (closeStart < 0) {
+        return {
+            start,
+            end: content.length,
+            rawStart,
+            rawEnd: content.length,
+            incomplete: true,
+        };
+    }
+    return {
+        start,
+        end: closeStart + close.length,
+        rawStart,
+        rawEnd: closeStart,
+        incomplete: false,
+    };
+}
+
+function extractActionContract(content: string): ParsedActionContract {
+    const source = String(content || '');
+    const candidates = [findXmlActionBlock(source), findFenceActionBlock(source)]
+        .filter(Boolean) as NonNullable<ReturnType<typeof findXmlActionBlock>>[];
+    if (candidates.length === 0) {
+        return {
+            visible: source.trim(),
+            actions: [],
+            contentJson: null,
+            incomplete: false,
+        };
+    }
+    const block = candidates.sort((a, b) => a.start - b.start)[0];
+    const visible = `${source.slice(0, block.start)}${block.incomplete ? '' : source.slice(block.end)}`.trim();
+    if (block.incomplete) {
+        return {
+            visible,
+            actions: [],
+            contentJson: null,
+            incomplete: true,
+        };
+    }
+    const parsed = parseActionJson(source.slice(block.rawStart, block.rawEnd).trim());
+    return {
+        ...parsed,
+        visible,
+        incomplete: false,
+    };
+}
+
+function actionsFromMessage(message: AgentMessage): AgentAction[] {
+    const contentJsonActions = normalizeAgentActions(message.content_json?.actions);
+    if (contentJsonActions.length > 0) return contentJsonActions;
+    return extractActionContract(message.content).actions;
 }
 
 function cleanToolName(name?: string): string {
@@ -208,7 +395,7 @@ function cleanToolName(name?: string): string {
 
 function isGenericToolName(name?: string): boolean {
     const raw = cleanToolName(name).toLowerCase();
-    return raw === 'tool' || raw === 'bash';
+    return raw === 'tool' || raw === 'bash' || /worldview command|open.?spy command|ai worldview command/i.test(raw);
 }
 
 function formatToolPayload(value: any): string {
@@ -221,6 +408,44 @@ function formatToolPayload(value: any): string {
     }
 }
 
+function shellCommandFromPayload(value: any): string {
+    if (!value || typeof value !== 'object') return '';
+    const command = typeof value.command === 'string'
+        ? value.command
+        : typeof value.cmd === 'string'
+            ? value.cmd
+            : '';
+    return command.trim();
+}
+
+function summarizeToolCommand(command: string): string {
+    const raw = String(command || '').trim();
+    if (!raw) return '';
+    const tokens = raw.split(/\s+/).filter(Boolean);
+    const script = (scriptName: string) => tokens.findIndex((token) => token.endsWith(scriptName));
+    const worldviewIndex = script('worldview-cli.sh');
+    if (worldviewIndex >= 0) return ['worldview-cli', ...tokens.slice(worldviewIndex + 1, worldviewIndex + 4)].join(' ').trim();
+    const backendIndex = script('backend-api.sh');
+    if (backendIndex >= 0) return ['backend-api', ...tokens.slice(backendIndex + 1, backendIndex + 3)].join(' ').trim();
+    const sourceIndex = script('source-fetch.sh');
+    if (sourceIndex >= 0) return ['source-fetch', ...tokens.slice(sourceIndex + 1, sourceIndex + 3)].join(' ').trim();
+    const mapIndex = script('map-command.sh');
+    if (mapIndex >= 0) return ['map-command', ...tokens.slice(mapIndex + 1, mapIndex + 3)].join(' ').trim();
+    if (tokens.some((token) => token.endsWith('sql-readonly.sh'))) return 'read-only SQL';
+    return raw.length > 80 ? `${raw.slice(0, 77)}...` : raw;
+}
+
+function displayToolName(part: { name?: string; providerToolName?: string; command?: string; input?: any }): string {
+    const providerToolName = cleanToolName(part.providerToolName);
+    const command = part.command || shellCommandFromPayload(part.input);
+    const summarized = summarizeToolCommand(command);
+    if (summarized && isGenericToolName(providerToolName)) return summarized;
+    if (providerToolName && providerToolName !== 'tool') return providerToolName;
+    const name = cleanToolName(part.name);
+    if (summarized && (isGenericToolName(name) || summarized !== name)) return summarized;
+    return name;
+}
+
 function formatActionType(type: string): string {
     const labels: Record<string, string> = {
         'map.fly_to': 'Move map',
@@ -229,6 +454,11 @@ function formatActionType(type: string): string {
         'map.add_aoi': 'Show area',
         'map.add_corridor': 'Show corridor',
         'map.clear_agent_overlays': 'Clear overlays',
+        'presentation.step': 'Presentation step',
+        'presentation.group': 'Presentation group',
+        'presentation.sequence': 'Presentation sequence',
+        'actions.batch': 'Action batch',
+        'action.batch': 'Action batch',
         'legend.set_node_state': 'Set legend',
         'map.set_layers': 'Set layers',
         'layer.set_visibility': 'Set layers',
@@ -238,6 +468,8 @@ function formatActionType(type: string): string {
         'object.open': 'Open object',
         'object.focus': 'Focus object',
         'entity.open': 'Open entity',
+        'asset.open': 'Open asset',
+        'event.open': 'Open event',
         'entity.place': 'Place entity',
         'entity.show_marker': 'Show marker',
         'entity.track': 'Draw track',
@@ -261,8 +493,120 @@ function formatActionType(type: string): string {
     return labels[type] || type.replace(/[._]/g, ' ');
 }
 
+function nestedActionsFor(action: AgentAction): AgentAction[] {
+    const payload = normalizedActionPayload(action);
+    const raw = payload.actions || payload.steps || [];
+    if (!Array.isArray(raw)) return [];
+    return raw
+        .filter((item) => item && typeof item === 'object' && typeof item.type === 'string')
+        .map((item) => ({
+            type: String(item.type),
+            label: typeof item.label === 'string' ? item.label : undefined,
+            payload: item.payload && typeof item.payload === 'object' ? item.payload : undefined,
+            ...item,
+        }));
+}
+
+function isActionBatch(action: AgentAction): boolean {
+    return action.type === 'presentation.step'
+        || action.type === 'presentation.group'
+        || action.type === 'presentation.sequence'
+        || action.type === 'actions.batch'
+        || action.type === 'action.batch';
+}
+
 function actionLabel(action: AgentAction, idx: number): string {
+    if (isActionBatch(action)) {
+        const count = nestedActionsFor(action).length;
+        return action.label || `${idx + 1}. ${formatActionType(action.type)}${count ? ` (${count})` : ''}`;
+    }
     return action.label || `${idx + 1}. ${formatActionType(action.type)}`;
+}
+
+function isImageryAction(action: AgentAction): boolean {
+    return action.type === 'imagery.show_layer'
+        || action.type === 'imagery.show_scene'
+        || action.type === 'imagery.compare';
+}
+
+function imageryDetails(action: AgentAction): {
+    source: string;
+    sceneId: string | null;
+    acquisition: string;
+    layer: string;
+    cloud: string | null;
+    aoi: string | null;
+    limitation: string;
+} {
+    const payload = normalizedActionPayload(action);
+    const scene = payload.scene && typeof payload.scene === 'object' ? payload.scene : {};
+    const sourceRaw = payload.source || payload.provider || scene.source || scene.provider || '';
+    const source = /copernicus|sentinel/i.test(String(sourceRaw))
+        ? 'Copernicus / Sentinel'
+        : /gibs|nasa|worldview/i.test(String(sourceRaw))
+            ? 'NASA GIBS / Worldview'
+            : String(sourceRaw || 'Imagery source');
+    const sceneId = String(payload.scene_id || scene.scene_id || '').trim() || null;
+    const acquisitionRaw = payload.time || payload.at || payload.date || payload.from || scene.datetime || scene.date || '';
+    const acquisition = acquisitionRaw ? String(acquisitionRaw).slice(0, 19).replace('T', ' ') : 'date-addressed scene';
+    const layer = String(payload.layer || payload.gibsLayer || payload.gibs_layer || scene.collection || scene.layer_id || scene.requested_layer || 'context imagery');
+    const cloudRaw = payload.cloud_cover ?? payload.maxCloudCover ?? payload.max_cloud_cover ?? scene.cloud_cover ?? scene.cloudCover;
+    const cloudNumber = Number(cloudRaw);
+    const cloud = Number.isFinite(cloudNumber) ? `${Math.round(cloudNumber)}% cloud` : null;
+    const bbox = payload.bbox || scene.bbox;
+    const aoi = Array.isArray(bbox) && bbox.length === 4 ? 'bounded AOI overlay' : null;
+    const limitation = /copernicus|sentinel/i.test(source)
+        ? 'Preview rendered through backend credentials; not a raw scene download.'
+        : 'Public daily context imagery; not high-resolution tasking evidence.';
+    return { source, sceneId, acquisition, layer, cloud, aoi, limitation };
+}
+
+function ImageryEvidenceRows({
+    actions,
+    onApply,
+}: {
+    actions: AgentAction[];
+    onApply: (action: AgentAction) => void;
+}) {
+    const imageryActions = actions.filter(isImageryAction);
+    if (imageryActions.length === 0) return null;
+    return (
+        <div className="mt-2 border-t border-zinc-900 pt-2">
+            <div className="mb-1 flex items-center gap-1.5 text-[10px] uppercase font-mono text-zinc-500">
+                <Satellite size={12} />
+                <span>Imagery evidence</span>
+            </div>
+            <div className="space-y-1">
+                {imageryActions.map((action, idx) => {
+                    const details = imageryDetails(action);
+                    return (
+                        <div key={`${action.type}-${idx}`} className="grid gap-1 border-l border-cyan-900/60 pl-2 text-[11px] leading-relaxed text-zinc-400">
+                            <div className="flex items-start justify-between gap-2">
+                                <div className="min-w-0">
+                                    <div className="truncate text-zinc-200">{action.label || formatActionType(action.type)}</div>
+                                    <div className="text-zinc-500">{details.source} · {details.acquisition}</div>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => onApply(action)}
+                                    className="shrink-0 rounded border border-cyan-800/80 bg-cyan-950/30 px-2 py-1 text-[10px] font-mono text-cyan-200 hover:border-cyan-500"
+                                >
+                                    Show
+                                </button>
+                            </div>
+                            <div className="text-zinc-500">
+                                {details.layer}
+                                {details.cloud ? ` · ${details.cloud}` : ''}
+                                {details.aoi ? ` · ${details.aoi}` : ''}
+                            </div>
+                            {details.sceneId && <div className="truncate font-mono text-[10px] text-zinc-600">Scene: {details.sceneId}</div>}
+                            <div className="text-zinc-600">{details.limitation}</div>
+                        </div>
+                    );
+                })}
+            </div>
+        </div>
+    );
 }
 
 function paramsToPayload(params: URLSearchParams, skip: Set<string> = new Set()): Record<string, any> {
@@ -307,16 +651,36 @@ function parseOpenSpyLink(href: string, fallbackLabel?: string): AgentAction | n
         ...jsonPayload,
     };
 
-    if (target === 'entity' || target === 'object' || target === 'asset' || target === 'event') {
-        const id = payload.entity_id || payload.entityId || payload.id || payload.asset_id || payload.event_id;
-        if (!id) throw new Error(`ospy://${target} requires entity_id, id, asset_id or event_id`);
+    if (target === 'entity' || target === 'object') {
+        const id = payload.entity_id || payload.entityId || payload.id;
+        if (!id) throw new Error(`ospy://${target} requires entity_id or id`);
         return {
-            type: params.get('type') || 'object.open',
+            type: params.get('type') || (target === 'entity' ? 'entity.open' : 'object.open'),
             label: label || `Open ${payload.name || payload.display_name || id}`,
             payload: {
                 ...payload,
                 id,
                 entity_id: payload.entity_id || payload.entityId || id,
+                object_type: payload.object_type || payload.objectType || typeForLayer(payload.layer || payload.layer_id || target),
+                show_marker: payload.show_marker ?? true,
+                draw_marker: payload.draw_marker ?? true,
+            },
+        };
+    }
+
+    if (target === 'asset' || target === 'event') {
+        const id = target === 'asset'
+            ? (payload.asset_id || payload.assetId || payload.id)
+            : (payload.event_id || payload.eventId || payload.id);
+        if (!id) throw new Error(`ospy://${target} requires ${target}_id or id`);
+        return {
+            type: params.get('type') || (target === 'asset' ? 'asset.open' : 'event.open'),
+            label: label || `Open ${payload.name || payload.display_name || id}`,
+            payload: {
+                ...payload,
+                id,
+                ...(target === 'asset' ? { asset_id: payload.asset_id || payload.assetId || id } : {}),
+                ...(target === 'event' ? { event_id: payload.event_id || payload.eventId || id } : {}),
                 object_type: payload.object_type || payload.objectType || typeForLayer(payload.layer || payload.layer_id || target),
                 show_marker: payload.show_marker ?? true,
                 draw_marker: payload.draw_marker ?? true,
@@ -342,6 +706,17 @@ function parseOpenSpyLink(href: string, fallbackLabel?: string): AgentAction | n
         };
     }
 
+    if (target === 'imagery') {
+        const explicitType = params.get('type');
+        const type = explicitType
+            || (payload.before || payload.after ? 'imagery.compare' : payload.scene_id || payload.scene ? 'imagery.show_scene' : 'imagery.show_layer');
+        return {
+            type,
+            label: label || formatActionType(type),
+            payload,
+        };
+    }
+
     if (target === 'map' || target === 'camera') {
         return {
             type: params.get('type') || 'map.fly_to',
@@ -361,6 +736,18 @@ function parseOpenSpyLink(href: string, fallbackLabel?: string): AgentAction | n
     }
 
     throw new Error(`Unsupported OpenSpy link target: ${target}`);
+}
+
+function inspectOpenSpyLink(href: string, fallbackLabel?: string): { target: string; actionType: string } {
+    if (!href || !href.startsWith('ospy://')) return { target: '', actionType: '' };
+    try {
+        const url = new URL(href);
+        const target = (url.hostname || url.pathname.replace(/^\/+/, '')).toLowerCase();
+        const action = parseOpenSpyLink(href, fallbackLabel);
+        return { target, actionType: action?.type || '' };
+    } catch {
+        return { target: '', actionType: '' };
+    }
 }
 
 function childrenText(value: any): string {
@@ -405,11 +792,16 @@ function MarkdownBlock({
                 a: ({ href, children }) => {
                     const linkHref = String(href || '');
                     if (linkHref.startsWith('ospy://')) {
+                        const label = childrenText(children);
+                        const linkInfo = inspectOpenSpyLink(linkHref, label);
                         return (
                             <button
                                 type="button"
-                                onClick={() => onOpenSpyLinkClick?.(linkHref, childrenText(children))}
+                                onClick={() => onOpenSpyLinkClick?.(linkHref, label)}
                                 title="Open in OpenSpy"
+                                data-ospy-link={linkHref}
+                                data-ospy-target={linkInfo.target}
+                                data-action-type={linkInfo.actionType}
                                 className="inline-flex max-w-full items-baseline rounded border border-cyan-900/70 bg-cyan-950/20 px-1 py-0.5 align-baseline font-mono text-[11px] leading-none text-cyan-200 underline decoration-cyan-700/70 underline-offset-2 hover:border-cyan-500 hover:bg-cyan-950/50 hover:text-cyan-100"
                             >
                                 {children}
@@ -468,6 +860,8 @@ function ToolGroup({ parts }: { parts: AgentStreamPart[] }) {
         id: string;
         name?: string;
         toolUseId?: string;
+        providerToolName?: string;
+        command?: string;
         rawTypes: string[];
         input?: any;
         output?: any;
@@ -484,6 +878,8 @@ function ToolGroup({ parts }: { parts: AgentStreamPart[] }) {
                 id: part.id,
                 name: part.name,
                 toolUseId: part.toolUseId,
+                providerToolName: part.providerToolName,
+                command: part.command || shellCommandFromPayload(part.input),
                 rawTypes: [],
                 state: part.state,
                 isError: part.isError,
@@ -493,6 +889,8 @@ function ToolGroup({ parts }: { parts: AgentStreamPart[] }) {
         }
         if (part.name && (!row.name || isGenericToolName(row.name) || !isGenericToolName(part.name))) row.name = part.name;
         if (part.toolUseId) row.toolUseId = part.toolUseId;
+        if (part.providerToolName) row.providerToolName = part.providerToolName;
+        if (part.command || shellCommandFromPayload(part.input)) row.command = part.command || shellCommandFromPayload(part.input);
         if (part.rawType && !row.rawTypes.includes(part.rawType)) row.rawTypes.push(part.rawType);
         if (part.input !== undefined) row.input = part.input;
         if (part.output !== undefined) row.output = part.output;
@@ -504,6 +902,7 @@ function ToolGroup({ parts }: { parts: AgentStreamPart[] }) {
             {rows.map((part) => {
                 const input = formatToolPayload(part.input);
                 const output = formatToolPayload(part.output);
+                const title = displayToolName(part);
                 return (
                     <details
                         key={part.key}
@@ -518,10 +917,25 @@ function ToolGroup({ parts }: { parts: AgentStreamPart[] }) {
                         <summary className="flex cursor-pointer list-none items-center gap-1.5">
                             <Database size={12} className="shrink-0" />
                             <span className="min-w-0 flex-1 truncate">
-                                {part.state === 'started' ? 'Started' : part.isError ? 'Failed' : 'Completed'}: {cleanToolName(part.name)}
+                                {part.state === 'started' ? 'Started' : part.isError ? 'Failed' : 'Completed'}: {title}
                             </span>
                         </summary>
                         <div className="mt-1 space-y-1 border-t border-zinc-800/70 pt-1 text-[10px] text-zinc-400">
+                            {part.name && part.name !== title && (
+                                <div className="truncate">
+                                    <span className="text-zinc-500">normalized:</span> {part.name}
+                                </div>
+                            )}
+                            {part.providerToolName && part.providerToolName !== title && (
+                                <div className="truncate">
+                                    <span className="text-zinc-500">provider tool:</span> {part.providerToolName}
+                                </div>
+                            )}
+                            {part.command && (
+                                <div className="truncate">
+                                    <span className="text-zinc-500">command:</span> {part.command}
+                                </div>
+                            )}
                             {part.toolUseId && (
                                 <div className="truncate">
                                     <span className="text-zinc-500">id:</span> {part.toolUseId}
@@ -563,106 +977,11 @@ function streamPartsFromMetadata(metadata: Record<string, any> | undefined): Age
     return Array.isArray(metadata?.streamParts) ? metadata.streamParts : [];
 }
 
-function findActionBlockStart(content: string): number {
-    let first = -1;
-    for (const pattern of [...ACTION_BLOCK_RE_LIST, ...ACTION_BLOCK_START_RE_LIST]) {
-        const match = content.match(pattern);
-        if (match && typeof match.index === 'number') {
-            first = first === -1 ? match.index : Math.min(first, match.index);
-        }
-    }
-    return first;
-}
-
 function streamTextFromMetadata(metadata: Record<string, any> | undefined): string {
     return streamPartsFromMetadata(metadata)
         .filter((part) => part.type === 'text')
         .map((part) => part.text || '')
         .join('');
-}
-
-function stripActionBlocks(content: string): string {
-    let visible = String(content || '');
-    for (const pattern of ACTION_BLOCK_RE_LIST) {
-        visible = visible.replace(pattern, '');
-    }
-    const actionStart = findActionBlockStart(visible);
-    if (actionStart >= 0) {
-        visible = visible.slice(0, actionStart);
-    }
-    return visible.trim();
-}
-
-function trimTrailingText(parts: AgentStreamPart[]): AgentStreamPart[] {
-    const next = [...parts];
-    for (let idx = next.length - 1; idx >= 0; idx -= 1) {
-        const part = next[idx];
-        if (part.type !== 'text') continue;
-        const trimmed = (part.text || '').replace(/\s+$/g, '');
-        if (trimmed) {
-            next[idx] = { ...part, text: trimmed };
-            return next;
-        }
-        next.splice(idx, 1);
-    }
-    return next;
-}
-
-function finalizeStreamParts(
-    metadata: Record<string, any> | undefined,
-    finalContent: string | undefined,
-): Record<string, any> {
-    const parts = streamPartsFromMetadata(metadata);
-    if (parts.length === 0) return metadata || {};
-    const hasStreamedText = parts.some((part) => part.type === 'text' && String(part.text || '').trim());
-    if (finalContent && !hasStreamedText) {
-        return {
-            ...(metadata || {}),
-            streamParts: [
-                ...parts.filter((part) => part.type !== 'text'),
-                {
-                    id: `text:${Date.now()}:final`,
-                    type: 'text',
-                    text: finalContent,
-                } satisfies AgentStreamPart,
-            ],
-            actionsBlockHidden: true,
-        };
-    }
-    const rawText = parts
-        .filter((part) => part.type === 'text')
-        .map((part) => part.text || '')
-        .join('');
-    const actionStart = findActionBlockStart(rawText);
-    if (actionStart < 0) return metadata || {};
-
-    let remainingText = actionStart;
-    const visibleParts: AgentStreamPart[] = [];
-    for (const part of parts) {
-        if (part.type !== 'text') {
-            if (remainingText > 0) visibleParts.push(part);
-            continue;
-        }
-        const text = part.text || '';
-        if (remainingText <= 0) continue;
-        const visibleText = text.slice(0, remainingText);
-        remainingText = Math.max(0, remainingText - text.length);
-        if (visibleText) visibleParts.push({ ...part, text: visibleText });
-    }
-
-    const cleanedParts = trimTrailingText(visibleParts);
-    if (cleanedParts.length === 0 && finalContent) {
-        cleanedParts.push({
-            id: `text:${Date.now()}:final`,
-            type: 'text',
-            text: finalContent,
-        });
-    }
-    return {
-        ...(metadata || {}),
-        streamParts: cleanedParts,
-        actionsBlockHidden: true,
-    };
 }
 
 function appendTextPart(metadata: Record<string, any> | undefined, text: string): Record<string, any> {
@@ -712,6 +1031,8 @@ function appendEventPart(
                 name,
                 toolUseId: typeof payload.tool_use_id === 'string' ? payload.tool_use_id : undefined,
                 rawType: typeof payload.raw_type === 'string' ? payload.raw_type : undefined,
+                providerToolName: typeof payload.tool_name === 'string' ? payload.tool_name : undefined,
+                command: typeof payload.command === 'string' ? payload.command : undefined,
                 input: payload.input,
                 output: payload.output,
                 state,
@@ -1169,83 +1490,6 @@ async function animateTrackOverlay(
     });
 }
 
-function clearAgentImageryLayers(viewer: Cesium.Viewer): void {
-    const layers = viewer.imageryLayers;
-    if (!layers) return;
-    for (const layer of agentImageryLayers) {
-        try {
-            if (layers.contains?.(layer)) layers.remove(layer, true);
-        } catch {
-            // Best-effort cleanup; the Cesium layer collection may already own destruction.
-        }
-    }
-    agentImageryLayers = [];
-}
-
-function normalizeGibsLayerName(value: any): string {
-    const key = String(value || '').trim();
-    const normalized = key.toLowerCase().replace(/[\s-]+/g, '_');
-    const aliases: Record<string, string> = {
-        modis: 'MODIS_Terra_CorrectedReflectance_TrueColor',
-        modis_true_color: 'MODIS_Terra_CorrectedReflectance_TrueColor',
-        terra_true_color: 'MODIS_Terra_CorrectedReflectance_TrueColor',
-        true_color: 'MODIS_Terra_CorrectedReflectance_TrueColor',
-        aqua_true_color: 'MODIS_Aqua_CorrectedReflectance_TrueColor',
-        viirs: 'VIIRS_SNPP_CorrectedReflectance_TrueColor',
-        viirs_true_color: 'VIIRS_SNPP_CorrectedReflectance_TrueColor',
-        viirs_noaa20_true_color: 'VIIRS_NOAA20_CorrectedReflectance_TrueColor',
-        viirs_noaa21_true_color: 'VIIRS_NOAA21_CorrectedReflectance_TrueColor',
-    };
-    return aliases[normalized] || key || 'MODIS_Terra_CorrectedReflectance_TrueColor';
-}
-
-function showGibsImageryLayer(viewer: Cesium.Viewer, payload: Record<string, any>): void {
-    const scene = payload.scene && typeof payload.scene === 'object' ? payload.scene : null;
-    const layerName = normalizeGibsLayerName(
-        payload.gibsLayer
-        || payload.gibs_layer
-        || scene?.layer_id
-        || scene?.gibsLayer
-        || payload.layer
-        || payload.product
-        || scene?.requested_layer,
-    );
-    const date = new Date(payload.time || payload.at || payload.date || scene?.date || Date.now() - 86400_000);
-    if (Number.isNaN(date.getTime())) throw new Error('imagery.show_layer requires a valid date/time');
-    const time = date.toISOString().slice(0, 10);
-    const opacity = Number(payload.opacity ?? payload.alpha ?? 0.65);
-    const shouldReplace = payload.replace !== false && payload.mode !== 'compare';
-    if (shouldReplace) clearAgentImageryLayers(viewer);
-
-    const store = useTimelineStore.getState();
-    useTimelineStore.setState({
-        sources: { ...store.sources, satellite_imagery: true },
-        visibility: { ...store.visibility, satellite_imagery: true },
-    });
-
-    if (!viewer.imageryLayers?.addImageryProvider) {
-        store.setTileMode('modis');
-        return;
-    }
-
-    const provider = new Cesium.WebMapTileServiceImageryProvider({
-        url: `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/${layerName}/default/${time}/GoogleMapsCompatible_Level9/{TileMatrix}/{TileRow}/{TileCol}.jpg`,
-        layer: layerName,
-        style: 'default',
-        tileMatrixSetID: 'GoogleMapsCompatible_Level9',
-        tilingScheme: new Cesium.WebMercatorTilingScheme(),
-        tileWidth: 256,
-        tileHeight: 256,
-        maximumLevel: 9,
-        format: 'image/jpeg',
-        credit: `NASA GIBS ${layerName}`,
-    });
-    const imageryLayer = viewer.imageryLayers.addImageryProvider(provider);
-    imageryLayer.alpha = Number.isFinite(opacity) ? Math.max(0, Math.min(opacity, 1)) : 0.65;
-    agentImageryLayers.push(imageryLayer);
-    viewer.scene.requestRender();
-}
-
 function drawPointOrLabel(
     viewer: Cesium.Viewer,
     payload: Record<string, any>,
@@ -1524,8 +1768,9 @@ function presentationDelayForAction(action: AgentAction): number {
     const payload = normalizedActionPayload(action);
     const explicitDelay = Number(payload.presentation_ms ?? payload.presentationMs ?? payload.duration_ms ?? payload.durationMs);
     if (Number.isFinite(explicitDelay) && explicitDelay >= 0) return Math.min(explicitDelay, 120_000);
+    if (isActionBatch(action)) return 400;
     if (action.type === 'replay.play_window') return 3000;
-    if (action.type === 'map.fly_to' || action.type === 'object.open' || action.type === 'object.focus' || action.type === 'entity.open') return 1200;
+    if (action.type === 'map.fly_to' || action.type === 'object.open' || action.type === 'object.focus' || action.type === 'entity.open' || action.type === 'asset.open' || action.type === 'event.open') return 1200;
     if (action.type === 'entity.animate_track' || action.type === 'track.animate') return Number(payload.duration_ms ?? payload.durationMs ?? 3500) + 500;
     if (action.type.startsWith('selection.')) return 700;
     return 500;
@@ -1586,7 +1831,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
     const [selectedProvider, setSelectedProvider] = useState('claude_code');
     const eventSourcesRef = useRef<Map<string, EventSource>>(new Map());
     const runCursorsRef = useRef<Map<string, number>>(new Map());
-    const toolNamesByRunRef = useRef<Map<string, Map<string, string>>>(new Map());
+    const toolNamesByRunRef = useRef<Map<string, Map<string, { name?: string; providerToolName?: string; command?: string }>>>(new Map());
     const runningRunsRef = useRef<Record<string, string>>({});
     const activeSessionIdRef = useRef<string | null>(null);
 
@@ -1596,7 +1841,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
     );
     const messages = activeSessionId ? (messagesBySession[activeSessionId] || []) : [];
     const latestActions = activeSessionId ? (actionsBySession[activeSessionId] || []) : [];
-    const messageActionsVisible = messages.some((message) => Array.isArray(message.content_json?.actions) && message.content_json.actions.length > 0);
+    const messageActionsVisible = messages.some((message) => actionsFromMessage(message).length > 0);
     const runningRunId = activeSessionId ? (runningRunsBySession[activeSessionId] || null) : null;
 
     const availableProviders = providers.filter((provider) => provider.available);
@@ -1651,8 +1896,8 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         const persisted = normalizeMessages(json.data?.messages || []);
         const lastPersistedActions = [...persisted]
             .reverse()
-            .find((message) => Array.isArray(message.content_json?.actions) && message.content_json.actions.length > 0)
-            ?.content_json?.actions || [];
+            .map((message) => actionsFromMessage(message))
+            .find((actions) => actions.length > 0) || [];
         if (lastPersistedActions.length > 0) {
             setActionsBySession((current) => ({
                 ...current,
@@ -1797,44 +2042,44 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                 const text = String(payload.text || '');
                 if (!text) return;
                 updateRunMessage(sessionId, runId, (message) => {
-                    if (message.metadata?.actionsBlockHidden) return message;
                     const metadata = appendTextPart(message.metadata, text);
                     const rawText = streamTextFromMetadata(metadata);
-                    const actionStart = findActionBlockStart(rawText);
-                    if (actionStart >= 0) {
-                        const visibleContent = stripActionBlocks(rawText);
-                        return {
-                            ...message,
-                            content: visibleContent,
-                            metadata: finalizeStreamParts(metadata, visibleContent),
-                        };
+                    const parsed = extractActionContract(rawText);
+                    if (parsed.actions.length > 0) {
+                        setActionsBySession((current) => ({
+                            ...current,
+                            [sessionId]: parsed.actions,
+                        }));
                     }
                     return {
                         ...message,
-                        content: `${message.content}${text}`,
+                        content: rawText || `${message.content}${text}`,
+                        content_json: parsed.contentJson || message.content_json || null,
                         metadata,
                     };
                 });
             }
             if (row.event_type === 'message.completed') {
-                const contentJson = payload.content_json || payload.contentJson || null;
-                const actions = Array.isArray(contentJson?.actions) ? contentJson.actions : [];
+                const backendContentJson = payload.content_json || payload.contentJson || null;
+                const rawContent = String(payload.content || '');
+                const parsed = extractActionContract(rawContent);
+                const contentJson = parsed.contentJson || backendContentJson || null;
+                const actions = normalizeAgentActions(contentJson?.actions);
                 if (actions.length > 0) {
                     setActionsBySession((current) => ({
                         ...current,
                         [sessionId]: actions,
                     }));
                 }
-                const visibleContent = stripActionBlocks(payload.content || '');
                 updateRunMessage(sessionId, runId, (message) => ({
                     ...message,
-                    content: visibleContent || stripActionBlocks(message.content),
+                    content: rawContent || message.content,
                     content_json: contentJson || message.content_json || null,
-                    metadata: finalizeStreamParts(message.metadata, visibleContent || message.content),
+                    metadata: message.metadata,
                 }));
             }
             if (row.event_type === 'action.created') {
-                const actions = Array.isArray(payload.actions) ? payload.actions : [];
+                const actions = normalizeAgentActions(payload.actions);
                 if (actions.length > 0) {
                     setActionsBySession((current) => ({
                         ...current,
@@ -1853,12 +2098,23 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                 let eventPayload = payload;
                 const toolUseId = String(payload.tool_use_id || '');
                 if (row.event_type === 'tool.started' && toolUseId && payload.name) {
-                    const names = toolNamesByRunRef.current.get(runId) || new Map<string, string>();
-                    names.set(toolUseId, String(payload.name));
+                    const names = toolNamesByRunRef.current.get(runId) || new Map<string, { name?: string; providerToolName?: string; command?: string }>();
+                    names.set(toolUseId, {
+                        name: String(payload.name),
+                        providerToolName: typeof payload.tool_name === 'string' ? payload.tool_name : undefined,
+                        command: typeof payload.command === 'string' ? payload.command : shellCommandFromPayload(payload.input),
+                    });
                     toolNamesByRunRef.current.set(runId, names);
                 } else if (row.event_type === 'tool.completed' && toolUseId) {
-                    const name = toolNamesByRunRef.current.get(runId)?.get(toolUseId);
-                    if (name) eventPayload = { ...payload, name };
+                    const started = toolNamesByRunRef.current.get(runId)?.get(toolUseId);
+                    if (started) {
+                        eventPayload = {
+                            ...payload,
+                            name: started.name || payload.name,
+                            tool_name: started.providerToolName || payload.tool_name,
+                            command: started.command || payload.command,
+                        };
+                    }
                 }
                 const label = `${row.event_type === 'tool.started' ? 'started' : 'completed'} ${String(eventPayload.name || eventPayload.raw_type || 'tool')}`;
                 updateRunMessage(sessionId, runId, (message) => ({
@@ -2036,6 +2292,18 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         const payload = normalizedActionPayload(action);
         const store = useTimelineStore.getState();
 
+        if (isActionBatch(action)) {
+            const nested = nestedActionsFor(action);
+            if (nested.length === 0) throw new Error(`${action.type} requires a non-empty actions array`);
+            const maxActions = Number(payload.max_actions ?? payload.maxActions ?? 100);
+            const bounded = nested.slice(0, Number.isFinite(maxActions) && maxActions > 0 ? Math.min(maxActions, 250) : 100);
+            for (const nestedAction of bounded) {
+                await applyAction(nestedAction, sessionId);
+                await sleep(presentationDelayForAction(nestedAction));
+            }
+            return;
+        }
+
         const postJson = async (path: string, body: Record<string, any>) => {
             const response = await fetch(`${API_URL}${path}`, {
                 method: 'POST',
@@ -2113,9 +2381,9 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
             return;
         }
 
-        if (action.type === 'object.open' || action.type === 'object.focus' || action.type === 'entity.open') {
-            const entityId = String(payload.entity_id || payload.entityId || payload.id || '').trim();
-            if (!entityId) throw new Error(`${action.type} requires entity_id`);
+        if (action.type === 'object.open' || action.type === 'object.focus' || action.type === 'entity.open' || action.type === 'asset.open' || action.type === 'event.open') {
+            const entityId = String(payload.entity_id || payload.entityId || payload.asset_id || payload.assetId || payload.event_id || payload.eventId || payload.id || '').trim();
+            if (!entityId) throw new Error(`${action.type} requires an object, entity, asset or event id`);
             const at = String(payload.at || payload.time || '');
             const shouldResumePlayback = shouldResumeHistoricalPlaybackAfterViewChange(useTimelineStore.getState());
             let changedReplayTime = false;
@@ -2139,12 +2407,16 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
             }
             const resolvedPoint = await resolveEntityPoint(payload, entityId);
             const layer = payload.layer || payload.layer_id || payload.type;
+            const objectType = payload.object_type || payload.objectType
+                || (action.type === 'asset.open' ? 'Asset' : action.type === 'event.open' ? 'Event' : typeForLayer(layer));
             store.setSelectedEntityId(entityId, {
                 id: entityId,
                 name: payload.name || payload.display_name || entityId,
-                type: payload.object_type || payload.objectType || typeForLayer(layer),
+                type: objectType,
                 layer,
                 source: payload.source || payload.source_id,
+                assetId: payload.asset_id || payload.assetId,
+                eventId: payload.event_id || payload.eventId,
                 lat: resolvedPoint?.lat,
                 lng: resolvedPoint?.lng,
                 alt: resolvedPoint?.alt,
@@ -2211,7 +2483,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
             for (const [id, meta] of Array.from(replayMetaMap.entries())) {
                 if (id.startsWith(AGENT_ENTITY_PREFIX) || meta.extra?.agentOverlay) replayMetaMap.delete(id);
             }
-            clearAgentImageryLayers(viewer);
+            clearOpenSpyImageryLayers(viewer);
             viewer.scene.requestRender();
             return;
         }
@@ -2257,20 +2529,12 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         }
 
         if (action.type === 'imagery.show_layer' || action.type === 'imagery.show_scene' || action.type === 'imagery.compare') {
-            const source = String(payload.source || payload.provider || 'nasa_gibs').toLowerCase();
-            if (!/(gibs|nasa|worldview)/.test(source)) {
-                throw new Error(`${action.type} currently supports NASA GIBS/Worldview imagery only`);
-            }
             const viewer = getViewer();
             if (!viewer) throw new Error('Cesium viewer is not ready');
             if (action.type === 'imagery.compare') {
-                const before = payload.before && typeof payload.before === 'object' ? payload.before : null;
-                const after = payload.after && typeof payload.after === 'object' ? payload.after : null;
-                if (before) showGibsImageryLayer(viewer, { ...before, replace: true, opacity: before.opacity ?? 0.45 });
-                if (after) showGibsImageryLayer(viewer, { ...after, replace: false, mode: 'compare', opacity: after.opacity ?? payload.opacity ?? 0.65 });
-                if (!before && !after) showGibsImageryLayer(viewer, { ...payload, mode: 'compare' });
+                showOpenSpyImageryCompare(viewer, payload);
             } else {
-                showGibsImageryLayer(viewer, payload);
+                showOpenSpyImageryLayer(viewer, payload);
             }
             return;
         }
@@ -2278,7 +2542,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         if (action.type === 'imagery.clear') {
             const viewer = getViewer();
             if (!viewer) throw new Error('Cesium viewer is not ready');
-            clearAgentImageryLayers(viewer);
+            clearOpenSpyImageryLayers(viewer);
             viewer.scene.requestRender();
             return;
         }
@@ -2404,7 +2668,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                 try {
                     await applyAction(action, sessionId);
                     if (action.type === 'replay.play_window') replayWindowRequested = true;
-                    if (replayWindowRequested && (action.type === 'replay.seek' || action.type === 'object.open' || action.type === 'object.focus' || action.type === 'entity.open')) {
+                    if (replayWindowRequested && (action.type === 'replay.seek' || action.type === 'object.open' || action.type === 'object.focus' || action.type === 'entity.open' || action.type === 'asset.open' || action.type === 'event.open')) {
                         startHistoricalPlaybackWhenReady();
                     }
                 } catch (err) {
@@ -2422,6 +2686,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                 messageId,
                 status: actionErrors.length > 0 ? 'partial' : 'completed',
                 skippedSteps: actionErrors.length,
+                skippedErrors: actionErrors,
             });
         } catch (err) {
             publishPresentationState({
@@ -2463,6 +2728,8 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                 {sessions.map((session) => (
                     <button
                         key={session.agent_session_id}
+                        data-agent-session-id={session.agent_session_id}
+                        data-agent-session-active={session.agent_session_id === activeSessionId ? 'true' : 'false'}
                         onClick={() => setActiveSessionId(session.agent_session_id)}
                         className={`shrink-0 px-2 py-1 rounded border text-[10px] font-mono ${
                             session.agent_session_id === activeSessionId
@@ -2508,7 +2775,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                         Ask an OSINT question. The agent can inspect local data, create replay actions, and return map buttons.
                     </div>
                 ) : messages.map((message) => {
-                    const actions = Array.isArray(message.content_json?.actions) ? message.content_json.actions : [];
+                    const actions = actionsFromMessage(message);
                     const streamParts = displayPartsForMessage(message, runningRunId);
                     const streamGroups = groupStreamParts(streamParts);
                     const presentationKey = activeSessionId ? `${activeSessionId}:${message.agent_message_id}` : '';
@@ -2540,6 +2807,12 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                                     {message.content ? <MarkdownBlock text={message.content} onOpenSpyLinkClick={(href, label) => void openOpenSpyLink(href, label)} /> : (message.role === 'assistant' && runningRunId ? <Loader2 size={14} className="animate-spin text-cyan-300" /> : '')}
                                 </div>
                             )}
+                            <ImageryEvidenceRows
+                                actions={actions}
+                                onApply={(action) => void applyAction(action, activeSessionId).catch((err) => {
+                                    setError(err instanceof Error ? err.message : 'Imagery action failed');
+                                })}
+                            />
                             {actions.length > 0 && activeSessionId && (
                                 <div className="mt-3 border-t border-zinc-900 pt-2">
                                     <button
@@ -2582,6 +2855,12 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                             latest actions
                         </div>
                         <div className="space-y-2">
+                            <ImageryEvidenceRows
+                                actions={latestActions}
+                                onApply={(action) => void applyAction(action, activeSessionId).catch((err) => {
+                                    setError(err instanceof Error ? err.message : 'Imagery action failed');
+                                })}
+                            />
                             {activeSessionId && (
                                 <button
                                     onClick={() => void replayPresentation(activeSessionId, 'latest-actions', latestActions)}

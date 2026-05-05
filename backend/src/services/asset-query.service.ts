@@ -10,6 +10,7 @@ export type AssetQueryFilters = {
     to?: string;
     bbox?: [number, number, number, number];
     limit?: number;
+    offset?: number;
 };
 
 type LatestAssetRow = {
@@ -118,7 +119,11 @@ export class AssetQueryService {
         if (!this.database.isReady()) return [];
 
         const { clauses, params } = this.buildLatestWhere(filters, 'a');
-        params.push(clampLimit(filters.limit));
+        const limit = clampLimit(filters.limit);
+        const offset = Math.max(0, Math.trunc(Number(filters.offset || 0)));
+        params.push(limit, offset);
+        const limitParam = params.length - 1;
+        const offsetParam = params.length;
         const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
         const result = await this.database.query<LatestAssetRow>(
@@ -141,7 +146,7 @@ export class AssetQueryService {
                 FROM core.assets a
                 ${whereSql}
                 ORDER BY COALESCE(a.last_observed_at, a.updated_at, a.created_at) DESC NULLS LAST, a.updated_at DESC
-                LIMIT $${params.length}
+                LIMIT $${limitParam} OFFSET $${offsetParam}
             `,
             params,
         );
@@ -153,7 +158,11 @@ export class AssetQueryService {
         if (!this.database.isReady()) return [];
 
         const { clauses, params } = this.buildSnapshotWhere(filters, 's');
-        params.push(clampLimit(filters.limit, 500, 10000));
+        const limit = clampLimit(filters.limit, 500, 10000);
+        const offset = Math.max(0, Math.trunc(Number(filters.offset || 0)));
+        params.push(limit, offset);
+        const limitParam = params.length - 1;
+        const offsetParam = params.length;
         const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
         const result = await this.database.query<AssetSnapshotRow>(
@@ -176,7 +185,7 @@ export class AssetQueryService {
                 FROM core.asset_snapshots s
                 ${whereSql}
                 ORDER BY COALESCE(s.observed_at, s.created_at) DESC NULLS LAST, s.created_at DESC
-                LIMIT $${params.length}
+                LIMIT $${limitParam} OFFSET $${offsetParam}
             `,
             params,
         );

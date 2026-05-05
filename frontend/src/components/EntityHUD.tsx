@@ -18,6 +18,8 @@ import { wifiMetaMap } from '../cesium/useWifiLayer';
 import { satelliteMetaMap } from '../cesium/useSatellitesLayer';
 import { replayMetaMap } from '../cesium/useReplayOverlay';
 import { replayRenderBatchMetaMap } from '../cesium/replayRenderBatch';
+import { conflictMetaMap } from '../cesium/useConflictsLayer';
+import { gfwMetaMap } from '../cesium/useGFWLayer';
 
 const LIVE_DETAILS_LAYER_BY_TYPE: Record<string, string> = {
     Aircraft: 'aircraft',
@@ -533,6 +535,67 @@ export default function EntityHUD({ avoidRightPx = 0 }: EntityHUDProps) {
                         motionConfidence: details?.motionConfidence ?? satMeta.motionConfidence,
                         motionAgeSec: details?.motionAgeSec ?? satMeta.motionAgeSec,
                         motionValiditySec: details?.motionValiditySec ?? satMeta.motionValiditySec,
+                    },
+                });
+                requestAnimationFrame(update);
+                return;
+            }
+
+            const conflictMeta = conflictMetaMap.get(selectedEntityId);
+            if (conflictMeta) {
+                const details = liveDetails?.layerId === 'conflict' ? liveDetails : null;
+                const eventDetails = details?.properties || {};
+                const pos = Cesium.Cartesian3.fromDegrees(conflictMeta.lng, conflictMeta.lat, 50);
+                const canvasPos = Cesium.SceneTransforms.worldToWindowCoordinates(cesViewer.scene, pos);
+                setScreenPos(canvasPos ? { x: canvasPos.x, y: canvasPos.y } : null);
+                setLive({
+                    lat: conflictMeta.lat,
+                    lng: conflictMeta.lng,
+                    alt: 50,
+                    layer: 'Conflict',
+                    subtype: conflictMeta.subtype,
+                    source: conflictMeta.source,
+                    description: details?.name || conflictMeta.eventType,
+                    extra: {
+                        event_type: eventDetails.eventType ?? conflictMeta.eventType,
+                        sub_event_type: eventDetails.subEventType ?? conflictMeta.subEventType,
+                        fatalities: eventDetails.fatalities ?? conflictMeta.fatalities,
+                        country: eventDetails.country,
+                        actor1: eventDetails.actor1,
+                        actor2: eventDetails.actor2,
+                        event_date: details?.observedAt?.slice?.(0, 10),
+                        notes: eventDetails.notes ?? eventDetails.sourceUrl,
+                    },
+                });
+                requestAnimationFrame(update);
+                return;
+            }
+
+            const gfwMeta = gfwMetaMap.get(selectedEntityId);
+            if (gfwMeta) {
+                const details = liveDetails?.layerId === 'gfw' ? liveDetails : null;
+                const eventDetails = details?.properties || {};
+                const pos = Cesium.Cartesian3.fromDegrees(gfwMeta.lng, gfwMeta.lat, 0);
+                const canvasPos = Cesium.SceneTransforms.worldToWindowCoordinates(cesViewer.scene, pos);
+                setScreenPos(canvasPos ? { x: canvasPos.x, y: canvasPos.y } : null);
+                setLive({
+                    lat: gfwMeta.lat,
+                    lng: gfwMeta.lng,
+                    alt: 0,
+                    layer: 'GFW',
+                    subtype: gfwMeta.subtype,
+                    source: gfwMeta.source,
+                    description: 'AIS signal gap',
+                    extra: {
+                        confidence: eventDetails.confidence,
+                        duration: eventDetails.duration,
+                        vesselOwner: eventDetails.vesselOwner,
+                        vesselMmsi: eventDetails.vesselMmsi,
+                        vesselType: eventDetails.vesselType,
+                        vesselName: eventDetails.vesselName,
+                        flagState: eventDetails.flagState,
+                        start: details?.observedAt ?? gfwMeta.start,
+                        end: eventDetails.end ?? gfwMeta.end,
                     },
                 });
                 requestAnimationFrame(update);

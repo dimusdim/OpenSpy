@@ -17,6 +17,8 @@ const INTENSITY_OUTLINE: Record<string, Cesium.Color> = {
     medium: Cesium.Color.ORANGE.withAlpha(0.6),
     low:    Cesium.Color.YELLOW.withAlpha(0.4),
 };
+const JAMMING_FETCH_TIMEOUT_MS = 60_000;
+const JAMMING_RETRY_DELAYS_MS = [2_000, 8_000, 20_000, 45_000];
 
 interface JammingZone {
     id: string;
@@ -53,14 +55,15 @@ export function useJammingLayer(viewer: Cesium.Viewer | null) {
     useEffect(() => {
         if (!viewer || !isSourceOn || !secondaryReleased) return;
         let active = true;
+        let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
-        const fetchJamming = async () => {
+        const fetchJamming = async (attempt = 0) => {
             const ds = dsRef.current;
             if (!ds) return;
             try {
                 const { data: zones } = await axios.get<JammingZone[]>(
                     `${API_URL}/api/jamming`,
-                    { timeout: 30000 }
+                    { timeout: JAMMING_FETCH_TIMEOUT_MS }
                 );
                 if (!active) return;
 
@@ -128,11 +131,27 @@ export function useJammingLayer(viewer: Cesium.Viewer | null) {
 
                 console.log(`[Jamming] Rendered ${zones.length} interference zones (${counts.high || 0} high, ${counts.medium || 0} medium, ${counts.low || 0} low)`);
             } catch (err: any) {
-                console.warn('[Jamming] Failed to fetch:', err.message);
+                if (!active) return;
+                const delayMs = JAMMING_RETRY_DELAYS_MS[attempt];
+                if (delayMs != null) {
+                    useTimelineStore.getState().setStreamMetric('jamming', {
+                        status: 'connecting',
+                        source: 'GPSJam.org',
+                        note: `Fetch retry ${attempt + 1}/${JAMMING_RETRY_DELAYS_MS.length} after ${err?.message || 'request failure'}`,
+                    });
+                    retryTimer = setTimeout(() => {
+                        retryTimer = null;
+                        void fetchJamming(attempt + 1);
+                    }, delayMs);
+                    return;
+                }
+
+                console.warn('[Jamming] Failed to fetch after retries:', err?.message || err);
                 useTimelineStore.getState().setStreamMetric('jamming', {
                     count: 0,
                     status: 'error',
                     source: 'GPSJam.org',
+                    note: err?.message || 'request failure',
                 });
             }
         };
@@ -143,6 +162,7 @@ export function useJammingLayer(viewer: Cesium.Viewer | null) {
 
         return () => {
             active = false;
+            if (retryTimer) clearTimeout(retryTimer);
             clearInterval(interval);
             // Keep datasource — Effect 1 owns its lifetime.
         };

@@ -461,24 +461,22 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
         return instanceId;
       };
 
-      // Both endpoints in parallel. The main endpoint takes a
-      // south,west,north,east bbox; the power endpoint expects
-      // west,south,east,north (historic Tile convention the backend
-      // kept for itself).
+      // Both endpoints use the OpenSpy bbox contract:
+      // west,south,east,north.
       const tMain0 = performance.now();
       const tPower0 = performance.now();
       const mainReq = mainAlreadyLoaded
         ? Promise.resolve<any>(null)
         : axios.get(
-            `${API_URL}/api/infrastructure?bbox=${south},${west},${north},${east}`,
+            `${API_URL}/api/infrastructure?bbox=${west},${south},${east},${north}`,
             { timeout: INFRA_FETCH_TIMEOUT_MS }
-          ).then((r) => { perfLog('infra.main_fetch', { ms: Math.round(performance.now() - tMain0), records: (r.data?.data || r.data || []).length, timedOut: r.data?.overpassTimedOut === true, bbox: [south, west, north, east] }); return r; });
+          ).then((r) => { perfLog('infra.main_fetch', { ms: Math.round(performance.now() - tMain0), records: (r.data?.data || r.data || []).length, timedOut: r.data?.overpassTimedOut === true, bbox: [west, south, east, north] }); return r; });
       const powerReq = powerAlreadyLoaded
         ? Promise.resolve<any>(null)
         : axios.get(
             `${API_URL}/api/power-infra?bbox=${west},${south},${east},${north}`,
             { timeout: INFRA_FETCH_TIMEOUT_MS }
-          ).then((r) => { perfLog('infra.power_fetch', { ms: Math.round(performance.now() - tPower0), records: (r.data?.data || r.data || []).length, timedOut: r.data?.overpassTimedOut === true, bbox: [south, west, north, east] }); return r; });
+          ).then((r) => { perfLog('infra.power_fetch', { ms: Math.round(performance.now() - tPower0), records: (r.data?.data || r.data || []).length, timedOut: r.data?.overpassTimedOut === true, bbox: [west, south, east, north] }); return r; });
 
       // --- Source 1: /api/infrastructure (plants/refineries/military) ----
       const mainResult = await Promise.allSettled([mainReq]).then((results) => results[0]);

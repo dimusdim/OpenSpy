@@ -49,8 +49,12 @@ export function pipelineStripPartId(instanceId: string): string {
 const TILE_DEG = 2;
 const MAX_LOADED_TILES = 80;
 const MAX_TILES_PER_VIEWPORT = 20;
-const FETCH_CONCURRENCY = 4;
-const PIPELINE_FETCH_TIMEOUT_MS = 20_000;
+// Overture DuckDB reads are serialized server-side. Extra parallel browser
+// requests do not make the local cache faster; they only queue behind
+// infrastructure/power-line viewport reads and can hit the HTTP timeout during
+// full-context startup. Keep this deliberately narrow and let tiles stream in.
+const FETCH_CONCURRENCY = 2;
+const PIPELINE_FETCH_TIMEOUT_MS = 70_000;
 const PIPELINE_ALTITUDE_CUTOFF_KM = 200;
 
 const PIPELINE_COLORS: Record<PipelineSubstance, Cesium.Color> = {
@@ -310,7 +314,7 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
             try {
                 const t0 = performance.now();
                 const res = await axios.get(
-                    `${API_URL}/api/pipelines?bbox=${south},${west},${north},${east}`,
+                    `${API_URL}/api/pipelines?bbox=${west},${south},${east},${north}`,
                     { timeout: PIPELINE_FETCH_TIMEOUT_MS },
                 );
                 const body = res.data ?? {};
@@ -318,7 +322,7 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
                 perfLog('pipelines.fetch', {
                     ms: Math.round(performance.now() - t0),
                     records: records.length,
-                    bbox: [south, west, north, east],
+                    bbox: [west, south, east, north],
                     source: body.source || 'overture',
                 });
                 if (v.isDestroyed() || myGen !== genRef.current) return;

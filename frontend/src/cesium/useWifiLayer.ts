@@ -279,9 +279,9 @@ export function useWifiLayer(viewer: Cesium.Viewer | null) {
         if ((!allowRefresh && tilesRef.current.has(key)) || inFlightCellsRef.current.has(key)) return;
         inFlightCellsRef.current.add(key);
         try {
-            setWifiDebug({ phase: 'fetch-start', bbox: `${south},${west},${north},${east}`, allowRefresh });
+            setWifiDebug({ phase: 'fetch-start', bbox: `${west},${south},${east},${north}`, allowRefresh });
             const response = await axios.get(`${API_URL}/api/wifi`, {
-                params: { bbox: `${south},${west},${north},${east}` },
+                params: { bbox: `${west},${south},${east},${north}` },
                 timeout: WIFI_FETCH_TIMEOUT_MS,
             });
             if (generation !== genRef.current || viewer.isDestroyed() || !activeRef.current) return;
@@ -315,7 +315,7 @@ export function useWifiLayer(viewer: Cesium.Viewer | null) {
             const nextIdSet = new Set(nextIds);
             setWifiDebug({
                 phase: 'fetch-success',
-                bbox: `${south},${west},${north},${east}`,
+                bbox: `${west},${south},${east},${north}`,
                 records: prepared.length,
                 completeness: response.data?.completeness || null,
             });
@@ -380,7 +380,7 @@ export function useWifiLayer(viewer: Cesium.Viewer | null) {
                 }
                 setWifiDebug({
                     phase: appendedCount > 0 ? 'fetch-appended' : 'fetch-unchanged',
-                    bbox: `${south},${west},${north},${east}`,
+                    bbox: `${west},${south},${east},${north}`,
                     records: prepared.length,
                     completeness: response.data?.completeness || null,
                 });

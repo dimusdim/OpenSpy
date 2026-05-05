@@ -3160,7 +3160,16 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                         }
                         return applied;
                     }));
-                    if (isCancelled() || results.some((r) => !r)) return;
+                    if (isCancelled() || results.some((r) => !r)) {
+                        if (!isCancelled()) setReplayHydrating(false);
+                        perfLog('replay.hydration_task', {
+                            kind: 'primary',
+                            phase: 'cancel',
+                            ms: Math.round(performance.now() - seekStartedAt),
+                            abortedIn: 'interactive',
+                        });
+                        return;
+                    }
                     perfLog('replay.all_primary_visible', { ms: Math.round(performance.now() - seekStartedAt) });
                 }
                 if (isCancelled()) return;
@@ -3272,7 +3281,17 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                         perfLog('replay.eager_layer', { layer: layerId, ms: Math.round(performance.now() - t0), ok });
                         return ok;
                     }));
-                    if (isCancelled() || eagerResults.some((r) => !r)) return;
+                    if (isCancelled() || eagerResults.some((r) => !r)) {
+                        if (!isCancelled()) setReplayHydrating(false);
+                        perfLog('replay.hydration_task', {
+                            kind: 'deferred',
+                            phase: 'cancel',
+                            taskId: deferredTaskId,
+                            ms: Math.round(performance.now() - deferredStart),
+                            abortedIn: 'eager',
+                        });
+                        return;
+                    }
                     perfLog('replay.eager_done', { ms: Math.round(performance.now() - eagerStart) });
                     const parallelHydrationLayers = backgroundDeferredReplayLayers.filter((layerId) => shouldRunReplayHydrationInParallel(layerId));
                     let parallelHydrationPromise: Promise<boolean[]> | null = null;

@@ -231,6 +231,13 @@ function aisVesselWalDir(): string {
         : path.resolve(process.cwd(), 'var', 'ais-vessel-position-buffer');
 }
 
+const DEFAULT_AIS_VESSEL_DB_FLUSH_DELAY_MS = 10_000;
+
+function positiveIntFromEnv(name: string, fallback: number): number {
+    const value = Number(process.env[name]);
+    return Number.isFinite(value) && value > 0 ? Math.trunc(value) : fallback;
+}
+
 function normalizeVesselWalRecord(value: any): VesselPositionRecord | null {
     const record = value?.record && typeof value.record === 'object' ? value.record : value;
     if (!record || typeof record !== 'object') return null;
@@ -358,6 +365,7 @@ function latLngPathToGeoJsonRing(points: Array<[number, number]>): Array<[number
 export class SourcePersistenceService {
     private readonly vesselPositionBuffer = new Map<string, VesselPositionRecord>();
     private readonly vesselPositionWalFile: string;
+    private readonly vesselDbFlushDelayMs = positiveIntFromEnv('AIS_VESSEL_DB_FLUSH_DELAY_MS', DEFAULT_AIS_VESSEL_DB_FLUSH_DELAY_MS);
     private vesselFlushTimer: NodeJS.Timeout | null = null;
     private vesselFlushInFlight: Promise<void> | null = null;
     private vesselWalRecoveredCount = 0;
@@ -366,6 +374,7 @@ export class SourcePersistenceService {
     constructor(private readonly database: DatabaseService) {
         this.vesselPositionWalFile = path.join(aisVesselWalDir(), 'pending-vessel-positions.jsonl');
         this.loadVesselPositionWal();
+        this.registerVesselBeforeExitFlush();
     }
 
     getVesselDurabilityStatus(): {
@@ -451,6 +460,15 @@ export class SourcePersistenceService {
             this.vesselWalLastError = error?.message || String(error);
             throw new Error(`Failed to rewrite AIS vessel WAL ${this.vesselPositionWalFile}: ${this.vesselWalLastError}`);
         }
+    }
+
+    private registerVesselBeforeExitFlush(): void {
+        process.once('beforeExit', () => {
+            if (!this.database.isReady() || this.vesselPositionBuffer.size === 0) return;
+            void this.flushPendingVesselPositions().catch((error: any) => {
+                console.warn('[AISStream] failed to flush pending vessel positions before exit:', error?.message || error);
+            });
+        });
     }
 
     private buildIngestRunId(layerId: string, sourceId: string | null | undefined, metadata: Record<string, any> | undefined): string {
@@ -1172,7 +1190,25 @@ export class SourcePersistenceService {
         );
 
         for (const row of result?.rows || []) {
-            hashes.set(row.entity_id, row.state_hash || '');
+            if (row.state_hash) hashes.set(row.entity_id, row.state_hash);
+        }
+
+        const missingEntityIds = uniqueEntityIds.filter((entityId) => !hashes.has(entityId));
+        if (missingEntityIds.length > 0) {
+            const fallback = await this.database.query<{ entity_id: string; state_hash: string | null }>(
+                `
+                    SELECT DISTINCT ON (entity_id)
+                        entity_id,
+                        properties->>'_state_hash' AS state_hash
+                    FROM core.position_fixes
+                    WHERE entity_id = ANY($1::text[])
+                    ORDER BY entity_id, observed_at DESC, created_at DESC
+                `,
+                [missingEntityIds],
+            );
+            for (const row of fallback?.rows || []) {
+                if (row.state_hash) hashes.set(row.entity_id, row.state_hash);
+            }
         }
 
         return hashes;
@@ -1185,12 +1221,11 @@ export class SourcePersistenceService {
 
         const result = await this.database.query<{ entity_id: string; state_hash: string | null }>(
             `
-                SELECT DISTINCT ON (entity_id)
+                SELECT
                     entity_id,
                     properties->>'_state_hash' AS state_hash
-                FROM core.position_fixes
+                FROM app.entity_live_states
                 WHERE entity_id = ANY($1::text[])
-                ORDER BY entity_id, observed_at DESC, created_at DESC
             `,
             [uniqueEntityIds],
         );
@@ -1420,6 +1455,7 @@ export class SourcePersistenceService {
                     speed_mps = EXCLUDED.speed_mps,
                     properties = EXCLUDED.properties,
                     updated_at = now()
+                WHERE app.entity_live_states.observed_at <= EXCLUDED.observed_at
             `,
             [JSON.stringify(rows)],
         );
@@ -2034,7 +2070,7 @@ export class SourcePersistenceService {
         this.vesselFlushTimer = setTimeout(() => {
             this.vesselFlushTimer = null;
             void this.flushPendingVesselPositions();
-        }, 2000);
+        }, this.vesselDbFlushDelayMs);
     }
 
     async flushPendingVesselPositions(): Promise<void> {

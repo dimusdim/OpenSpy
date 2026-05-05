@@ -10,6 +10,7 @@ export type EntityQueryFilters = {
     to?: string;
     bbox?: [number, number, number, number];
     limit?: number;
+    offset?: number;
 };
 
 export type LiveStatusFilters = {
@@ -122,7 +123,11 @@ export class EntityQueryService {
         if (!this.database.isReady()) return [];
 
         const { clauses, params } = this.buildLatestWhere(filters);
-        params.push(clampLimit(filters.limit));
+        const limit = clampLimit(filters.limit);
+        const offset = Math.max(0, Math.trunc(Number(filters.offset || 0)));
+        params.push(limit, offset);
+        const limitParam = params.length - 1;
+        const offsetParam = params.length;
         const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
         const result = await this.database.query<LatestEntityRow>(
@@ -150,7 +155,7 @@ export class EntityQueryService {
                 LEFT JOIN app.entity_live_states p ON p.entity_id = e.entity_id
                 ${whereSql}
                 ORDER BY COALESCE(p.observed_at, e.last_observed_at, e.updated_at) DESC NULLS LAST, e.updated_at DESC
-                LIMIT $${params.length}
+                LIMIT $${limitParam} OFFSET $${offsetParam}
             `,
             params,
         );

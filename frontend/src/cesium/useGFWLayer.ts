@@ -7,24 +7,42 @@ import { API_URL } from '../lib/config';
 import { GFW_ICON } from '../icons/map-icons';
 import { safeCartesianFromDegrees } from './position-utils';
 
+export interface GfwMeta {
+    id: string;
+    lat: number;
+    lng: number;
+    subtype: string;
+    start?: string;
+    end?: string;
+    source: string;
+}
+
+export const gfwMetaMap = new Map<string, GfwMeta>();
+
 export function useGFWLayer(viewer: Cesium.Viewer | null) {
     const isSourceOn = useTimelineStore(s => s.sources.gfw);
     const isVisible = useTimelineStore(s => s.visibility.gfw);
     const mode = useTimelineStore(s => s.mode);
     const secondaryReleased = useSecondaryLoadGate();
-    const dsRef = useRef<Cesium.CustomDataSource | null>(null);
+    const collectionRef = useRef<Cesium.BillboardCollection | null>(null);
 
     // ---- Effect 1: scene lifetime ----
     useEffect(() => {
         if (!viewer) return;
-        const ds = new Cesium.CustomDataSource('gfw-events');
-        viewer.dataSources.add(ds);
-        dsRef.current = ds;
+        const billboards = new Cesium.BillboardCollection({
+            scene: viewer.scene,
+            blendOption: Cesium.BlendOption.TRANSLUCENT,
+        });
+        viewer.scene.primitives.add(billboards);
+        collectionRef.current = billboards;
         return () => {
-            if (viewer && !viewer.isDestroyed()) {
-                viewer.dataSources.remove(ds);
+            if (collectionRef.current === billboards) {
+                gfwMetaMap.clear();
+                collectionRef.current = null;
             }
-            dsRef.current = null;
+            if (viewer && !viewer.isDestroyed()) {
+                viewer.scene.primitives.remove(billboards);
+            }
         };
     }, [viewer]);
 
@@ -34,8 +52,8 @@ export function useGFWLayer(viewer: Cesium.Viewer | null) {
         let active = true;
 
         async function fetchGFWEvents() {
-            const ds = dsRef.current;
-            if (!ds) return;
+            const billboards = collectionRef.current;
+            if (!billboards) return;
             try {
                 const res = await axios.get(`${API_URL}/api/gfw-events`);
                 if (!active) return;
@@ -49,34 +67,29 @@ export function useGFWLayer(viewer: Cesium.Viewer | null) {
                     status: 'streaming',
                 });
 
-                ds.entities.removeAll();
+                billboards.removeAll();
+                gfwMetaMap.clear();
 
                 for (const ev of events) {
                     if (ev.lat == null || ev.lng == null || isNaN(ev.lat) || isNaN(ev.lng)) continue;
                     const position = safeCartesianFromDegrees(ev.lng, ev.lat, 0);
                     if (!position) continue;
-                    ds.entities.add({
-                        id: ev.id,
-                        name: 'GFW AIS signal gap',
+                    const id = String(ev.id);
+                    billboards.add({
+                        id,
                         position,
-                        properties: new Cesium.PropertyBag({
-                            layer: 'GFW',
-                            subtype: ev.type || 'gap',
-                            start: ev.start,
-                            end: ev.end,
-                        }),
-                        billboard: {
-                            image: GFW_ICON,
-                            scale: 1.0,
-                        },
-                        // 40km ellipse removed 2026-04-22 as part of the
-                        // perf experiment: with ~5000 GFW entities the
-                        // Entity-attached ellipse was one of the main
-                        // drivers behind Cesium typed-array allocations
-                        // and per-frame BillboardVisualizer.update work.
-                        // The circle is a few pixels at global zoom. Re-
-                        // introduce via PrimitiveCollection+EllipseGeometry
-                        // if close-zoom context ever needs it.
+                        image: GFW_ICON,
+                        scale: 1.0,
+                        verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+                    });
+                    gfwMetaMap.set(id, {
+                        id,
+                        lat: ev.lat,
+                        lng: ev.lng,
+                        subtype: ev.type || 'gap',
+                        start: ev.start,
+                        end: ev.end,
+                        source: 'Global Fishing Watch',
                     });
                 }
             } catch (err: any) {
@@ -99,24 +112,21 @@ export function useGFWLayer(viewer: Cesium.Viewer | null) {
     // Effective show = sources && visibility.
     const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
     useEffect(() => {
-        if (!dsRef.current) return;
+        const collection = collectionRef.current;
+        if (!collection) return;
         const globalShow = mode !== 'playback' && isSourceOn && isVisible;
-        dsRef.current.show = globalShow;
-        if (globalShow && isolatedEntityId) {
-            dsRef.current.entities.values.forEach(e => {
-                e.show = isolatedEntityId === e.id;
-            });
-        } else if (globalShow) {
-            dsRef.current.entities.values.forEach(e => {
-                e.show = true;
-            });
+        collection.show = globalShow;
+        for (let i = 0; i < collection.length; i++) {
+            const bb = collection.get(i);
+            bb.show = !isolatedEntityId || isolatedEntityId === bb.id;
         }
     }, [isSourceOn, isVisible, isolatedEntityId, mode]);
 
     // ---- Effect 4: source-off scene clear ----
     useEffect(() => {
         if (isSourceOn) return;
-        if (dsRef.current) dsRef.current.entities.removeAll();
+        collectionRef.current?.removeAll();
+        gfwMetaMap.clear();
         useTimelineStore.getState().setStreamMetric('gfw', {
             count: 0,
             status: 'disabled',
