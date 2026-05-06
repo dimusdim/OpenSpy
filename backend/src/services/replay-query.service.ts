@@ -225,6 +225,7 @@ type SatelliteTrackFilters = {
     from?: string;
     to?: string;
     limit?: number;
+    offset?: number;
     order?: 'asc' | 'desc';
     stepSeconds?: number;
 };
@@ -1226,6 +1227,10 @@ export class ReplayQueryService {
         const { from, to } = this.normalizeTrackWindow(filters);
         const stepSeconds = this.clampStepSeconds(filters.stepSeconds);
         const normalizedLimit = normalizeLimit(filters.limit) || 1000;
+        const offset = Math.max(0, Math.trunc(Number(filters.offset || 0)));
+        const generationTarget = filters.order === 'desc'
+            ? Number.POSITIVE_INFINITY
+            : offset + normalizedLimit;
         const orbitalTimeExpr = 'COALESCE(oe.tle_epoch_at, oe.observed_at)';
 
         const result = await this.database.query<{
@@ -1337,13 +1342,13 @@ export class ReplayQueryService {
                         ...(current.properties || {}),
                     },
                 });
-                if (points.length >= normalizedLimit) break;
+                if (points.length >= generationTarget) break;
             }
 
-            if (points.length >= normalizedLimit) break;
+            if (points.length >= generationTarget) break;
             if (points.length > 0) {
                 const lastAt = points[points.length - 1].observed_at;
-                if (lastAt !== new Date(segmentEndMs).toISOString() && segmentEndMs < windowEndMs && points.length < normalizedLimit) {
+                if (lastAt !== new Date(segmentEndMs).toISOString() && segmentEndMs < windowEndMs && points.length < generationTarget) {
                     const observedAt = new Date(segmentEndMs).toISOString();
                     const position = this.propagateSatellitePosition(current.tle_line1!, current.tle_line2!, observedAt);
                     if (position) {
@@ -1375,7 +1380,7 @@ export class ReplayQueryService {
         }
 
         if (filters.order === 'desc') points.reverse();
-        return points;
+        return points.slice(offset, offset + normalizedLimit);
     }
 
     private async listMovingEntityWindow(filters: ReplayWindowFilters): Promise<ReplayWindowItem[]> {

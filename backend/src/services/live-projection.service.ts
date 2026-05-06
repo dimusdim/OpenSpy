@@ -198,6 +198,91 @@ export class LiveProjectionService {
         return result?.rows || [];
     }
 
+    private async listLatestFireClusters(gridDegrees: number, bbox?: [number, number, number, number]): Promise<Array<FireRecord & { aggregated: true; count: number; subtype: string }>> {
+        if (!this.database.isReady()) return [];
+
+        const params: unknown[] = [gridDegrees];
+        let bboxWhere = '';
+        if (bbox) {
+            const [south, west, north, east] = bbox;
+            params.push(west, south, east, north);
+            bboxWhere = `
+                AND ST_Intersects(
+                    e.geom,
+                    ST_MakeEnvelope($2, $3, $4, $5, 4326)
+                )
+            `;
+        }
+
+        const result = await this.database.query<any>(
+            `
+                WITH fire_points AS (
+                    SELECT
+                        e.event_id,
+                        e.properties,
+                        ST_Y(e.geom) AS lat,
+                        ST_X(e.geom) AS lng,
+                        COALESCE((e.properties->>'frp')::double precision, 0) AS frp,
+                        COALESCE((e.properties->>'brightness')::double precision, 0) AS brightness,
+                        COALESCE(e.properties->>'acqTime', '') AS acq_time
+                    FROM core.events e
+                    WHERE e.layer_id = 'fire'
+                      AND e.geom IS NOT NULL
+                      AND (e.valid_to IS NULL OR e.valid_to > now())
+                      ${bboxWhere}
+                ),
+                bucketed AS (
+                    SELECT
+                        CASE
+                            WHEN frp > 100 THEN 'high'
+                            WHEN frp > 30 THEN 'medium'
+                            ELSE 'low'
+                        END AS subtype,
+                        FLOOR(lat / $1::double precision)::integer AS lat_bin,
+                        FLOOR(lng / $1::double precision)::integer AS lng_bin,
+                        COUNT(*)::integer AS count,
+                        AVG(lat) AS lat,
+                        AVG(lng) AS lng,
+                        MAX(frp) AS frp,
+                        MAX(brightness) AS brightness,
+                        MAX(acq_time) AS acq_time
+                    FROM fire_points
+                    GROUP BY subtype, lat_bin, lng_bin
+                )
+                SELECT
+                    subtype,
+                    lat_bin,
+                    lng_bin,
+                    count,
+                    lat,
+                    lng,
+                    frp,
+                    brightness,
+                    acq_time
+                FROM bucketed
+                ORDER BY subtype, lat_bin, lng_bin
+            `,
+            params,
+        );
+
+        return (result?.rows || []).map((row) => ({
+            id: `fire-cluster:${gridDegrees}:${row.subtype}:${row.lat_bin}:${row.lng_bin}`,
+            lat: Number(row.lat),
+            lng: Number(row.lng),
+            acqDate: '',
+            brightness: Number(row.brightness) || 0,
+            confidence: '',
+            frp: Number(row.frp) || 0,
+            source: 'NASA FIRMS',
+            daynight: '',
+            acqTime: row.acq_time || '',
+            fireType: 0,
+            subtype: row.subtype || 'low',
+            aggregated: true as const,
+            count: Number(row.count) || 0,
+        })).filter((row) => Number.isFinite(row.lat) && Number.isFinite(row.lng));
+    }
+
     private async listLatestAssets(layerId: string, sourceId?: string | null, limit?: number | null): Promise<AssetRow[]> {
         if (!this.database.isReady()) return [];
 
@@ -319,7 +404,11 @@ export class LiveProjectionService {
         );
 
         const rows = result?.rows || [];
+        // app.entity_live_states is the canonical live projection for latest
+        // map hydration. Fall back to position_fixes only when that projection
+        // is empty or cannot satisfy the requested entity/limit.
         if (entityId && rows.length > 0) return rows;
+        if (!entityId && rows.length > 0 && (limit == null || rows.length >= limit)) return rows;
 
         const fallbackResult = await this.database.query<EntityLiveRow>(
             `
@@ -419,6 +508,10 @@ export class LiveProjectionService {
     }
 
     async getFires(options?: FireQueryOptions): Promise<Array<FireRecord & { aggregated?: boolean; count?: number }>> {
+        if (options?.gridDegrees && options.gridDegrees > 0) {
+            return this.listLatestFireClusters(options.gridDegrees, options.bbox);
+        }
+
         const rows = await this.listLatestEvents('fire');
         const records = rows.map((row) => {
             const props = stripStateHash(row.properties);

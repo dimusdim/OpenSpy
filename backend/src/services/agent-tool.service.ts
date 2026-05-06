@@ -55,10 +55,26 @@ const REGION_GAZETTEER: RegionRecord[] = [
     },
 ];
 
-function clampLimit(value: unknown, fallback = 100, max = 5000): number {
+function hasValue(value: unknown): boolean {
+    return value !== undefined && value !== null && value !== '';
+}
+
+function parsePositiveIntOrDefault(value: unknown, fallback: number, label: string): { value: number; defaulted: boolean } {
+    if (!hasValue(value)) return { value: fallback, defaulted: true };
     const parsed = Number(value);
-    if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
-    return Math.max(1, Math.min(max, Math.trunc(parsed)));
+    if (!Number.isFinite(parsed) || parsed <= 0 || !Number.isSafeInteger(Math.trunc(parsed))) {
+        throw new Error(`${label} must be a positive safe integer`);
+    }
+    return { value: Math.trunc(parsed), defaulted: false };
+}
+
+function parseOptionalPositiveInt(value: unknown, label: string): number | null {
+    if (value === undefined || value === null || value === '') return null;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+        throw new Error(`${label} must be a positive integer`);
+    }
+    return Math.trunc(parsed);
 }
 
 function sqlLike(value: string): string {
@@ -66,7 +82,14 @@ function sqlLike(value: string): string {
 }
 
 function parseBboxLike(value: unknown): Bbox | null {
-    const parts = Array.isArray(value)
+    const parts = value && typeof value === 'object' && !Array.isArray(value)
+        ? [
+            Number((value as any).west ?? (value as any).w),
+            Number((value as any).south ?? (value as any).s),
+            Number((value as any).east ?? (value as any).e),
+            Number((value as any).north ?? (value as any).n),
+        ]
+        : Array.isArray(value)
         ? value.map(Number)
         : String(value || '').split(',').map(Number);
     if (parts.length !== 4 || parts.some((part) => !Number.isFinite(part))) return null;
@@ -106,6 +129,10 @@ function parseIso(value: unknown): string | null {
     return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
+function isStatementTimeout(err: any): boolean {
+    return err?.code === '57014' || /statement timeout/i.test(err?.message || '');
+}
+
 function bboxPolygon([west, south, east, north]: Bbox) {
     return {
         type: 'Polygon',
@@ -139,25 +166,47 @@ function bboxCenter([west, south, east, north]: Bbox): { lat: number; lng: numbe
     return { lat: (south + north) / 2, lng: (west + east) / 2 };
 }
 
-function sampledTimes(from: string, to: string, stepSeconds: number, maxSamples: number): string[] {
+function sampledTimes(
+    from: string,
+    to: string,
+    stepSeconds: number,
+    maxSamples: number | null,
+): { times: string[]; truncated: boolean; nextSampleAt: string | null } {
     const startMs = new Date(from).getTime();
     const endMs = new Date(to).getTime();
     if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || startMs > endMs) {
         throw new Error('satellite overpass query requires valid from <= to');
     }
-    if (startMs === endMs) return [new Date(startMs).toISOString()];
+    if (startMs === endMs) {
+        return { times: [new Date(startMs).toISOString()], truncated: false, nextSampleAt: null };
+    }
 
-    const cappedMaxSamples = Math.max(1, Math.min(24, Math.trunc(maxSamples)));
-    const requestedStepMs = Math.max(30, Math.min(3600, Math.trunc(stepSeconds))) * 1000;
-    const minStepMsForCap = Math.ceil((endMs - startMs) / Math.max(1, cappedMaxSamples - 1));
-    const effectiveStepMs = Math.max(requestedStepMs, minStepMsForCap);
+    const requestedStepMs = Math.max(1, Math.trunc(stepSeconds)) * 1000;
+    const sampleLimit = maxSamples === null ? null : Math.max(1, Math.trunc(maxSamples));
     const times: string[] = [];
-    for (let cursor = startMs; cursor <= endMs && times.length < cappedMaxSamples; cursor += effectiveStepMs) {
+    let truncated = false;
+    let nextSampleAt: string | null = null;
+
+    for (let cursor = startMs; cursor <= endMs; cursor += requestedStepMs) {
+        if (sampleLimit !== null && times.length >= sampleLimit) {
+            truncated = true;
+            nextSampleAt = new Date(cursor).toISOString();
+            break;
+        }
         times.push(new Date(cursor).toISOString());
     }
+
     const endIso = new Date(endMs).toISOString();
-    if (times[times.length - 1] !== endIso && times.length < cappedMaxSamples) times.push(endIso);
-    return times;
+    if (!truncated && times[times.length - 1] !== endIso) {
+        if (sampleLimit !== null && times.length >= sampleLimit) {
+            truncated = true;
+            nextSampleAt = endIso;
+        } else {
+            times.push(endIso);
+        }
+    }
+
+    return { times, truncated, nextSampleAt };
 }
 
 function geometryFromInput(input: Record<string, any>) {
@@ -254,6 +303,94 @@ function normalizeSelectionLayerId(value: unknown): string {
     return SELECTION_LAYER_ALIASES[key] || key;
 }
 
+function predicateTextValues(predicate: Record<string, any>, keys: string[]): string[] {
+    const values: string[] = [];
+    for (const key of keys) {
+        const value = predicate[key];
+        if (Array.isArray(value)) {
+            for (const item of value) {
+                const text = String(item || '').trim();
+                if (text) values.push(text);
+            }
+        } else if (value !== undefined && value !== null && value !== '') {
+            const text = String(value).trim();
+            if (text) values.push(text);
+        }
+    }
+    return Array.from(new Set(values));
+}
+
+function validateSelectionPredicateKeys(predicate: Record<string, any>) {
+    const supported = new Set([
+        'at',
+        'asset_kind',
+        'asset_kind_in',
+        'assetKind',
+        'assetKindIn',
+        'asset_ids',
+        'assetIds',
+        'bbox',
+        'bbox_order',
+        'bboxOrder',
+        'end',
+        'entity_ids',
+        'entityIds',
+        'entity_kind',
+        'entity_kind_in',
+        'entityKind',
+        'entityKindIn',
+        'event_ids',
+        'eventIds',
+        'event_kind',
+        'event_kind_in',
+        'eventKind',
+        'eventKindIn',
+        'from',
+        'geometry_ref',
+        'historical',
+        'history_mode',
+        'ids',
+        'kind',
+        'label',
+        'layer',
+        'layer_id',
+        'layerId',
+        'object_kind',
+        'objectKind',
+        'observed_from',
+        'observedFrom',
+        'observed_to',
+        'observedTo',
+        'observed_at',
+        'observedAt',
+        'source_id',
+        'source_ids',
+        'sourceId',
+        'sourceIds',
+        'sources',
+        'start',
+        'subtype',
+        'subtype_in',
+        'subtypeIn',
+        'subtypes',
+        'time',
+        'to',
+        'ttl_seconds',
+        'ttlSeconds',
+        'time_window',
+        'timeWindow',
+    ]);
+    const unsupported = Object.keys(predicate).filter((key) => !supported.has(key));
+    if (unsupported.length > 0) {
+        const err = new Error(
+            `Selection materialization predicate contains unsupported filter keys: ${unsupported.sort().join(', ')}`,
+        ) as Error & { status?: number; code?: string };
+        err.status = 400;
+        err.code = 'BAD_SELECTION_PREDICATE';
+        throw err;
+    }
+}
+
 const ENTITY_SELECTION_LAYERS = new Set(['aircraft', 'vessel', 'satellite', 'dark-vessel']);
 const EVENT_SELECTION_LAYERS = new Set(['outage', 'fire', 'conflict', 'disasters', 'jamming', 'gfw']);
 const ASSET_SELECTION_LAYERS = new Set(['airspace', 'cable', 'pipeline', 'border', 'infrastructure', 'webcam', 'traffic', 'power']);
@@ -338,7 +475,8 @@ export class AgentToolService {
 
     async resolveRegion(input: Record<string, any>) {
         const query = String(input.query || input.name || '').trim().toLowerCase();
-        const limit = clampLimit(input.limit, 10, 50);
+        const limitInput = parsePositiveIntOrDefault(input.limit, 10, 'region.resolve limit');
+        const limit = limitInput.value;
         if (!query) throw new Error('region.resolve requires query');
 
         const hardcoded = REGION_GAZETTEER
@@ -366,7 +504,7 @@ export class AgentToolService {
                     OR lower(COALESCE(slug, '')) LIKE $1 ESCAPE '\\'
                  ORDER BY display_name
                  LIMIT $2`,
-                [sqlLike(query), limit],
+                [sqlLike(query), limit + 1],
             );
             dbRegions = (result?.rows || []).map((row: any) => ({
                 region_id: row.region_id,
@@ -380,10 +518,19 @@ export class AgentToolService {
             }));
         }
 
+        const matches = [...hardcoded, ...dbRegions].slice(0, limit);
+        const hasMore = hardcoded.length + dbRegions.length > matches.length;
         return {
             query,
-            count: Math.min(limit, hardcoded.length + dbRegions.length),
-            matches: [...hardcoded, ...dbRegions].slice(0, limit),
+            count: matches.length,
+            matches,
+            pagination: {
+                limit,
+                defaulted: limitInput.defaulted,
+                capped: false,
+                returned: matches.length,
+                has_more: hasMore,
+            },
         };
     }
 
@@ -391,10 +538,11 @@ export class AgentToolService {
         if (!this.database.isReady()) throw new Error('Database is not ready');
         const query = String(input.query || input.entity || '').trim();
         const layer = String(input.layer || '').trim();
-        const limit = clampLimit(input.limit, 10, 50);
+        const limitInput = parsePositiveIntOrDefault(input.limit, 10, 'entity.resolve limit');
+        const limit = limitInput.value;
         if (!query) throw new Error('entity.resolve requires query');
 
-        const params: unknown[] = [sqlLike(query.toLowerCase()), limit];
+        const params: unknown[] = [sqlLike(query.toLowerCase()), limit + 1];
         const layerSql = layer ? 'AND e.layer_id = $3' : '';
         if (layer) params.push(layer);
         const result = await this.database.query(
@@ -419,18 +567,27 @@ export class AgentToolService {
             params,
         );
 
+        const rows = result?.rows || [];
+        const matches = rows.slice(0, limit);
         return {
             query,
             layer: layer || null,
-            count: result?.rows.length || 0,
-            matches: result?.rows || [],
+            count: matches.length,
+            matches,
+            pagination: {
+                limit,
+                defaulted: limitInput.defaulted,
+                capped: false,
+                returned: matches.length,
+                has_more: rows.length > matches.length,
+            },
         };
     }
 
     async createAoi(input: Record<string, any>) {
         const geometry = geometryFromInput(input);
         const label = String(input.label || input.name || 'Agent AOI').trim();
-        const ttlSeconds = clampLimit(input.ttl_seconds ?? input.ttlSeconds, 24 * 60 * 60, 30 * 24 * 60 * 60);
+        const ttlSeconds = parsePositiveIntOrDefault(input.ttl_seconds ?? input.ttlSeconds, 24 * 60 * 60, 'AOI ttl_seconds').value;
         const suffix = crypto.createHash('sha1').update(JSON.stringify({ geometry, label, now: Date.now() })).digest('hex').slice(0, 12);
         const selectionId = String(input.geometry_ref || input.selection_id || `aoi:${suffix}`);
         const selection = await this.selectionRepository.saveSelection({
@@ -466,7 +623,9 @@ export class AgentToolService {
         const to = parseIso(input.to);
         const bbox = parseQueryBbox(input.bbox, input.bbox_order || input.bboxOrder);
         const groupBy = String(input.group_by || input.groupBy || 'layer').toLowerCase();
-        const limit = clampLimit(input.limit, 200, 1000);
+        const limitInput = parsePositiveIntOrDefault(input.limit, 200, 'query.aggregate limit');
+        const limit = limitInput.value;
+        const queryLimit = limit + 1;
         const params: unknown[] = [];
         const clauses: string[] = [];
         const add = (sql: string, value: unknown) => {
@@ -495,7 +654,7 @@ export class AgentToolService {
                    ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
                    GROUP BY bucket
                    ORDER BY fixes DESC
-                   LIMIT ${limit}`;
+                   LIMIT ${queryLimit}`;
         } else if (kind === 'events') {
             if (layer) add('e.layer_id = ?', layer);
             if (from) add('COALESCE(e.observed_at, e.valid_from, e.created_at) >= ?::timestamptz', from);
@@ -510,7 +669,7 @@ export class AgentToolService {
                    ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
                    GROUP BY bucket
                    ORDER BY events DESC
-                   LIMIT ${limit}`;
+                   LIMIT ${queryLimit}`;
         } else {
             if (layer) add('a.layer_id = ?', layer);
             if (bbox) addBbox('a.geom', bbox);
@@ -522,11 +681,32 @@ export class AgentToolService {
                    ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
                    GROUP BY bucket
                    ORDER BY assets DESC
-                   LIMIT ${limit}`;
+                   LIMIT ${queryLimit}`;
         }
 
         const result = await this.database.query(sql, params);
-        return { kind, layer: layer || null, group_by: groupBy, count: result?.rows.length || 0, rows: result?.rows || [] };
+        const allRows = result?.rows || [];
+        const rows = allRows.slice(0, limit);
+        const hasMore = allRows.length > rows.length;
+        return {
+            kind,
+            layer: layer || null,
+            group_by: groupBy,
+            count: rows.length,
+            rows,
+            pagination: {
+                limit,
+                defaulted: limitInput.defaulted,
+                capped: false,
+                returned: rows.length,
+                has_more: hasMore,
+            },
+            query_status: {
+                status: rows.length === 0 ? 'empty' : hasMore ? 'partial' : 'ok',
+                complete: !hasMore,
+                reason: rows.length === 0 ? 'empty_result' : hasMore ? 'page_has_more' : 'aggregated',
+            },
+        };
     }
 
     async corridorSearch(input: Record<string, any>) {
@@ -534,7 +714,9 @@ export class AgentToolService {
         const kind = normalizeKind(input.kind);
         const layer = String(input.layer || '').trim();
         const radiusM = Number(input.radius_m ?? input.radiusM ?? 5000);
-        const limit = clampLimit(input.limit, 100, 1000);
+        const limitInput = parsePositiveIntOrDefault(input.limit, 100, 'geo.corridor limit');
+        const limit = limitInput.value;
+        const queryLimit = limit + 1;
         const from = parseIso(input.from);
         const to = parseIso(input.to);
         const line = geometryFromInput({ ...input, type: 'line' });
@@ -562,7 +744,7 @@ export class AgentToolService {
                      AND ST_DWithin(geom::geography, ST_SetSRID(ST_GeomFromGeoJSON($1), 4326)::geography, $2)
                      ${clauses.length ? `AND ${clauses.join(' AND ')}` : ''}
                    ORDER BY distance_m ASC, observed_at DESC
-                   LIMIT ${limit}`;
+                   LIMIT ${queryLimit}`;
         } else if (kind === 'events') {
             if (from) add('COALESCE(observed_at, valid_from, created_at) >= ?::timestamptz', from);
             if (to) add('COALESCE(observed_at, valid_from, created_at) <= ?::timestamptz', to);
@@ -576,7 +758,7 @@ export class AgentToolService {
                      AND ST_DWithin(geom::geography, ST_SetSRID(ST_GeomFromGeoJSON($1), 4326)::geography, $2)
                      ${clauses.length ? `AND ${clauses.join(' AND ')}` : ''}
                    ORDER BY distance_m ASC, observed_at DESC NULLS LAST
-                   LIMIT ${limit}`;
+                   LIMIT ${queryLimit}`;
         } else {
             sql = `SELECT asset_id AS id, layer_id, source_id, asset_kind AS kind, subtype, display_name,
                           ST_Y(ST_PointOnSurface(geom)) AS lat, ST_X(ST_PointOnSurface(geom)) AS lng,
@@ -587,28 +769,51 @@ export class AgentToolService {
                      AND ST_DWithin(geom::geography, ST_SetSRID(ST_GeomFromGeoJSON($1), 4326)::geography, $2)
                      ${clauses.length ? `AND ${clauses.join(' AND ')}` : ''}
                    ORDER BY distance_m ASC
-                   LIMIT ${limit}`;
+                   LIMIT ${queryLimit}`;
         }
         const result = await this.database.query(sql, params);
-        return { kind, layer: layer || null, radius_m: radiusM, count: result?.rows.length || 0, items: result?.rows || [] };
+        const allItems = result?.rows || [];
+        const items = allItems.slice(0, limit);
+        const hasMore = allItems.length > items.length;
+        return {
+            kind,
+            layer: layer || null,
+            radius_m: radiusM,
+            count: items.length,
+            items,
+            pagination: {
+                limit,
+                defaulted: limitInput.defaulted,
+                capped: false,
+                returned: items.length,
+                has_more: hasMore,
+            },
+            query_status: {
+                status: items.length === 0 ? 'empty' : hasMore ? 'partial' : 'ok',
+                complete: !hasMore,
+                reason: items.length === 0 ? 'empty_result' : hasMore ? 'page_has_more' : 'corridor_matched',
+            },
+        };
     }
 
     async timeline(input: Record<string, any>) {
         const groupBy = String(input.group_by || input.groupBy || 'hour').toLowerCase();
         if (!['hour', 'day'].includes(groupBy)) throw new Error('query.timeline supports group_by hour or day');
+        const limitDefaulted = !hasValue(input.limit);
         const data = await this.aggregate({
             ...input,
             group_by: groupBy,
-            limit: clampLimit(input.limit, 500, 5000),
+            limit: limitDefaulted ? 500 : input.limit,
         });
         return {
             ...data,
             mode: 'timeline',
             bucket: groupBy,
+            pagination: data.pagination ? { ...data.pagination, defaulted: limitDefaulted } : data.pagination,
             query_status: {
-                status: data.count === 0 ? 'empty' : 'ok',
-                complete: true,
-                reason: data.count === 0 ? 'empty_result' : 'aggregated',
+                status: data.count === 0 ? 'empty' : data.pagination?.has_more ? 'partial' : 'ok',
+                complete: !data.pagination?.has_more,
+                reason: data.count === 0 ? 'empty_result' : data.pagination?.has_more ? 'page_has_more' : 'aggregated',
             },
             warnings: data.count === 0 ? ['No timeline buckets matched these filters in local OpenSpy storage.'] : [],
         };
@@ -620,11 +825,13 @@ export class AgentToolService {
         if (!id) throw new Error('query.related requires entity_id, event_id, asset_id or id');
         const radiusM = Number(input.radius_m ?? input.radiusM ?? 50_000);
         if (!Number.isFinite(radiusM) || radiusM <= 0) throw new Error('query.related requires positive radius_m');
-        const limit = clampLimit(input.limit, 25, 200);
+        const limitInput = parsePositiveIntOrDefault(input.limit, 25, 'query.related limit');
+        const limit = limitInput.value;
+        const queryLimit = limit + 1;
         const anchor = await this.resolveAnchorGeometry(id);
         if (!anchor) throw new Error(`Related anchor not found or has no geometry: ${id}`);
 
-        const params: unknown[] = [anchor.geojson, radiusM, limit];
+        const params: unknown[] = [anchor.geojson, radiusM, queryLimit];
         const [events, assets, entities] = await Promise.all([
             this.database.query(
                 `SELECT event_id AS id, layer_id, source_id, event_kind AS kind, subtype,
@@ -672,23 +879,43 @@ export class AgentToolService {
                 [...params, id],
             ),
         ]);
+        const eventRows = events?.rows || [];
+        const assetRows = assets?.rows || [];
+        const entityRows = entities?.rows || [];
+        const eventItems = eventRows.slice(0, limit);
+        const assetItems = assetRows.slice(0, limit);
+        const entityItems = entityRows.slice(0, limit);
+        const hasMore = eventRows.length > eventItems.length
+            || assetRows.length > assetItems.length
+            || entityRows.length > entityItems.length;
         return {
             anchor,
             radius_m: radiusM,
             counts: {
-                events: events?.rows.length || 0,
-                assets: assets?.rows.length || 0,
-                entities: entities?.rows.length || 0,
+                events: eventItems.length,
+                assets: assetItems.length,
+                entities: entityItems.length,
             },
             items: {
-                events: events?.rows || [],
-                assets: assets?.rows || [],
-                entities: entities?.rows || [],
+                events: eventItems,
+                assets: assetItems,
+                entities: entityItems,
+            },
+            pagination: {
+                limit_per_collection: limit,
+                defaulted: limitInput.defaulted,
+                capped: false,
+                returned: {
+                    events: eventItems.length,
+                    assets: assetItems.length,
+                    entities: entityItems.length,
+                },
+                has_more: hasMore,
             },
             query_status: {
-                status: (events?.rows.length || assets?.rows.length || entities?.rows.length) ? 'ok' : 'empty',
-                complete: true,
-                reason: (events?.rows.length || assets?.rows.length || entities?.rows.length) ? 'related_found' : 'empty_result',
+                status: (eventItems.length || assetItems.length || entityItems.length) ? hasMore ? 'partial' : 'ok' : 'empty',
+                complete: !hasMore,
+                reason: (eventItems.length || assetItems.length || entityItems.length) ? hasMore ? 'page_has_more' : 'related_found' : 'empty_result',
             },
         };
     }
@@ -717,13 +944,21 @@ export class AgentToolService {
         const to = parseIso(input.to) || at || from;
         if (!from || !to) throw new Error('query.satellite-overpasses requires from/to or at');
 
-        const stepSeconds = Math.max(30, Math.min(3600, Math.trunc(Number(input.step_seconds ?? input.stepSeconds ?? 180) || 180)));
-        const maxSamples = Math.max(1, Math.min(24, Math.trunc(Number(input.max_samples ?? input.maxSamples ?? 12) || 12)));
-        const limit = clampLimit(input.limit, 20, 200);
-        const samplesPerObject = clampLimit(input.samples_per_object ?? input.samplesPerObject, 3, 20);
+        const stepSecondsInput = parsePositiveIntOrDefault(input.step_seconds ?? input.stepSeconds, 180, 'query.satellite-overpasses step_seconds');
+        const rawMaxSamples = input.max_samples ?? input.maxSamples;
+        const maxSamplesInput = hasValue(rawMaxSamples)
+            ? parsePositiveIntOrDefault(rawMaxSamples, 1, 'query.satellite-overpasses max_samples')
+            : null;
+        const limitInput = parsePositiveIntOrDefault(input.limit, 20, 'query.satellite-overpasses limit');
+        const samplesPerObjectInput = parsePositiveIntOrDefault(input.samples_per_object ?? input.samplesPerObject, 3, 'query.satellite-overpasses samples_per_object');
+        const stepSeconds = stepSecondsInput.value;
+        const maxSamples = maxSamplesInput?.value ?? null;
+        const limit = limitInput.value;
+        const samplesPerObject = samplesPerObjectInput.value;
         const entityKind = String(input.entity_kind || input.entityKind || '').trim() || undefined;
         const subtype = String(input.subtype || '').trim() || undefined;
-        const sampleTimes = sampledTimes(from, to, stepSeconds, maxSamples);
+        const samplingPlan = sampledTimes(from, to, stepSeconds, maxSamples);
+        const sampleTimes = samplingPlan.times;
         const center = bboxCenter(bbox);
 
         type GroupedOverpass = {
@@ -812,16 +1047,31 @@ export class AgentToolService {
             })
             .slice(0, limit);
 
-        const complete = grouped.size <= limit;
+        const hasMoreResults = grouped.size > overpasses.length;
+        const complete = !samplingPlan.truncated && !hasMoreResults;
+        const status = samplingPlan.truncated
+            ? 'partial'
+            : overpasses.length === 0
+                ? 'empty'
+                : hasMoreResults
+                    ? 'partial'
+                    : 'ok';
         const warnings = overpasses.length === 0
-            ? ['No propagated satellite ground-track samples crossed this AOI in local OpenSpy TLE storage for the requested window.']
+            ? [
+                samplingPlan.truncated
+                    ? 'No propagated satellite ground-track samples crossed this AOI in the sampled portion before the explicit max_samples cutoff.'
+                    : 'No propagated satellite ground-track samples crossed this AOI in local OpenSpy TLE storage for the requested window.',
+            ]
             : [
                 'This is a possible-overpass screen from sampled TLE ground tracks. It is not sensor-specific visibility and does not prove imagery was collected.',
             ];
+        if (samplingPlan.truncated) {
+            warnings.push('Sampling stopped at the explicitly requested max_samples before covering the full requested window.');
+        }
 
         return {
             mode: 'satellite_overpass',
-            status: overpasses.length === 0 ? 'empty' : complete ? 'ok' : 'partial',
+            status,
             semantics: {
                 basis: 'sampled propagated TLE ground-track positions from local OpenSpy orbital elements',
                 limitation: 'Possible-overpass screen only: not sensor-specific field-of-view, tasking, cloud cover, downlink, image availability or collection proof.',
@@ -833,7 +1083,9 @@ export class AgentToolService {
                 from,
                 to,
                 step_seconds_requested: stepSeconds,
+                step_seconds_defaulted: stepSecondsInput.defaulted,
                 max_samples: maxSamples,
+                max_samples_explicit: maxSamples !== null,
                 entity_kind: entityKind || null,
                 subtype: subtype || null,
                 limit,
@@ -843,12 +1095,53 @@ export class AgentToolService {
                 samples_requested: maxSamples,
                 samples_used: sampleTimes.length,
                 sample_times: sampleTimes,
+                truncated: samplingPlan.truncated,
+                complete: !samplingPlan.truncated,
+                next_sample_at: samplingPlan.nextSampleAt,
+                step_seconds: stepSeconds,
+                step_seconds_defaulted: stepSecondsInput.defaulted,
+                max_samples: maxSamples,
+                max_samples_explicit: maxSamples !== null,
             },
             coverage: {
                 returned_count: overpasses.length,
                 total_candidate_entities: grouped.size,
                 complete,
                 basis: 'sampled_window',
+            },
+            metadata: {
+                sampling: {
+                    step_seconds: stepSeconds,
+                    step_seconds_defaulted: stepSecondsInput.defaulted,
+                    max_samples: maxSamples,
+                    max_samples_explicit: maxSamples !== null,
+                    samples_used: sampleTimes.length,
+                    truncated: samplingPlan.truncated,
+                    next_sample_at: samplingPlan.nextSampleAt,
+                },
+                result_limit: {
+                    limit,
+                    defaulted: limitInput.defaulted,
+                    capped: false,
+                },
+            },
+            pagination: {
+                limit,
+                defaulted: limitInput.defaulted,
+                capped: false,
+                returned: overpasses.length,
+                has_more: hasMoreResults,
+            },
+            query_status: {
+                status,
+                complete,
+                reason: samplingPlan.truncated
+                    ? 'max_samples_reached'
+                    : overpasses.length === 0
+                        ? 'empty_result'
+                        : hasMoreResults
+                            ? 'page_has_more'
+                            : 'sampled_window',
             },
             count: overpasses.length,
             overpasses,
@@ -864,12 +1157,14 @@ export class AgentToolService {
         const rightLayer = String(input.right_layer || input.rightLayer || '').trim();
         const radiusM = Number(input.radius_m ?? input.radiusM ?? 10_000);
         if (!Number.isFinite(radiusM) || radiusM < 0) throw new Error('geo.spatial_join requires radius_m >= 0');
-        const limit = clampLimit(input.limit, 100, 1000);
+        const limitInput = parsePositiveIntOrDefault(input.limit, 100, 'geo.spatial_join limit');
+        const limit = limitInput.value;
+        const queryLimit = limit + 1;
         const bbox = parseBboxLike(input.bbox);
         const left = this.spatialJoinSourceSql(leftKind, 'l', leftLayer, bbox);
         const right = this.spatialJoinSourceSql(rightKind, 'r', rightLayer, bbox);
         const rightSql = offsetSqlPlaceholders(right.sql, left.params.length);
-        const params = [...left.params, ...right.params, radiusM, limit];
+        const params = [...left.params, ...right.params, radiusM, queryLimit];
         const radiusParam = params.length - 1;
         const limitParam = params.length;
         const result = await this.database.query(
@@ -901,19 +1196,28 @@ export class AgentToolService {
              LIMIT $${limitParam}`,
             params,
         );
+        const allItems = result?.rows || [];
+        const items = allItems.slice(0, limit);
+        const hasMore = allItems.length > items.length;
         return {
             mode: 'spatial_join',
             left: { kind: leftKind, layer: leftLayer || null },
             right: { kind: rightKind, layer: rightLayer || null },
             radius_m: radiusM,
             bbox: bbox || null,
-            count: result?.rows.length || 0,
-            items: result?.rows || [],
-            limits: { max_rows: limit },
+            count: items.length,
+            items,
+            pagination: {
+                limit,
+                defaulted: limitInput.defaulted,
+                capped: false,
+                returned: items.length,
+                has_more: hasMore,
+            },
             query_status: {
-                status: result?.rows.length ? 'ok' : 'empty',
-                complete: true,
-                reason: result?.rows.length ? 'joined' : 'empty_result',
+                status: items.length ? hasMore ? 'partial' : 'ok' : 'empty',
+                complete: !hasMore,
+                reason: items.length ? hasMore ? 'page_has_more' : 'joined' : 'empty_result',
             },
         };
     }
@@ -927,11 +1231,13 @@ export class AgentToolService {
         const bbox = parseBboxLike(input.bbox);
         const toleranceM = Number(input.tolerance_m ?? input.toleranceM ?? 250);
         if (!Number.isFinite(toleranceM) || toleranceM < 0) throw new Error('geo.simplify requires tolerance_m >= 0');
-        const limit = clampLimit(input.limit, 50, 500);
+        const limitInput = parsePositiveIntOrDefault(input.limit, 50, 'geo.simplify limit');
+        const limit = limitInput.value;
+        const queryLimit = limit + 1;
         const table = kind === 'events' ? 'core.events' : 'core.assets';
         const idColumn = kind === 'events' ? 'event_id' : 'asset_id';
         const kindColumn = kind === 'events' ? 'event_kind' : 'asset_kind';
-        const params: unknown[] = [toleranceM, limit];
+        const params: unknown[] = [toleranceM, queryLimit];
         const clauses = ['geom IS NOT NULL'];
         if (layer) {
             params.push(layer);
@@ -963,6 +1269,9 @@ export class AgentToolService {
              LIMIT $2`,
             params,
         );
+        const allFeatures = result?.rows || [];
+        const features = allFeatures.slice(0, limit);
+        const hasMore = allFeatures.length > features.length;
         return {
             mode: 'simplified_geometry',
             kind,
@@ -970,9 +1279,20 @@ export class AgentToolService {
             id: id || null,
             bbox: bbox || null,
             tolerance_m: toleranceM,
-            count: result?.rows.length || 0,
-            features: result?.rows || [],
-            limits: { max_features: limit },
+            count: features.length,
+            features,
+            pagination: {
+                limit,
+                defaulted: limitInput.defaulted,
+                capped: false,
+                returned: features.length,
+                has_more: hasMore,
+            },
+            query_status: {
+                status: features.length ? hasMore ? 'partial' : 'ok' : 'empty',
+                complete: !hasMore,
+                reason: features.length ? hasMore ? 'page_has_more' : 'simplified' : 'empty_result',
+            },
         };
     }
 
@@ -1049,19 +1369,61 @@ export class AgentToolService {
         const selection = await this.selectionRepository.getSelection(selectionId);
         if (!selection) throw new Error(`Selection not found: ${selectionId}`);
 
-        const maxItems = clampLimit(input.limit ?? selection.metadata?.maxMaterializedItems, 2000, 10000);
-        const timeoutMs = clampLimit(input.timeout_ms ?? input.timeoutMs ?? selection.metadata?.materializationTimeoutMs, 10000, 30000);
+        const maxItems = parseOptionalPositiveInt(input.limit ?? selection.metadata?.maxMaterializedItems, 'selection materialization limit');
+        const timeoutMs = parseOptionalPositiveInt(input.timeout_ms ?? input.timeoutMs ?? selection.metadata?.materializationTimeoutMs, 'selection materialization timeout');
+        const fallbackLimit = parseOptionalPositiveInt(input.fallback_limit ?? input.fallbackLimit, 'selection materialization fallback limit');
+        const fallbackTimeoutMs = parseOptionalPositiveInt(input.fallback_timeout_ms ?? input.fallbackTimeoutMs, 'selection materialization fallback timeout');
         let rows: SelectionItemPayload[] = [];
         let status: 'empty' | 'partial' | 'materialized' = 'empty';
         try {
             rows = await this.database.withTransaction(async () => {
-                await this.database.query('SELECT set_config($1, $2, true)', ['statement_timeout', `${timeoutMs}ms`]);
+                if (timeoutMs !== null) {
+                    await this.database.query('SELECT set_config($1, $2, true)', ['statement_timeout', `${timeoutMs}ms`]);
+                }
                 return this.querySelectionItemsForMaterialization(selection, maxItems);
             });
-            status = rows.length === 0 ? 'empty' : rows.length >= maxItems ? 'partial' : 'materialized';
+            status = rows.length === 0 ? 'empty' : 'materialized';
             await this.selectionRepository.replaceSelectionItems(selection.selection_id, rows, selection.workspace_id, status);
         } catch (err: any) {
             const message = err?.message || 'Selection materialization failed';
+            if (isStatementTimeout(err) && fallbackLimit !== null) {
+                try {
+                    rows = await this.database.withTransaction(async () => {
+                        if (fallbackTimeoutMs !== null) {
+                            await this.database.query('SELECT set_config($1, $2, true)', ['statement_timeout', `${fallbackTimeoutMs}ms`]);
+                        }
+                        return this.querySelectionItemsForMaterialization(selection, fallbackLimit);
+                    });
+                    status = rows.length === 0 ? 'empty' : 'partial';
+                    await this.selectionRepository.replaceSelectionItems(selection.selection_id, rows, selection.workspace_id, status, message);
+                    return {
+                        selection_id: selection.selection_id,
+                        layer: selection.layer_id,
+                        materialized_count: rows.length,
+                        materialization_status: status,
+                        materialization_warning: rows.length > 0
+                            ? 'Primary selection materialization timed out; stored the explicitly requested fallback subset.'
+                            : 'Primary selection materialization timed out and the explicitly requested fallback found no matching rows.',
+                        limits: {
+                            requested_limit: maxItems,
+                            fallback_limit: fallbackLimit,
+                            timeout_ms: timeoutMs,
+                            fallback_timeout_ms: fallbackTimeoutMs,
+                            fallback: true,
+                        },
+                        items_preview: rows.slice(0, 10),
+                    };
+                } catch (fallbackErr: any) {
+                    await this.selectionRepository.replaceSelectionItems(
+                        selection.selection_id,
+                        [],
+                        selection.workspace_id,
+                        'error',
+                        fallbackErr?.message || message,
+                    ).catch(() => null);
+                    throw err;
+                }
+            }
             await this.selectionRepository.replaceSelectionItems(selection.selection_id, [], selection.workspace_id, 'error', message).catch(() => null);
             throw err;
         }
@@ -1072,9 +1434,10 @@ export class AgentToolService {
             materialized_count: rows.length,
             materialization_status: status,
             limits: {
-                max_items: maxItems,
+                requested_limit: maxItems,
                 timeout_ms: timeoutMs,
-                truncated: rows.length >= maxItems,
+                fallback_timeout_ms: fallbackTimeoutMs,
+                agent_requested_subset: maxItems !== null,
             },
             items_preview: rows.slice(0, 10),
         };
@@ -1084,21 +1447,26 @@ export class AgentToolService {
         await this.selectionRepository.cleanupExpiredSelections();
         const selection = await this.selectionRepository.getSelection(selectionId);
         if (!selection) throw new Error(`Selection not found: ${selectionId}`);
-        const rawRequestedLimit = input.limit == null ? null : Number(input.limit);
-        const requestedLimit = rawRequestedLimit !== null && Number.isFinite(rawRequestedLimit) ? rawRequestedLimit : null;
-        const limit = clampLimit(input.limit, 500, 5000);
+        const hasLimitInput = input.limit !== undefined && input.limit !== null && input.limit !== '';
+        const rawLimit = String(input.limit || '').trim().toLowerCase();
+        const requestedLimit = hasLimitInput && rawLimit === 'all'
+            ? null
+            : hasLimitInput
+                ? parseOptionalPositiveInt(input.limit, 'selection items limit')
+                : 500;
         const offset = Math.max(0, Math.trunc(Number(input.offset) || 0));
-        const page = await this.selectionRepository.listSelectionItems(selectionId, selection.workspace_id, limit, offset);
+        const page = await this.selectionRepository.listSelectionItems(selectionId, selection.workspace_id, requestedLimit, offset);
         return {
             selection_id: selection.selection_id,
             layer: selection.layer_id,
             materialized_count: selection.materialized_count || 0,
             materialization_status: selection.materialization_status || 'none',
+            materialization_error: selection.materialization_error || null,
             pagination: {
-                requested_limit: requestedLimit,
-                limit,
-                max_limit: 5000,
-                capped: requestedLimit !== null ? requestedLimit > limit : false,
+                requested_limit: hasLimitInput ? (requestedLimit ?? 'all') : null,
+                limit: requestedLimit ?? 'all',
+                defaulted: !hasLimitInput,
+                capped: false,
                 offset,
                 returned: page.items.length,
                 has_more: page.has_more,
@@ -1108,16 +1476,22 @@ export class AgentToolService {
         };
     }
 
-    private async querySelectionItemsForMaterialization(selection: SelectionPayload, maxItems: number): Promise<SelectionItemPayload[]> {
+    private async querySelectionItemsForMaterialization(selection: SelectionPayload, maxItems: number | null): Promise<SelectionItemPayload[]> {
         const predicate = selection.predicate || {};
+        validateSelectionPredicateKeys(predicate);
         const rawLayer = selection.layer_id || String(predicate.layer || predicate.layer_id || '').trim() || null;
         const layer = rawLayer ? normalizeSelectionLayerId(rawLayer) : null;
         const kind = inferSelectionKind(layer, predicate);
         if (!kind) return [];
 
         const bbox = parseSelectionBbox(predicate.bbox, predicate.bbox_order || predicate.bboxOrder);
-        const from = parseIso(predicate.from || predicate.observed_from || predicate.start);
-        const to = parseIso(predicate.to || predicate.observed_to || predicate.end);
+        const timeWindow = predicate.time_window && typeof predicate.time_window === 'object'
+            ? predicate.time_window
+            : predicate.timeWindow && typeof predicate.timeWindow === 'object'
+                ? predicate.timeWindow
+                : {};
+        const from = parseIso(predicate.from || predicate.observed_from || predicate.observedFrom || predicate.start || (timeWindow as any).from || (timeWindow as any).start);
+        const to = parseIso(predicate.to || predicate.observed_to || predicate.observedTo || predicate.end || (timeWindow as any).to || (timeWindow as any).end);
         const useHistoricalPositions = kind === 'entity' && Boolean(
             from
             || to
@@ -1131,7 +1505,7 @@ export class AgentToolService {
             ...(Array.isArray(predicate.entity_ids) ? predicate.entity_ids : []),
             ...(Array.isArray(predicate.event_ids) ? predicate.event_ids : []),
             ...(Array.isArray(predicate.asset_ids) ? predicate.asset_ids : []),
-        ].map((value) => String(value).trim()).filter(Boolean))).slice(0, 50000);
+        ].map((value) => String(value).trim()).filter(Boolean)));
         const geometryJson = selection.geometry_json ? JSON.stringify(selection.geometry_json) : null;
 
         const params: unknown[] = [];
@@ -1139,6 +1513,15 @@ export class AgentToolService {
         const add = (sql: string, value: unknown) => {
             params.push(value);
             clauses.push(sql.replace('?', `$${params.length}`));
+        };
+        const addTextValues = (expr: string, values: string[]) => {
+            if (values.length === 0) return;
+            if (values.length === 1) {
+                add(`${expr} = ?`, values[0]);
+                return;
+            }
+            params.push(values);
+            clauses.push(`${expr} = ANY($${params.length}::text[])`);
         };
         const addBbox = (geomExpr: string, box: Bbox) => {
             const [west, south, east, north] = box;
@@ -1155,19 +1538,26 @@ export class AgentToolService {
         if (kind === 'entity') {
             const prefix = useHistoricalPositions ? 'pf' : 'ls';
             if (layer) add(`${prefix}.layer_id = ?`, layer);
+            addTextValues('e.subtype', predicateTextValues(predicate, ['subtype', 'subtypes', 'subtype_in', 'subtypeIn']));
+            addTextValues('e.entity_kind', predicateTextValues(predicate, ['entity_kind', 'entityKind', 'entity_kind_in', 'entityKindIn']));
+            addTextValues(`COALESCE(${prefix}.source_id, e.source_id)`, predicateTextValues(predicate, ['source_id', 'sourceId', 'source_ids', 'sourceIds', 'sources']));
             if (bbox) addBbox(`${prefix}.geom`, bbox);
             addGeometry(`${prefix}.geom`);
             if (from) add(`${prefix}.observed_at >= ?::timestamptz`, from);
             if (to) add(`${prefix}.observed_at <= ?::timestamptz`, to);
-            const at = !from && !to ? parseIso(predicate.at || predicate.time) : null;
+            const at = !from && !to ? parseIso(predicate.at || predicate.time || predicate.observed_at || predicate.observedAt) : null;
             if (at) add(`${prefix}.observed_at <= ?::timestamptz`, at);
             if (ids.length > 0) {
                 params.push(ids);
                 clauses.push(`${prefix}.entity_id = ANY($${params.length}::text[])`);
             }
-            params.push(maxItems);
-            const limitParam = params.length;
+            const addLimit = () => {
+                if (maxItems === null) return '';
+                params.push(maxItems);
+                return `LIMIT $${params.length}`;
+            };
             if (useHistoricalPositions) {
+                const limitClause = addLimit();
                 const result = await this.database.query<SelectionItemPayload>(
                     `
                         WITH latest AS (
@@ -1189,17 +1579,18 @@ export class AgentToolService {
                             FROM core.position_fixes pf
                             JOIN core.entities e ON e.entity_id = pf.entity_id
                             ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
-                            ORDER BY pf.entity_id, pf.observed_at DESC
+                            ORDER BY pf.entity_id, pf.observed_at DESC, pf.created_at DESC
                         )
                         SELECT *
                         FROM latest
                         ORDER BY observed_at DESC NULLS LAST, object_id
-                        LIMIT $${limitParam}
+                        ${limitClause}
                     `,
                     params,
                 );
                 return (result?.rows || []).map((row) => ({ ...row, selection_id: selection.selection_id }));
             }
+            const liveLimitClause = addLimit();
             const result = await this.database.query<SelectionItemPayload>(
                 `
                     SELECT
@@ -1221,15 +1612,24 @@ export class AgentToolService {
                     JOIN core.entities e ON e.entity_id = ls.entity_id
                     ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
                     ORDER BY ls.observed_at DESC, ls.entity_id
-                    LIMIT $${limitParam}
+                    ${liveLimitClause}
                 `,
                 params,
             );
             return (result?.rows || []).map((row) => ({ ...row, selection_id: selection.selection_id }));
         }
 
+        const addLimit = () => {
+            if (maxItems === null) return '';
+            params.push(maxItems);
+            return `LIMIT $${params.length}`;
+        };
+
         if (kind === 'event') {
             if (layer) add('ev.layer_id = ?', layer);
+            addTextValues('ev.subtype', predicateTextValues(predicate, ['subtype', 'subtypes', 'subtype_in', 'subtypeIn']));
+            addTextValues('ev.event_kind', predicateTextValues(predicate, ['event_kind', 'eventKind', 'event_kind_in', 'eventKindIn']));
+            addTextValues('ev.source_id', predicateTextValues(predicate, ['source_id', 'sourceId', 'source_ids', 'sourceIds', 'sources']));
             if (bbox) addBbox('ev.geom', bbox);
             addGeometry('ev.geom');
             if (from) add('COALESCE(ev.observed_at, ev.valid_from, ev.created_at) >= ?::timestamptz', from);
@@ -1238,8 +1638,7 @@ export class AgentToolService {
                 params.push(ids);
                 clauses.push(`ev.event_id = ANY($${params.length}::text[])`);
             }
-            params.push(maxItems);
-            const limitParam = params.length;
+            const limitClause = addLimit();
             const result = await this.database.query<SelectionItemPayload>(
                 `
                     SELECT
@@ -1258,7 +1657,7 @@ export class AgentToolService {
                     FROM core.events ev
                     ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
                     ORDER BY COALESCE(ev.observed_at, ev.valid_from, ev.created_at) DESC, ev.event_id
-                    LIMIT $${limitParam}
+                    ${limitClause}
                 `,
                 params,
             );
@@ -1266,6 +1665,9 @@ export class AgentToolService {
         }
 
         if (layer) add('a.layer_id = ?', layer);
+        addTextValues('a.subtype', predicateTextValues(predicate, ['subtype', 'subtypes', 'subtype_in', 'subtypeIn']));
+        addTextValues('a.asset_kind', predicateTextValues(predicate, ['asset_kind', 'assetKind', 'asset_kind_in', 'assetKindIn']));
+        addTextValues('a.source_id', predicateTextValues(predicate, ['source_id', 'sourceId', 'source_ids', 'sourceIds', 'sources']));
         if (bbox) addBbox('a.geom', bbox);
         addGeometry('a.geom');
         if (from) add('COALESCE(a.last_observed_at, a.updated_at, a.created_at) >= ?::timestamptz', from);
@@ -1274,8 +1676,7 @@ export class AgentToolService {
             params.push(ids);
             clauses.push(`a.asset_id = ANY($${params.length}::text[])`);
         }
-        params.push(maxItems);
-        const limitParam = params.length;
+        const limitClause = addLimit();
         const result = await this.database.query<SelectionItemPayload>(
             `
                 SELECT
@@ -1295,7 +1696,7 @@ export class AgentToolService {
                 FROM core.assets a
                 ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
                 ORDER BY COALESCE(a.last_observed_at, a.updated_at, a.created_at) DESC, a.asset_id
-                LIMIT $${limitParam}
+                ${limitClause}
             `,
             params,
         );
@@ -1310,9 +1711,15 @@ export class AgentToolService {
         const layer = normalizeSelectionLayerId(selection.layer_id || String(selection.predicate?.layer || ''));
         const predicate = selection.predicate || {};
         const bbox = parseSelectionBbox(predicate.bbox, predicate.bbox_order || predicate.bboxOrder);
-        const from = parseIso(predicate.from);
-        const to = parseIso(predicate.to);
-        const ids = Array.isArray(predicate.ids) ? predicate.ids.map(String).slice(0, 5000) : [];
+        const timeWindow = predicate.time_window && typeof predicate.time_window === 'object'
+            ? predicate.time_window
+            : predicate.timeWindow && typeof predicate.timeWindow === 'object'
+                ? predicate.timeWindow
+                : {};
+        const from = parseIso(predicate.from || predicate.observed_from || predicate.observedFrom || predicate.start || (timeWindow as any).from || (timeWindow as any).start);
+        const to = parseIso(predicate.to || predicate.observed_to || predicate.observedTo || predicate.end || (timeWindow as any).to || (timeWindow as any).end);
+        const at = !from && !to ? parseIso(predicate.at || predicate.time || predicate.observed_at || predicate.observedAt) : null;
+        const ids = Array.isArray(predicate.ids) ? predicate.ids.map(String) : [];
         const geometryJson = selection.geometry_json ? JSON.stringify(selection.geometry_json) : null;
 
         const params: unknown[] = [];
@@ -1344,6 +1751,10 @@ export class AgentToolService {
             }
             if (to) {
                 localParams.push(to);
+                localClauses.push(`${timeExpr} <= $${localParams.length}::timestamptz`);
+            }
+            if (at) {
+                localParams.push(at);
                 localClauses.push(`${timeExpr} <= $${localParams.length}::timestamptz`);
             }
             if (ids.length > 0) {

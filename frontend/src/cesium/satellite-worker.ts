@@ -18,6 +18,7 @@
 import * as satelliteJs from 'satellite.js';
 
 interface SatInit {
+    index: number;
     noradId: number;
     name: string;
     tleLine1: string;
@@ -27,6 +28,7 @@ interface SatInit {
 }
 
 interface SatCached {
+    index: number;
     noradId: number;
     satrec: satelliteJs.SatRec;
 }
@@ -171,7 +173,7 @@ self.onmessage = (e: MessageEvent) => {
         for (const s of sats) {
             try {
                 const satrec = satelliteJs.twoline2satrec(s.tleLine1, s.tleLine2);
-                satellites.push({ noradId: s.noradId, satrec });
+                satellites.push({ index: s.index, noradId: s.noradId, satrec });
                 satOrder.push(s.noradId);
             } catch (error) {
                 console.error('[satellite-worker] invalid TLE skipped', s.noradId, error);
@@ -217,11 +219,12 @@ self.onmessage = (e: MessageEvent) => {
     }
 
     if (type === 'tick') {
+        const tickId = e.data.tickId;
         const t = new Date(e.data.currentTimeMs);
         for (let i = 0; i < satellites.length; i++) {
-            writeSabPosition(i, propagateOneEcf(satellites[i].satrec, t));
+            writeSabPosition(satellites[i].index, propagateOneEcf(satellites[i].satrec, t));
         }
-        (self as any).postMessage({ type: 'positions', epochMs: t.getTime(), count: satellites.length, order: satOrder });
+        (self as any).postMessage({ type: 'positions', tickId, epochMs: t.getTime(), count: satellites.length, order: satOrder });
         return;
     }
 

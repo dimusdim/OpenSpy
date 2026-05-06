@@ -47,9 +47,9 @@ type AssetSnapshotRow = {
     properties: any;
 };
 
-function clampLimit(limit: number | undefined, fallback = 200, max = 5000): number {
+function normalizeLimit(limit: number | undefined, fallback = 200): number {
     if (!Number.isFinite(limit)) return fallback;
-    return Math.max(1, Math.min(max, Math.trunc(limit as number)));
+    return Math.max(1, Math.trunc(limit as number));
 }
 
 export class AssetQueryService {
@@ -119,7 +119,7 @@ export class AssetQueryService {
         if (!this.database.isReady()) return [];
 
         const { clauses, params } = this.buildLatestWhere(filters, 'a');
-        const limit = clampLimit(filters.limit);
+        const limit = normalizeLimit(filters.limit);
         const offset = Math.max(0, Math.trunc(Number(filters.offset || 0)));
         params.push(limit, offset);
         const limitParam = params.length - 1;
@@ -158,7 +158,7 @@ export class AssetQueryService {
         if (!this.database.isReady()) return [];
 
         const { clauses, params } = this.buildSnapshotWhere(filters, 's');
-        const limit = clampLimit(filters.limit, 500, 10000);
+        const limit = normalizeLimit(filters.limit, 500);
         const offset = Math.max(0, Math.trunc(Number(filters.offset || 0)));
         params.push(limit, offset);
         const limitParam = params.length - 1;

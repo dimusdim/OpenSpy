@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import * as Cesium from 'cesium';
 import 'cesium/Build/Cesium/Widgets/widgets.css';
 import { useTimelineStore } from '../store/useTimelineStore';
@@ -556,6 +556,16 @@ export default function Globe() {
                     }
                 }
 
+                const replayMeta = replayMetaMap.get(eid);
+                if (replayMeta) {
+                    useTimelineStore.getState().setSelectedEntityId(eid, {
+                        name: replayMeta.name || entity.name || eid,
+                        id: eid,
+                        type: replayMeta.layer || 'Object',
+                    });
+                    return;
+                }
+
                 // Prefer the authoritative `layer` stashed in entity.properties
                 // by the layer hooks — single source of truth, survives arbitrary
                 // id shapes (cables have no prefix, pwr-* is new, etc.).
@@ -595,7 +605,7 @@ export default function Globe() {
                         : eid.startsWith('conflict-') || eid.startsWith('acled-') ? 'Conflict'
                         : eid.startsWith('airspace-') ? 'Airspace'
                         : eid.startsWith('gfw-') ? 'GFW Event'
-                        : 'Vessel'
+                        : 'Object'
                 };
                 useTimelineStore.getState().setSelectedEntityId(eid, metadata);
                 return;
@@ -752,8 +762,9 @@ export default function Globe() {
     const showClouds = cloudsEnabled && !(mode === 'playback' && playbackKind === 'historical');
     const cloudPrimRef = useRef<Cesium.Primitive | null>(null);
 
-    useEffect(() => {
-        if (!viewer) return;
+    const ensureCloudPrimitive = useCallback(() => {
+        if (!viewer || viewer.isDestroyed()) return null;
+        if (cloudPrimRef.current) return cloudPrimRef.current;
         // GIBS cloud products lag ~1 day, so use yesterday's date
         const cloudDate = new Date(Date.now() - 86400_000).toISOString().split('T')[0];
         const cloudImageUrl =
@@ -798,32 +809,18 @@ export default function Globe() {
         const cloudPrim = new Cesium.Primitive({
             geometryInstances: geomInstance,
             appearance,
-            asynchronous: false,
+            asynchronous: true,
         });
-        cloudPrim.show = showClouds;
+        cloudPrim.show = true;
         viewer.scene.primitives.add(cloudPrim);
         cloudPrimRef.current = cloudPrim;
         viewer.scene.requestRender();
         console.log(`[Clouds] Shell primitive added (radii ${semiMajor}m, alt ${CLOUD_ALT}m, date ${cloudDate})`);
+        return cloudPrim;
+    }, [viewer]);
 
-        // Track metric status for the Legend.
-        const updateCloudMetric = () => {
-            if (viewer.isDestroyed()) return;
-            const storeState = useTimelineStore.getState();
-            const historicalReplay = storeState.mode === 'playback' && storeState.playbackKind === 'historical';
-            const sourceVisible = storeState.sources.clouds && storeState.visibility.clouds;
-            const activeClouds = sourceVisible && !historicalReplay;
-            useTimelineStore.getState().setStreamMetric('clouds', {
-                count: activeClouds ? 1 : 0,
-                status: historicalReplay || !sourceVisible ? 'disabled' : 'streaming',
-                speed: activeClouds ? cloudDate : '-',
-            });
-        };
-        updateCloudMetric();
-        const metricsInterval = setInterval(updateCloudMetric, 5000);
-
+    useEffect(() => {
         return () => {
-            clearInterval(metricsInterval);
             if (viewer && !viewer.isDestroyed() && cloudPrimRef.current) {
                 viewer.scene.primitives.remove(cloudPrimRef.current);
                 cloudPrimRef.current = null;
@@ -832,17 +829,18 @@ export default function Globe() {
     }, [viewer]);
 
     useEffect(() => {
-        if (cloudPrimRef.current && viewer) {
-            cloudPrimRef.current.show = showClouds;
-            const cloudDate = new Date(Date.now() - 86400_000).toISOString().split('T')[0];
-            useTimelineStore.getState().setStreamMetric('clouds', {
-                count: showClouds ? 1 : 0,
-                status: showClouds ? 'streaming' : 'disabled',
-                speed: showClouds ? cloudDate : '-',
-            });
+        const cloudDate = new Date(Date.now() - 86400_000).toISOString().split('T')[0];
+        const cloudPrim = showClouds ? ensureCloudPrimitive() : cloudPrimRef.current;
+        useTimelineStore.getState().setStreamMetric('clouds', {
+            count: showClouds ? 1 : 0,
+            status: showClouds ? 'streaming' : 'disabled',
+            speed: showClouds ? cloudDate : '-',
+        });
+        if (cloudPrim && viewer && !viewer.isDestroyed()) {
+            cloudPrim.show = showClouds;
             viewer.scene.requestRender();
         }
-    }, [showClouds, cloudsEnabled, mode, playbackKind, viewer]);
+    }, [showClouds, cloudsEnabled, mode, playbackKind, viewer, ensureCloudPrimitive]);
 
     // --- Base globe imagery / 3D geometry: Google | OSM | MODIS ---
     // Google and OSM tilesets are loaded lazily on first selection and

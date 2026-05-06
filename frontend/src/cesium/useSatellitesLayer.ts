@@ -17,7 +17,9 @@ import {
 // ---------------------------------------------------------------------------
 // Footprint types & registry (unchanged — used by Globe.tsx picking)
 // ---------------------------------------------------------------------------
-const FOOTPRINT_UPDATE_MS = 250;
+// Match the live SGP4 worker cadence. Updating footprints faster just
+// recomputes the same billboard positions while allocating Entity geometry.
+const FOOTPRINT_UPDATE_MS = 2000;
 const FOOTPRINT_RAY_COUNT = 8;
 
 export interface SatelliteFootprintMeta {
@@ -61,7 +63,7 @@ interface FootprintState {
     satId: string;       // sat-{noradId}
     noradId: number;
     ellipseEntity: Cesium.Entity;
-    rayEntities: Cesium.Entity[];
+    rayStates: FootprintRayState[];
     radiusMeters: number;
 }
 
@@ -71,6 +73,19 @@ interface FootprintConfig {
     radiusMeters: number;
     baseColor: Cesium.Color;
     meta: SatelliteFootprintMeta;
+    cartoScratch: Cesium.Cartographic;
+    nadirScratch: Cesium.Cartesian3;
+}
+
+type FootprintRayPositions = [Cesium.Cartesian3, Cesium.Cartesian3];
+
+interface FootprintRayState {
+    entity: Cesium.Entity;
+    start: Cesium.Cartesian3;
+    end: Cesium.Cartesian3;
+    positionsA: FootprintRayPositions;
+    positionsB: FootprintRayPositions;
+    usePositionsA: boolean;
 }
 
 // How often to post 'tick' to the Worker (ms). 2 seconds is smooth enough —
@@ -79,6 +94,23 @@ const WORKER_TICK_INTERVAL = 2000;
 const LIVE_TRAIL_MAX_SATS = 900;
 const LIVE_TRAIL_WINDOW_MINUTES = 120;
 const LIVE_TRAIL_STEP_SECONDS = 180;
+
+function writeFootprintPerimeterPoint(
+    lon1: number,
+    sinLat1: number,
+    cosLat1: number,
+    cosAng: number,
+    sinAng: number,
+    angleRad: number,
+    result: Cesium.Cartesian3,
+): Cesium.Cartesian3 {
+    const lat2 = Math.asin(sinLat1 * cosAng + cosLat1 * sinAng * Math.cos(angleRad));
+    const lon2 = lon1 + Math.atan2(
+        Math.sin(angleRad) * sinAng * cosLat1,
+        cosAng - sinLat1 * Math.sin(lat2),
+    );
+    return Cesium.Cartesian3.fromRadians(lon2, lat2, 0, undefined, result);
+}
 
 function getSatelliteBillboardShow(
     state: ReturnType<typeof useTimelineStore.getState>,
@@ -104,8 +136,9 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
     const billboardMapRef = useRef<Map<number, Cesium.Billboard>>(new Map());
     // Batched orbit trails — one GPU draw call
     const trailsPrimitiveRef = useRef<Cesium.Primitive | null>(null);
-    // Worker ref
-    const workerRef = useRef<Worker | null>(null);
+    // Worker pool ref. Full satellite catalog stays loaded; the pool only
+    // parallelizes SGP4 parse/tick work across shards.
+    const workerRefsRef = useRef<Worker[]>([]);
     // Tick interval ref
     const tickIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
     // Raw satellite data from API (for footprints + metadata)
@@ -118,6 +151,12 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
     const applySlotsRef = useRef<SatelliteApplySlot[]>([]);
     const trailRequestNonceRef = useRef(0);
     const lastTrailKeyRef = useRef<string | null>(null);
+    const trailAggregationRef = useRef<Map<number, {
+        expected: number;
+        responses: number;
+        sampleCount: number;
+        results: { noradId: number; positions: Float64Array; validSamples: number }[];
+    }>>(new Map());
 
     // Footprint state
     const footprintDsRef = useRef<Cesium.CustomDataSource | null>(null);
@@ -181,8 +220,8 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
     };
 
     const requestTrailRebuild = () => {
-        const worker = workerRef.current;
-        if (!worker) return;
+        const workers = workerRefsRef.current;
+        if (workers.length === 0) return;
         const state = useTimelineStore.getState();
         if (state.mode === 'playback' || !state.showTrajectories || !state.sources.satellites || !state.visibility.satellites) {
             removeTrailPrimitive();
@@ -198,14 +237,22 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
         lastTrailKeyRef.current = trailKey;
         const nonce = trailRequestNonceRef.current + 1;
         trailRequestNonceRef.current = nonce;
-        worker.postMessage({
-            type: 'propagate',
-            nonce,
-            noradIds,
-            epochMs: Date.now(),
-            windowMinutes: LIVE_TRAIL_WINDOW_MINUTES,
-            stepSeconds: LIVE_TRAIL_STEP_SECONDS,
+        trailAggregationRef.current.set(nonce, {
+            expected: workers.length,
+            responses: 0,
+            sampleCount: 0,
+            results: [],
         });
+        for (const worker of workers) {
+            worker.postMessage({
+                type: 'propagate',
+                nonce,
+                noradIds,
+                epochMs: Date.now(),
+                windowMinutes: LIVE_TRAIL_WINDOW_MINUTES,
+                stepSeconds: LIVE_TRAIL_STEP_SECONDS,
+            });
+        }
     };
 
     // ---- Effect 1: BillboardCollection + trails primitive lifetime ----
@@ -277,83 +324,65 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                 const sabState = createSatellitePositionsSAB(sats.length);
                 positionsSabRef.current = sabState;
 
-                // Build index and metadata
-                const noradToIndex = new Map<number, number>();
-                for (let i = 0; i < sats.length; i++) {
-                    const sat = sats[i];
-                    const isRecon = sat.recon === true;
-                    const subtype = isRecon ? 'recon' : sat.type;
-                    const entityId = `sat-${sat.noradId || sat.name}`;
-                    noradToIndex.set(sat.noradId, i);
-                    sabState.indexById.set(entityId, i);
-
-                    // Register metadata for picking (Globe.tsx)
-                    const meta: SatelliteMeta = {
-                        id: entityId,
-                        name: sat.name,
-                        noradId: sat.noradId,
-                        type: sat.type,
-                        subtype,
-                        recon: isRecon,
-                        reconMeta: sat.reconMeta,
-                        sensor: sat.sensor,
-                    };
-                    satelliteMetaMap.set(entityId, meta);
-
-                    // Create billboard (initially at 0,0,0 — Worker will set real position)
-                    const icon = await getSatBillboardImage(sat.type, isRecon);
-                    if (!active) return;
-                    const bb = bc.add({
-                        position: Cesium.Cartesian3.ZERO,
-                        image: icon,
-                        scale: isRecon ? 1.8 : 1.4,
-                        show: false, // hidden until first Worker tick
-                        id: entityId,
+                // Start workers before the main-thread billboard build. SGP4
+                // TLE parsing/ticks are sharded, while every shard writes into
+                // the same full-catalog SAB by global satellite index.
+                workerRefsRef.current.forEach((existing) => existing.terminate());
+                workerRefsRef.current = [];
+                trailAggregationRef.current.clear();
+                let readyWorkers = 0;
+                let tickSeq = 0;
+                const tickAggregation = new Map<number, { expected: number; responses: number; epochMs: number }>();
+                const workerCount = Math.min(4, Math.max(1, Math.ceil(sats.length / 6000)));
+                const shardSize = Math.ceil(sats.length / workerCount);
+                const expectedWorkerCount = Math.ceil(sats.length / shardSize);
+                const sendLiveTickToAll = () => {
+                    if (useTimelineStore.getState().mode === 'playback') return;
+                    const workers = workerRefsRef.current;
+                    if (workers.length === 0 || readyWorkers < expectedWorkerCount) return;
+                    const tickId = ++tickSeq;
+                    const currentTimeMs = Date.now();
+                    tickAggregation.set(tickId, {
+                        expected: workers.length,
+                        responses: 0,
+                        epochMs: currentTimeMs,
                     });
-                    billboardMapRef.current.set(sat.noradId, bb);
-                    const scratch = new Cesium.Cartesian3();
-                    positionScratchRef.current.set(sat.noradId, scratch);
-                    meta.position = scratch;
-                    applySlotsRef.current.push({
-                        index: i,
-                        targetId: entityId,
-                        billboard: bb,
-                        scratch,
-                        getVisible: () => getSatelliteBillboardShow(useTimelineStore.getState(), entityId, subtype),
-                    });
-                }
+                    for (const worker of workers) {
+                        worker.postMessage({ type: 'tick', tickId, currentTimeMs });
+                    }
+                };
 
-                // --- Start Web Worker ---
-                const worker = new Worker(
-                    new URL('./satellite-worker.ts', import.meta.url)
-                );
-                workerRef.current = worker;
-
-                worker.onmessage = (e: MessageEvent) => {
+                const handleWorkerMessage = (worker: Worker, shardIndex: number) => (e: MessageEvent) => {
                     if (!active) return;
                     const msg = e.data;
 
                     if (msg.type === 'ready') {
-                        console.log(`[Satellites] Worker ready, ${msg.count} satrecs initialized`);
+                        readyWorkers += 1;
+                        console.log(`[Satellites] Worker ${shardIndex + 1}/${expectedWorkerCount} ready (${readyWorkers}/${expectedWorkerCount}), ${msg.count} satrecs initialized`);
                         // Codex 2026-04-24: trails build = 2.31M Cartesian3 + 19k
                         // GeometryInstance с releaseGeometryInstances:false.
                         // Раньше всегда запускалось — после снятия 5000 cap это
                         // дало Chrome OOM 52 GB. Trails строим только когда
                         // mode=live И пользователь их показывает (showTrajectories).
-                        const sendLiveTick = () => {
-                            if (useTimelineStore.getState().mode === 'playback') return;
-                            worker.postMessage({ type: 'tick', currentTimeMs: Date.now() });
-                        };
-                        // Start position ticks
-                        sendLiveTick();
-                        tickIntervalRef.current = setInterval(() => {
-                            sendLiveTick();
-                        }, WORKER_TICK_INTERVAL);
+                        // Start position ticks only after every shard is
+                        // ready. Each tick writes full catalog positions into
+                        // the shared buffer, then we apply once on the next
+                        // Cesium render instead of applying per-shard.
+                        if (readyWorkers >= expectedWorkerCount && !tickIntervalRef.current) {
+                            sendLiveTickToAll();
+                            tickIntervalRef.current = setInterval(sendLiveTickToAll, WORKER_TICK_INTERVAL);
+                        }
                     }
 
                     if (msg.type === 'positions') {
+                        const tickId = Number(msg.tickId);
+                        const aggregate = tickAggregation.get(tickId);
+                        if (!aggregate) return;
+                        aggregate.responses += 1;
+                        if (aggregate.responses < aggregate.expected) return;
+                        tickAggregation.delete(tickId);
                         if (positionsSabRef.current) {
-                            positionsSabRef.current.epochMs = Number(msg.epochMs) || Date.now();
+                            positionsSabRef.current.epochMs = aggregate.epochMs;
                         }
                         if (!positionsReadyRef.current) {
                             positionsReadyRef.current = true;
@@ -366,11 +395,21 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                     }
 
                     if (msg.type === 'orbits') {
-                        if (Number(msg.nonce) !== trailRequestNonceRef.current) return;
+                        const nonce = Number(msg.nonce);
+                        if (nonce !== trailRequestNonceRef.current) return;
+                        const aggregate = trailAggregationRef.current.get(nonce);
+                        if (!aggregate) return;
+                        aggregate.responses += 1;
+                        aggregate.sampleCount = Number(msg.sampleCount) || aggregate.sampleCount;
+                        if (Array.isArray(msg.results)) {
+                            aggregate.results.push(...msg.results);
+                        }
+                        if (aggregate.responses < aggregate.expected) return;
+                        trailAggregationRef.current.delete(nonce);
                         // Build batched trail primitive from Worker orbit data
                         if (!viewer || viewer.isDestroyed()) return;
-                        const results: { noradId: number; positions: Float64Array; validSamples: number }[] = msg.results;
-                        const sampleCount: number = msg.sampleCount;
+                        const results = aggregate.results;
+                        const sampleCount = aggregate.sampleCount;
                         const trailInstances: Cesium.GeometryInstance[] = [];
 
                         for (const r of results) {
@@ -442,24 +481,104 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                     }
                 };
 
-                // Send TLE data to Worker
-                worker.postMessage({
-                    type: 'init',
-                    sab: sabState.sab,
-                    satellites: sats.map(s => ({
-                        noradId: s.noradId,
-                        name: s.name,
-                        tleLine1: s.tleLine1,
-                        tleLine2: s.tleLine2,
-                        type: s.type,
-                        recon: s.recon,
-                    })),
-                });
+                for (let shardIndex = 0; shardIndex < workerCount; shardIndex += 1) {
+                    const start = shardIndex * shardSize;
+                    const shard = sats.slice(start, start + shardSize);
+                    if (shard.length === 0) continue;
+                    const worker = new Worker(
+                        new URL('./satellite-worker.ts', import.meta.url)
+                    );
+                    workerRefsRef.current.push(worker);
+                    worker.onmessage = handleWorkerMessage(worker, shardIndex);
+                    worker.postMessage({
+                        type: 'init',
+                        sab: sabState.sab,
+                        satellites: shard.map((s, offset) => ({
+                            index: start + offset,
+                            noradId: s.noradId,
+                            name: s.name,
+                            tleLine1: s.tleLine1,
+                            tleLine2: s.tleLine2,
+                            type: s.type,
+                            recon: s.recon,
+                        })),
+                    });
+                }
+                console.log(`[Satellites] Worker pool started: ${workerRefsRef.current.length} shards for ${sats.length} satellites`);
+
+                const iconPromises = new Map<string, Promise<HTMLImageElement>>();
+                for (const sat of sats) {
+                    const iconKey = sat.recon === true ? 'recon' : (sat.type || 'civilian');
+                    if (!iconPromises.has(iconKey)) {
+                        iconPromises.set(iconKey, getSatBillboardImage(sat.type, sat.recon === true));
+                    }
+                }
+                const iconEntries = await Promise.all(
+                    Array.from(iconPromises.entries(), async ([key, promise]) => [key, await promise] as const)
+                );
+                if (!active) return;
+                const iconByKey = new Map(iconEntries);
+                const fallbackIcon = iconByKey.get('civilian')
+                    || iconByKey.values().next().value
+                    || await getSatBillboardImage('civilian', false);
+
+                const billboardStartedAt = performance.now();
+
+                // Build index and metadata
+                const noradToIndex = new Map<number, number>();
+                for (let i = 0; i < sats.length; i++) {
+                    const sat = sats[i];
+                    const isRecon = sat.recon === true;
+                    const subtype = isRecon ? 'recon' : sat.type;
+                    const entityId = `sat-${sat.noradId || sat.name}`;
+                    noradToIndex.set(sat.noradId, i);
+                    sabState.indexById.set(entityId, i);
+
+                    // Register metadata for picking (Globe.tsx)
+                    const meta: SatelliteMeta = {
+                        id: entityId,
+                        name: sat.name,
+                        noradId: sat.noradId,
+                        type: sat.type,
+                        subtype,
+                        recon: isRecon,
+                        reconMeta: sat.reconMeta,
+                        sensor: sat.sensor,
+                    };
+                    satelliteMetaMap.set(entityId, meta);
+
+                    // Create billboard (initially at 0,0,0 — Worker will set real position)
+                    const iconKey = isRecon ? 'recon' : (sat.type || 'civilian');
+                    const icon = iconByKey.get(iconKey) || fallbackIcon;
+                    const bb = bc.add({
+                        position: Cesium.Cartesian3.ZERO,
+                        image: icon,
+                        scale: isRecon ? 1.8 : 1.4,
+                        show: false, // hidden until first Worker tick
+                        id: entityId,
+                    });
+                    billboardMapRef.current.set(sat.noradId, bb);
+                    const scratch = new Cesium.Cartesian3();
+                    positionScratchRef.current.set(sat.noradId, scratch);
+                    meta.position = scratch;
+                    applySlotsRef.current.push({
+                        index: i,
+                        targetId: entityId,
+                        billboard: bb,
+                        scratch,
+                        getVisible: () => getSatelliteBillboardShow(useTimelineStore.getState(), entityId, subtype),
+                    });
+                }
+                console.log(`[Satellites] ${sats.length} billboards created in ${Math.round(performance.now() - billboardStartedAt)}ms`);
 
                 if (!viewer || viewer.isDestroyed()) return;
                 setSatelliteApplySource(viewer.scene, 'live', {
                     measureName: 'satellite-apply-main',
-                    applyVisibility: true,
+                    // Visibility is handled by the reactive visibility effects
+                    // and by the first satellitesLoadedTick pass. Keeping it
+                    // out of the continuous position apply avoids 20k
+                    // getState/getVisible calls every satellite epoch.
+                    applyVisibility: false,
                     isActive: () => useTimelineStore.getState().mode !== 'playback',
                     getState: () => ({
                         sab: positionsSabRef.current,
@@ -484,10 +603,9 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                 clearInterval(tickIntervalRef.current);
                 tickIntervalRef.current = null;
             }
-            if (workerRef.current) {
-                workerRef.current.terminate();
-                workerRef.current = null;
-            }
+            workerRefsRef.current.forEach((worker) => worker.terminate());
+            workerRefsRef.current = [];
+            trailAggregationRef.current.clear();
             if (viewer && !viewer.isDestroyed()) clearSatelliteApplySource(viewer.scene, 'live');
             positionsReadyRef.current = false;
         };
@@ -513,6 +631,10 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
         }
 
         const fpDs = new Cesium.CustomDataSource('sat-footprints');
+        const initialTimelineState = useTimelineStore.getState();
+        fpDs.show = initialTimelineState.mode !== 'playback'
+            && initialTimelineState.sources.satelliteFootprints
+            && initialTimelineState.visibility.satelliteFootprints;
         viewer.dataSources.add(fpDs);
         footprintDsRef.current = fpDs;
         satelliteFootprintMetaMap.clear();
@@ -548,6 +670,8 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                 radiusMeters,
                 baseColor,
                 meta: fpMeta,
+                cartoScratch: new Cesium.Cartographic(),
+                nadirScratch: new Cesium.Cartesian3(),
             });
         }
 
@@ -555,13 +679,19 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
 
         // Discrete update tick — read positions from BillboardCollection
         let lastUpdateMs = 0;
+        let lastPositionEpochMs: number | null = null;
         const R_EARTH = 6_371_000;
         const bbMap = billboardMapRef.current;
 
         const onTick = () => {
-            if (useTimelineStore.getState().mode === 'playback') return;
+            const timelineState = useTimelineStore.getState();
+            if (timelineState.mode === 'playback') return;
+            if (!timelineState.sources.satelliteFootprints || !timelineState.visibility.satelliteFootprints) return;
             const nowMs = Date.now();
             if (nowMs - lastUpdateMs < FOOTPRINT_UPDATE_MS) return;
+            const positionEpochMs = positionsSabRef.current?.epochMs ?? null;
+            const hasPositionEpoch = typeof positionEpochMs === 'number' && Number.isFinite(positionEpochMs);
+            if (hasPositionEpoch && positionEpochMs === lastPositionEpochMs) return;
             lastUpdateMs = nowMs;
             let updated = false;
 
@@ -570,13 +700,12 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                 if (!bb || !bb.show) continue;
                 const satPos = bb.position;
                 if (!isFiniteCartesian(satPos) || Cesium.Cartesian3.equals(satPos, Cesium.Cartesian3.ZERO)) continue;
-                const satPosStable = Cesium.Cartesian3.clone(satPos);
 
-                const carto = Cesium.Cartographic.fromCartesian(satPos);
+                const carto = Cesium.Cartographic.fromCartesian(satPos, undefined, cfg.cartoScratch);
                 if (!carto) continue;
                 const lat1 = carto.latitude;
                 const lon1 = carto.longitude;
-                const nadir = Cesium.Cartesian3.fromRadians(lon1, lat1, 0);
+                const nadir = Cesium.Cartesian3.fromRadians(lon1, lat1, 0, undefined, cfg.nadirScratch);
                 if (!isFiniteCartesian(nadir)) continue;
                 const angDist = cfg.radiusMeters / R_EARTH;
                 const sinLat1 = Math.sin(lat1);
@@ -602,28 +731,38 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                     });
                     satelliteFootprintMetaMap.set(footprintId, cfg.meta);
 
-                    const rayEntities: Cesium.Entity[] = [];
+                    const rayStates: FootprintRayState[] = [];
                     for (let k = 0; k < FOOTPRINT_RAY_COUNT; k++) {
                         const angleRad = (k / FOOTPRINT_RAY_COUNT) * 2 * Math.PI;
-                        const lat2 = Math.asin(sinLat1 * cosAng + cosLat1 * sinAng * Math.cos(angleRad));
-                        const lon2 = lon1 + Math.atan2(
-                            Math.sin(angleRad) * sinAng * cosLat1,
-                            cosAng - sinLat1 * Math.sin(lat2)
+                        const rayStart = Cesium.Cartesian3.clone(satPos, new Cesium.Cartesian3());
+                        const rayEnd = writeFootprintPerimeterPoint(
+                            lon1,
+                            sinLat1,
+                            cosLat1,
+                            cosAng,
+                            sinAng,
+                            angleRad,
+                            new Cesium.Cartesian3(),
                         );
-                        const perimeter = Cesium.Cartesian3.fromRadians(lon2, lat2, 0);
+                        const positionsA: FootprintRayPositions = [rayStart, rayEnd];
+                        const positionsB: FootprintRayPositions = [rayStart, rayEnd];
                         const rayId = `beam-${cfg.satId}#${k}`;
                         const rayEntity = fpDs.entities.add({
                             id: rayId,
                             polyline: {
-                                positions: new Cesium.ConstantProperty([
-                                    Cesium.Cartesian3.clone(satPosStable),
-                                    Cesium.Cartesian3.clone(perimeter),
-                                ]),
+                                positions: new Cesium.ConstantProperty(positionsA),
                                 width: 1,
                                 material: new Cesium.ColorMaterialProperty(cfg.baseColor.withAlpha(0.25)),
                             },
                         });
-                        rayEntities.push(rayEntity);
+                        rayStates.push({
+                            entity: rayEntity,
+                            start: rayStart,
+                            end: rayEnd,
+                            positionsA,
+                            positionsB,
+                            usePositionsA: true,
+                        });
                         satelliteFootprintMetaMap.set(rayId, cfg.meta);
                     }
 
@@ -631,7 +770,7 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                         satId: cfg.satId,
                         noradId: cfg.noradId,
                         ellipseEntity,
-                        rayEntities,
+                        rayStates,
                         radiusMeters: cfg.radiusMeters,
                     };
                     states.set(cfg.noradId, st);
@@ -644,21 +783,24 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                     st.ellipseEntity.position = new Cesium.ConstantPositionProperty(nadir);
                 }
 
-                for (let k = 0; k < st.rayEntities.length; k++) {
-                    const angleRad = (k / st.rayEntities.length) * 2 * Math.PI;
-                    const lat2 = Math.asin(sinLat1 * cosAng + cosLat1 * sinAng * Math.cos(angleRad));
-                    const lon2 = lon1 + Math.atan2(
-                        Math.sin(angleRad) * sinAng * cosLat1,
-                        cosAng - sinLat1 * Math.sin(lat2)
+                for (let k = 0; k < st.rayStates.length; k++) {
+                    const rayState = st.rayStates[k];
+                    const angleRad = (k / st.rayStates.length) * 2 * Math.PI;
+                    Cesium.Cartesian3.clone(satPos, rayState.start);
+                    writeFootprintPerimeterPoint(
+                        lon1,
+                        sinLat1,
+                        cosLat1,
+                        cosAng,
+                        sinAng,
+                        angleRad,
+                        rayState.end,
                     );
-                    const perimeter = Cesium.Cartesian3.fromRadians(lon2, lat2, 0);
-                    const rayEntity = st.rayEntities[k];
+                    const rayEntity = rayState.entity;
                     if (rayEntity.polyline) {
                         const posProp = rayEntity.polyline.positions as Cesium.ConstantProperty | undefined;
-                        const nextPositions = [
-                            Cesium.Cartesian3.clone(satPosStable),
-                            Cesium.Cartesian3.clone(perimeter),
-                        ];
+                        rayState.usePositionsA = !rayState.usePositionsA;
+                        const nextPositions = rayState.usePositionsA ? rayState.positionsA : rayState.positionsB;
                         if (posProp instanceof Cesium.ConstantProperty) {
                             posProp.setValue(nextPositions);
                         } else {
@@ -669,6 +811,9 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                 updated = true;
             }
 
+            if (updated && hasPositionEpoch) {
+                lastPositionEpochMs = positionEpochMs;
+            }
             useTimelineStore.getState().setStreamMetric('satelliteFootprints', {
                 count: states.size,
                 status: states.size > 0 ? 'streaming' : 'warning',

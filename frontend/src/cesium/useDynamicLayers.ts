@@ -33,11 +33,12 @@ const LIVE_APPLY_YIELD_EVERY = 500;
 
 function yieldToBrowser(): Promise<void> {
     return new Promise(resolve => {
-        if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
-            (window as any).requestIdleCallback(() => resolve(), { timeout: 16 });
-        } else {
-            setTimeout(resolve, 0);
-        }
+        // Do not wait for browser "idle" here. In the full Cesium/WebGL
+        // live scene there may be no reliable idle period while imagery,
+        // satellites and billboards are settling, and requestIdleCallback can
+        // starve the initial aircraft/vessel materialization. A macrotask
+        // yield keeps input/rendering responsive without blocking completion.
+        setTimeout(resolve, 0);
     });
 }
 
@@ -377,10 +378,26 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                 currentSources = freshState.sources;
                 return true;
             };
+            let lastLivePhase: 'aviation' | 'maritime' | 'dark-vessels' | null = null;
+            let lastLiveIndex = 0;
+            const publishLiveProgress = (phase: typeof lastLivePhase, index: number) => {
+                lastLivePhase = phase;
+                lastLiveIndex = index;
+                lastProcessMs = performance.now() - processStartedAt;
+                publishLiveStats();
+                (window as any).__openspyLiveApplyProgress = {
+                    phase: lastLivePhase,
+                    index: lastLiveIndex,
+                    lastProcessMs,
+                    aircraftBillboards: billboardMap.size,
+                    vesselBillboards: vesselBillboardMap.size,
+                };
+            };
             const yieldIfNeeded = async (index: number): Promise<boolean> => {
                 if (index % LIVE_APPLY_YIELD_EVERY !== 0) return refreshState();
                 const nowMs = performance.now();
                 if (nowMs - lastYieldAt < LIVE_APPLY_BUDGET_MS) return refreshState();
+                publishLiveProgress(lastLivePhase, index);
                 await yieldToBrowser();
                 lastYieldAt = performance.now();
                 return refreshState();
@@ -397,6 +414,8 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
 
                 const aircrafts = data.aircrafts as any[];
                 for (let ai = 0; ai < aircrafts.length; ai++) {
+                    lastLivePhase = 'aviation';
+                    lastLiveIndex = ai;
                     if (!(await yieldIfNeeded(ai))) return;
                     if (!currentSources.aviation) break;
                     const ac = aircrafts[ai];
@@ -478,6 +497,8 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
 
             const vessels: any[] = data.vessels;
             for (let vi = 0; vi < vessels.length; vi++) {
+                lastLivePhase = 'maritime';
+                lastLiveIndex = vi;
                 if (!(await yieldIfNeeded(vi))) return;
                 if (!currentSources.maritime) break;
                 const v = vessels[vi];
@@ -500,7 +521,8 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                 } else {
                     bb.position = pos;
                     bb.rotation = rotation;
-                    if (v.type !== 'unknown') {
+                    const prevMeta = vesselMetaMap.get(v.id);
+                    if (v.type !== 'unknown' && prevMeta?.type !== v.type) {
                         bb.image = getShipSVG(v.type);
                     }
                     bb.show = showVessel;

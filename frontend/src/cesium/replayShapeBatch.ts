@@ -151,8 +151,8 @@ export class ReplayShapeBatch {
 
         // Diagnostic instrumentation: rebuildIfDirty fires from preRender and
         // historically does synchronous Primitive construction with
-        // asynchronous:false. Codex review (2026-04-21) flagged it as the
-        // top suspect for 7-10 s longtasks blocking replay-tile orchestration.
+        // asynchronous:false. Codex review (2026-04-21) flagged it as a likely
+        // source of longtasks during replay hydration.
         // Threshold 50 ms = above one frame budget at 60 FPS but below the
         // longtask threshold (100 ms) so we catch borderline cases.
         const tStart = performance.now();

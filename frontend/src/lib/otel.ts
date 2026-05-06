@@ -31,15 +31,7 @@ let tracer: Tracer | null = null;
 // helper APIs below stay synchronous.
 let frameRenderMs: Histogram | null = null;
 let suspectBlockMs: Histogram | null = null;
-let bundleDoneMs: Histogram | null = null;
-let bundleBytes: Histogram | null = null;
 let primitiveUpdateMs: Histogram | null = null;
-let workerAckTransitMs: Histogram | null = null;
-let workerCpuMs: Histogram | null = null;
-let payloadCloneMs: Histogram | null = null;
-let putDoneMs: Histogram | null = null;
-let manifestTilesCount: Histogram | null = null;
-let manifestBytes: Histogram | null = null;
 let longtaskMs: Histogram | null = null;
 let hydrationTaskMs: Histogram | null = null;
 let suspectBlockCount: Counter | null = null;
@@ -100,40 +92,9 @@ function safeInit(): void {
             description: 'Suspect main-thread block duration above threshold',
             unit: 'ms',
         });
-        bundleDoneMs = meter.createHistogram('openspy.frontend.tile_bundle_done_ms', {
-            description: 'Total wall time of fetchTilesBundle from entry to bundle-done',
-            unit: 'ms',
-        });
-        bundleBytes = meter.createHistogram('openspy.frontend.tile_bundle_bytes', {
-            description: 'Bytes received for a tile bundle from /api/replay/tile-bundle',
-            unit: 'By',
-        });
         primitiveUpdateMs = meter.createHistogram('openspy.frontend.primitive_update_ms', {
             description: 'Cesium Primitive.update() main-thread duration (synchronous geometry compile)',
             unit: 'ms',
-        });
-        workerAckTransitMs = meter.createHistogram('openspy.frontend.worker_ack_transit_ms', {
-            description: 'Time between postMessage send and decoded-ready ack receive minus worker CPU',
-            unit: 'ms',
-        });
-        workerCpuMs = meter.createHistogram('openspy.frontend.worker_cpu_ms', {
-            description: 'CPU time inside decode worker (msgpack decode + framing parse)',
-            unit: 'ms',
-        });
-        payloadCloneMs = meter.createHistogram('openspy.frontend.payload_clone_ms', {
-            description: 'Structured-clone deserialise cost of decoded payload',
-            unit: 'ms',
-        });
-        putDoneMs = meter.createHistogram('openspy.frontend.idb_put_ms', {
-            description: 'IndexedDB readwrite put duration',
-            unit: 'ms',
-        });
-        manifestTilesCount = meter.createHistogram('openspy.frontend.manifest_tiles_count', {
-            description: 'Number of tiles requested for a layer in a manifest',
-        });
-        manifestBytes = meter.createHistogram('openspy.frontend.manifest_bytes', {
-            description: 'Total bytes for a layer in a manifest',
-            unit: 'By',
         });
         longtaskMs = meter.createHistogram('openspy.frontend.longtask_ms', {
             description: 'Browser longtask duration > 100ms',
@@ -288,31 +249,8 @@ export function recordSuspectBlock(name: string, ms: number, attrs: Record<strin
     suspectBlockCount?.add(1, { 'suspect.name': name });
 }
 
-export function recordTileBundleDone(ms: number, bytesValue: number, layerScope: string): void {
-    bundleDoneMs?.record(ms, { 'replay.layer_scope': layerScope });
-    bundleBytes?.record(bytesValue, { 'replay.layer_scope': layerScope });
-}
-
 export function recordPrimitiveUpdate(kind: string, layerKey: string, ms: number): void {
     primitiveUpdateMs?.record(ms, { 'primitive.kind': kind, 'replay.layer': layerKey });
-}
-
-export function recordWorkerAck(layerScope: string, transitMs: number, cpuMs: number, estItems: number): void {
-    workerAckTransitMs?.record(transitMs, { 'replay.layer_scope': layerScope });
-    workerCpuMs?.record(cpuMs, { 'replay.layer_scope': layerScope, 'est.items': estItems });
-}
-
-export function recordPayloadClone(layerScope: string, ms: number): void {
-    payloadCloneMs?.record(ms, { 'replay.layer_scope': layerScope });
-}
-
-export function recordIdbPut(ms: number, layerScope: string): void {
-    putDoneMs?.record(ms, { 'replay.layer_scope': layerScope });
-}
-
-export function recordManifest(layerId: string, tiles: number, bytesValue: number): void {
-    manifestTilesCount?.record(tiles, { 'replay.layer': layerId });
-    manifestBytes?.record(bytesValue, { 'replay.layer': layerId });
 }
 
 export function recordLongtask(durationMs: number): void {

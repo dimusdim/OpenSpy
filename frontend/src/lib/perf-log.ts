@@ -2,12 +2,7 @@ import { API_URL, PERF_CONSOLE_ENABLED } from './config';
 import {
     recordFrameRender,
     recordSuspectBlock,
-    recordTileBundleDone,
     recordPrimitiveUpdate,
-    recordWorkerAck,
-    recordPayloadClone,
-    recordIdbPut,
-    recordManifest,
     recordLongtask,
     recordHydrationTask,
 } from './otel';
@@ -56,32 +51,6 @@ function exportToOtel(event: string, data: Record<string, any>): void {
                     recordPrimitiveUpdate(data.kind || 'unknown', data.layerKey || 'unknown', data.ms);
                 }
                 return;
-            case 'replay.tile_bundle_phase': {
-                const phase = data.phase as string | undefined;
-                const layer = (data.layer as string) || 'unknown';
-                const ms = typeof data.ms === 'number' ? data.ms : null;
-                if (ms == null) return;
-                if (phase === 'bundle-done') {
-                    recordTileBundleDone(ms, typeof data.bytes === 'number' ? data.bytes : 0, layer);
-                } else if (phase === 'worker-ack') {
-                    recordWorkerAck(layer, typeof data.ackTransitMs === 'number' ? data.ackTransitMs : ms,
-                        typeof data.workerCpuMs === 'number' ? data.workerCpuMs : 0,
-                        typeof data.estItems === 'number' ? data.estItems : 0);
-                } else if (phase === 'payload-clone') {
-                    recordPayloadClone(layer, ms);
-                } else if (phase === 'put-done') {
-                    recordIdbPut(ms, layer);
-                }
-                return;
-            }
-            case 'replay.manifest_buckets': {
-                const breakdown = data.breakdown as Record<string, { tiles: number; bytes: number }> | undefined;
-                if (!breakdown) return;
-                for (const [layerId, info] of Object.entries(breakdown)) {
-                    recordManifest(layerId, info.tiles ?? 0, info.bytes ?? 0);
-                }
-                return;
-            }
             case 'replay.longtask':
                 if (typeof data.duration === 'number') recordLongtask(data.duration);
                 return;

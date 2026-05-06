@@ -252,7 +252,7 @@ export default function ImageryPanel({ isOpen, onClose }: { isOpen: boolean; onC
             if (source === 'copernicus' && selectedScene.render_supported === false && !selectedScene.action_payloads?.show_scene?.payload) {
                 throw new Error(selectedScene.render_unsupported_reason || 'This Copernicus scene is metadata-only and cannot be rendered yet.');
             }
-            showOpenSpyImageryLayer(viewer, { ...payload, opacity });
+            showOpenSpyImageryLayer(viewer, { ...payload, switchBase: false, switch_base: false, opacity });
         } catch (err: any) {
             setError(err?.message || 'Failed to show imagery');
         }
@@ -265,7 +265,7 @@ export default function ImageryPanel({ isOpen, onClose }: { isOpen: boolean; onC
             setError('Cesium viewer is not ready');
             return;
         }
-        const after = sceneActionPayload(selectedScene, { source, layer, opacity });
+        const after = { ...sceneActionPayload(selectedScene, { source, layer, opacity }), switchBase: false, switch_base: false };
         if (source === 'copernicus' && selectedScene.render_supported === false && !selectedScene.action_payloads?.show_scene?.payload) {
             setError(selectedScene.render_unsupported_reason || 'This Copernicus scene is metadata-only and cannot be rendered yet.');
             return;
@@ -280,7 +280,7 @@ export default function ImageryPanel({ isOpen, onClose }: { isOpen: boolean; onC
             : null;
         const beforeScene = scenes[selectedIndex + 1] || scenes.find((_, index) => index !== selectedIndex) || null;
         const before = beforeScene
-            ? sceneActionPayload(beforeScene, { source, layer, opacity: 0.4 })
+            ? { ...sceneActionPayload(beforeScene, { source, layer, opacity: 0.4 }), switchBase: false, switch_base: false }
             : fallbackBefore;
         if (!before) {
             setError('No second scene is available for comparison.');

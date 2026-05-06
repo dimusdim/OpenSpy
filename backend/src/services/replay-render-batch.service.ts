@@ -2,9 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import * as satelliteJs from 'satellite.js';
-import { decode } from '@msgpack/msgpack';
 import { ReplayQueryService, type ReplaySatelliteTleRow, type ReplayStateFilters } from './replay-query.service';
-import { ReplayTileBuilderService, type ReplayTilePayload } from './replay-tile-builder.service';
 import { getLayerRenderContract, normalizeLayerId as normalizeContractLayerId, type LayerRenderContract } from './render-contracts';
 import { databaseService } from '../db/database.service';
 
@@ -726,106 +724,6 @@ function finiteOrNaN(value: unknown): number {
     return Number.isFinite(n) ? n : Number.NaN;
 }
 
-function asFeatureListFromPayloads(payloads: ReplayTilePayload[], atIso: string): any[] {
-    const atMs = new Date(atIso).getTime();
-    const entityMap = new Map<string, any>();
-    const eventMap = new Map<string, any>();
-    const assetMap = new Map<string, any>();
-
-    const validSnapshots = payloads
-        .filter((payload) => {
-            const snapMs = payload.snapshotAt ? new Date(payload.snapshotAt).getTime() : Number.NaN;
-            return Number.isFinite(snapMs) && snapMs <= atMs;
-        })
-        .sort((a, b) => new Date(a.snapshotAt).getTime() - new Date(b.snapshotAt).getTime());
-    for (const payload of validSnapshots) {
-        for (const entity of payload.snapshot?.entities || []) entityMap.set((entity as any).entity_id, entity);
-        for (const event of payload.snapshot?.events || []) eventMap.set((event as any).event_id, event);
-        for (const asset of payload.snapshot?.assets || []) assetMap.set((asset as any).asset_id, asset);
-    }
-
-    const items = payloads
-        .flatMap((payload) => payload.items || [])
-        .sort((left: any, right: any) => {
-            const leftAt = new Date(left.at).getTime();
-            const rightAt = new Date(right.at).getTime();
-            if (leftAt !== rightAt) return leftAt - rightAt;
-            return String(left.target_id || '').localeCompare(String(right.target_id || ''));
-        });
-    for (const item of items as any[]) {
-        if (new Date(item.at).getTime() > atMs) continue;
-        if (item.family === 'entity') {
-            if (item.op === 'remove') entityMap.delete(item.entity_id);
-            else entityMap.set(item.item.entity_id, item.item);
-            continue;
-        }
-        if (item.family === 'event') {
-            if (item.op === 'remove') eventMap.delete(item.event_id);
-            else eventMap.set(item.item.event_id, item.item);
-            continue;
-        }
-        if (item.item?.asset_id) assetMap.set(item.item.asset_id, item.item);
-    }
-
-    return [
-        ...Array.from(assetMap.values()),
-        ...Array.from(eventMap.values()),
-        ...Array.from(entityMap.values()),
-    ];
-}
-
-function motionSamplesFromPayloads(payloads: ReplayTilePayload[], atIso: string): Map<string, MotionSample[]> {
-    const atMs = new Date(atIso).getTime();
-    const validSnapshots = payloads
-        .filter((payload) => {
-            const snapMs = payload.snapshotAt ? new Date(payload.snapshotAt).getTime() : Number.NaN;
-            return Number.isFinite(snapMs) && snapMs <= atMs;
-        })
-        .sort((a, b) => new Date(a.snapshotAt).getTime() - new Date(b.snapshotAt).getTime());
-    const motionSamples = new Map<string, Map<number, MotionSample>>();
-    const tryAdd = (entityId: string, sample: MotionSample) => {
-        let slot = motionSamples.get(entityId);
-        if (!slot) {
-            slot = new Map();
-            motionSamples.set(entityId, slot);
-        }
-        if (!slot.has(sample.atMs)) slot.set(sample.atMs, sample);
-    };
-    for (const payload of validSnapshots) {
-        for (const entity of payload.snapshot?.entities || []) {
-            if (!isObservedFixesMotionLayer((entity as any).layer_id)) continue;
-            const sampleAtMs = (entity as any).position_observed_at ? new Date((entity as any).position_observed_at).getTime() : Number.NaN;
-            const lng = Number((entity as any).display_lng);
-            const lat = Number((entity as any).display_lat);
-            const alt = Number((entity as any).altitude_m ?? 0) || 0;
-            if (Number.isFinite(sampleAtMs) && Number.isFinite(lng) && Number.isFinite(lat)) {
-                tryAdd((entity as any).entity_id, { atMs: sampleAtMs, lng, lat, alt });
-            }
-        }
-    }
-    for (const payload of payloads) {
-        for (const item of payload.items || []) {
-            const raw = item as any;
-            if (raw.family !== 'entity' || raw.op !== 'upsert') continue;
-            if (!isObservedFixesMotionLayer(raw.layer_id)) continue;
-            const entity = raw.item;
-            const sampleAtMs = entity?.position_observed_at ? new Date(entity.position_observed_at).getTime() : new Date(raw.at).getTime();
-            const lng = Number(entity?.display_lng);
-            const lat = Number(entity?.display_lat);
-            const alt = Number(entity?.altitude_m ?? 0) || 0;
-            if (Number.isFinite(sampleAtMs) && Number.isFinite(lng) && Number.isFinite(lat)) {
-                tryAdd(entity.entity_id, { atMs: sampleAtMs, lng, lat, alt });
-            }
-        }
-    }
-    const ordered = new Map<string, MotionSample[]>();
-    motionSamples.forEach((slot, entityId) => {
-        const samples = Array.from(slot.values()).sort((a, b) => a.atMs - b.atMs);
-        if (samples.length > 0) ordered.set(entityId, samples);
-    });
-    return ordered;
-}
-
 function sensorForFeature(feature: any): { radiusMeters: number; sensorName: string; sensorType: 'OPTICAL' | 'SAR' | 'OTHER'; source: string } | null {
     const entityProps = feature?.entity_properties && typeof feature.entity_properties === 'object' ? feature.entity_properties : {};
     const positionProps = feature?.position_properties && typeof feature.position_properties === 'object' ? feature.position_properties : {};
@@ -1132,7 +1030,6 @@ export class ReplayRenderBatchService {
 
     constructor(
         private readonly replayQueryService: ReplayQueryService,
-        private readonly replayTileBuilderService: ReplayTileBuilderService,
     ) {
         this.pruneStaleRenderChunkCache().catch((error: any) => {
             console.warn('[ReplayRenderBatch] stale render chunk cache prune failed', { message: error?.message || String(error) });
@@ -1509,40 +1406,6 @@ export class ReplayRenderBatchService {
         };
     }
 
-    private async buildTileBackedFeatures(layerId: string, at: string, from: string, to: string, z: number, bbox?: [number, number, number, number]): Promise<RenderFeatureSource> {
-        const manifest = await this.replayTileBuilderService.buildManifest({
-            from,
-            to,
-            layers: [layerId],
-            z,
-            bbox,
-        });
-        const tiles = manifest.layers[layerId]?.tiles || [];
-        const payloads: ReplayTilePayload[] = [];
-        let sourceBytes = 0;
-        const sourceHashes: string[] = [];
-        for (const tile of tiles) {
-            const read = await this.replayTileBuilderService.readTileBuffer({
-                layerId: tile.layerId,
-                z: tile.z,
-                x: tile.x,
-                y: tile.y,
-                tBucket: tile.tBucket,
-            });
-            if (!read) continue;
-            sourceBytes += read.buffer.byteLength;
-            sourceHashes.push(read.entry.contentHash);
-            payloads.push(decode(read.buffer) as ReplayTilePayload);
-        }
-        return {
-            features: asFeatureListFromPayloads(payloads, at),
-            motionById: motionSamplesFromPayloads(payloads, at),
-            sourceBytes,
-            sourceHash: contentHash(sourceHashes.join('|') || `${layerId}:${at}`),
-            tBucket: floorIsoToBucket(at, getBucketSeconds(layerId)),
-        };
-    }
-
     private async buildLayerChunk(params: BuildReplayRenderChunksParams, rawLayerId: string): Promise<ReplayRenderChunkManifest> {
         const layerId = normalizeLayerId(rawLayerId);
         const at = new Date(params.at).toISOString();
@@ -1553,9 +1416,6 @@ export class ReplayRenderBatchService {
                 bbox: params.bbox,
             }) || floorIsoToBucket(at, getBucketSeconds(layerId)))
             : getRenderChunkCacheAt(layerId, at);
-        // Render chunks are exact snapshots. Historical windows/items belong
-        // to the legacy replay-tile path, not to the batch that paints the
-        // current frame.
         const from = at;
         const to = at;
         const z = Number.isFinite(params.z) ? Math.max(0, Math.min(6, Math.trunc(params.z as number))) : 0;

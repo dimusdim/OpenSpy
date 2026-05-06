@@ -9,7 +9,7 @@ import axios from 'axios';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
-import { recordRateLimitReject, recordReplayRequest, recordInfraFetch, recordReplayTileBundle, recordReplayTileBundlePhase, withSpan } from './telemetry/observability';
+import { recordRateLimitReject, recordReplayRequest, recordInfraFetch, withSpan } from './telemetry/observability';
 import { logPerfEvent, logPerfEventFromClient } from './telemetry/perf-log';
 
 // Global process-level safety nets. Without these, a single upstream HTTP
@@ -62,7 +62,6 @@ import { EntityQueryService } from './services/entity-query.service';
 import { AssetQueryService } from './services/asset-query.service';
 import { LiveProjectionService } from './services/live-projection.service';
 import { ReplayQueryService } from './services/replay-query.service';
-import { ReplayTileBuilderService } from './services/replay-tile-builder.service';
 import { ReplayRenderBatchService } from './services/replay-render-batch.service';
 import { SOURCE_BINDINGS } from './services/source-bindings.service';
 
@@ -172,6 +171,18 @@ function safeErrorLog(err: any): Record<string, unknown> {
 function sendError(res: express.Response, err: any): void {
     if (res.headersSent) return;
     const requestId = Math.random().toString(36).slice(2, 10);
+    const statusCode = Number(err?.status || err?.statusCode || 500);
+    if (Number.isInteger(statusCode) && statusCode >= 400 && statusCode < 500) {
+        res.status(statusCode).json({
+            status: 'error',
+            error: {
+                code: err?.code || 'BAD_REQUEST',
+                message: err?.message || 'Bad request',
+            },
+            requestId,
+        });
+        return;
+    }
     const isProd = process.env.NODE_ENV === 'production';
     console.error(`[error ${requestId}]`, safeErrorLog(err));
     const body = isProd
@@ -193,6 +204,137 @@ function sendSelectionPredicateErrorOrFallback(res: express.Response, err: any):
         return;
     }
     sendError(res, err);
+}
+
+function stringField(value: unknown): string | undefined {
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function selectionPredicateFromRequestBody(body: Record<string, any>, fallback: Record<string, any> = {}): Record<string, any> {
+    const predicate = { ...(fallback || {}) };
+    const assignIfPresent = (targetKey: string, ...sourceKeys: string[]) => {
+        if (predicate[targetKey] !== undefined) return;
+        for (const key of sourceKeys) {
+            if (body[key] !== undefined && body[key] !== null && body[key] !== '') {
+                predicate[targetKey] = body[key];
+                return;
+            }
+        }
+    };
+
+    assignIfPresent('bbox', 'bbox');
+    assignIfPresent('bbox_order', 'bbox_order', 'bboxOrder');
+    assignIfPresent('from', 'from', 'timeFrom', 'time_from', 'observedFrom', 'observed_from', 'start');
+    assignIfPresent('to', 'to', 'timeTo', 'time_to', 'observedTo', 'observed_to', 'end');
+    assignIfPresent('at', 'at', 'time');
+    assignIfPresent('ids', 'ids');
+    assignIfPresent('entity_ids', 'entity_ids', 'entityIds');
+    assignIfPresent('event_ids', 'event_ids', 'eventIds');
+    assignIfPresent('asset_ids', 'asset_ids', 'assetIds');
+    assignIfPresent('subtype', 'subtype');
+    assignIfPresent('subtypes', 'subtypes');
+    assignIfPresent('source_id', 'source_id', 'sourceId');
+    assignIfPresent('sources', 'sources');
+    assignIfPresent('kind', 'kind', 'object_kind', 'objectKind');
+
+    const timeWindow = predicate.time_window && typeof predicate.time_window === 'object'
+        ? predicate.time_window
+        : predicate.timeWindow && typeof predicate.timeWindow === 'object'
+            ? predicate.timeWindow
+            : null;
+    if (timeWindow) {
+        if (predicate.from === undefined) predicate.from = timeWindow.from ?? timeWindow.start ?? timeWindow.observed_from;
+        if (predicate.to === undefined) predicate.to = timeWindow.to ?? timeWindow.end ?? timeWindow.observed_to;
+        delete predicate.time_window;
+        delete predicate.timeWindow;
+    }
+
+    const layer = stringField(body.layerId) || stringField(body.layer_id) || stringField(body.layer);
+    if (layer && predicate.layer === undefined && predicate.layer_id === undefined && predicate.layerId === undefined) {
+        predicate.layer = layer;
+    }
+    return predicate;
+}
+
+function parseSelectionSaveInput(body: Record<string, any>, current?: {
+    selection_id?: string;
+    layer_id?: string | null;
+    selection_mode?: string;
+    predicate?: Record<string, any>;
+    geometry_json?: Record<string, any> | null;
+    metadata?: Record<string, any>;
+    expires_at?: string | null;
+}) {
+    const selectionId = stringField(body.selectionId)
+        || stringField(body.selection_id)
+        || current?.selection_id;
+    const layerId = stringField(body.layerId)
+        || stringField(body.layer_id)
+        || stringField(body.layer)
+        || current?.layer_id
+        || null;
+    const normalizedLayerId = normalizeLayerId(layerId || undefined) || null;
+    const selectionMode = stringField(body.selectionMode)
+        || stringField(body.selection_mode)
+        || stringField(body.mode)
+        || current?.selection_mode
+        || 'filter';
+    const explicitPredicate = body.predicate && typeof body.predicate === 'object'
+        ? body.predicate
+        : body.query_spec && typeof body.query_spec === 'object'
+            ? body.query_spec
+            : null;
+    const basePredicate = current?.predicate && typeof current.predicate === 'object'
+        ? { ...current.predicate }
+        : {};
+    const predicate = selectionPredicateFromRequestBody(
+        body,
+        explicitPredicate ? { ...basePredicate, ...explicitPredicate } : basePredicate,
+    );
+    return {
+        selectionId,
+        layerId: normalizedLayerId,
+        selectionMode,
+        predicate,
+        geometryJson: body.geometry && typeof body.geometry === 'object' ? body.geometry : current?.geometry_json || null,
+        metadata: body.metadata && typeof body.metadata === 'object'
+            ? { ...(current?.metadata || {}), ...body.metadata }
+            : current?.metadata || {},
+        expiresAt: stringField(body.expiresAt) || current?.expires_at || undefined,
+    };
+}
+
+function sendSourceFetchProviderError(res: express.Response, operation: string, err: any): void {
+    if (res.headersSent) return;
+    const status = Number(err?.response?.status || 0);
+    const code = String(err?.code || '').toUpperCase();
+    const retryable = status === 408 || status === 429 || status >= 500
+        || ['ECONNABORTED', 'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ERR_NETWORK'].includes(code);
+    const requestId = crypto.randomUUID().slice(0, 8);
+    const providerDetail = status ? `HTTP ${status}` : code || 'unknown provider error';
+    const message = retryable
+        ? `${operation} provider request is temporarily unavailable (${providerDetail}). Retry later or use a narrower time window/AOI.`
+        : status === 401 || status === 403
+            ? `${operation} provider rejected the configured backend credentials or account access (${providerDetail}). Check the connector credential/account status.`
+            : status === 400 || status === 404 || status === 422
+                ? `${operation} provider rejected the bounded request (${providerDetail}). Check the operation parameters and provider capability.`
+                : `${operation} provider request failed (${providerDetail}). Check provider capability and connector status.`;
+    console.error(`[source-fetch ${operation} ${requestId}]`, safeErrorLog(err));
+    res.status(retryable ? 503 : 502).json({
+        status: 'error',
+        error: {
+            code: retryable ? 'PROVIDER_TEMPORARILY_UNAVAILABLE' : 'PROVIDER_REQUEST_FAILED',
+            message,
+            retryable,
+        },
+        data: {
+            operation,
+            provider_status: status || null,
+            provider_code: code || null,
+            requestId,
+        },
+        meta: { executed: true, persisted: false },
+    });
 }
 
 function isLoopbackRequest(req: express.Request): boolean {
@@ -440,6 +582,16 @@ function validateReadOnlyAgentSql(sql: string): string {
     if (/\b(pg_sleep|pg_advisory_lock|pg_advisory_xact_lock|pg_try_advisory_lock|pg_try_advisory_xact_lock)\s*\(/.test(codeOnly)) {
         throw new Error('Blocking or session-locking database functions are not allowed');
     }
+    const broadMovingInfrastructureProximity =
+        codeOnly.includes('core.position_fixes')
+        && /\bcore\.(assets|events)\b/.test(codeOnly)
+        && /\bst_dwithin\s*\(/.test(codeOnly)
+        && /\b[a-z_][a-z0-9_.]*geom\s*::\s*geography[\s\S]{0,240},[\s\S]{0,240}\b[a-z_][a-z0-9_.]*geom\s*::\s*geography/.test(codeOnly);
+    if (broadMovingInfrastructureProximity) {
+        throw new Error(
+            'Raw SQL proximity joins from core.position_fixes to infrastructure/events with geom::geography can bypass spatial indexes and stall the product. Use semantic OpenSpy geo tools such as worldview-cli geo spatial_join, geo corridor, or query related, or rewrite the SQL with a narrow indexed geometry prefilter before exact distance.',
+        );
+    }
     return trimmed;
 }
 
@@ -475,27 +627,13 @@ app.use((_req, res, next) => {
 app.use(compression({
     threshold: 1024,
     level: 6,
-    // Skip compression for already-binary tile-bundle and static replay tiles:
-    // msgpack barely compresses (1-2%) but gzip on a 30+ MB payload blocks
-    // the event loop for ~30s and serialises subsequent requests.
     filter: (req, res) => {
-        if (req.path === '/api/replay/tile-bundle') return false;
         if (req.path.startsWith('/api/replay/render-chunks/') && req.path.endsWith('/data')) return false;
-        if (req.path.startsWith('/static/replay-tiles/')) return false;
         if (req.path.startsWith('/api/agents/')) return false;
         return compression.filter(req, res);
     },
 }));
 app.use(express.json({ limit: '50mb' }));
-app.use('/static/replay-tiles', express.static(path.resolve(__dirname, '../var/replay-tiles'), {
-    immutable: true,
-    maxAge: '365d',
-    setHeaders: (res) => {
-        res.setHeader('Content-Type', 'application/msgpack');
-        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-        res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-    },
-}));
 
 type StorageStatusPayload = {
     db_bytes: number | null;
@@ -638,34 +776,10 @@ const assetQueryService = new AssetQueryService(databaseService);
 const liveProjectionService = new LiveProjectionService(databaseService);
 const replayQueryService = new ReplayQueryService(databaseService);
 const agentToolService = new AgentToolService(databaseService, catalogReadService, selectionRepository, viewControlService, replayQueryService);
-const replayTileBuilderService = new ReplayTileBuilderService(databaseService, replayQueryService);
-const replayRenderBatchService = new ReplayRenderBatchService(replayQueryService, replayTileBuilderService);
+const replayRenderBatchService = new ReplayRenderBatchService(replayQueryService);
 const liveIngestEnabled = process.env.DISABLE_LIVE_INGEST !== 'true';
-const REPLAY_TILE_REFRESH_LAYERS = ['aircraft', 'vessel', 'disasters', 'fire', 'jamming', 'outage', 'conflict', 'gfw', 'cable', 'pipeline', 'airspace'];
 const REPLAY_RENDER_PREWARM_LAYERS = ['airspace', 'pipeline', 'cable', 'jamming', 'gfw', 'disasters', 'fire', 'outage', 'conflict'];
-let replayTileRefreshInFlight = false;
 let replayRenderPrewarmInFlight = false;
-
-async function refreshReplayTilesWindow(): Promise<void> {
-    if (replayTileRefreshInFlight || !databaseService.isReady()) return;
-    replayTileRefreshInFlight = true;
-    try {
-        const to = new Date();
-        const from = new Date(to.getTime() - 24 * 60 * 60 * 1000);
-        const manifest = await replayTileBuilderService.buildTiles({
-            from: from.toISOString(),
-            to: to.toISOString(),
-            layers: REPLAY_TILE_REFRESH_LAYERS,
-            z: 0,
-        });
-        const tileCount = Object.values(manifest.layers).reduce((sum, layer) => sum + layer.tiles.length, 0);
-        console.log(`[ReplayTiles] Refreshed ${tileCount} tiles for last 24h @ z0`);
-    } catch (error) {
-        console.error('[ReplayTiles] Refresh failed:', error);
-    } finally {
-        replayTileRefreshInFlight = false;
-    }
-}
 
 async function prewarmReplayRenderChunksWindow(reason = 'startup'): Promise<void> {
     if (replayRenderPrewarmInFlight || !databaseService.isReady()) return;
@@ -882,40 +996,8 @@ app.post('/api/view-state/legend-node-state', async (req, res) => {
 
 app.post('/api/selections', async (req, res) => {
     try {
-        const selectionId = typeof req.body?.selectionId === 'string'
-            ? req.body.selectionId
-            : typeof req.body?.selection_id === 'string'
-                ? req.body.selection_id
-                : undefined;
-        const layerId = typeof req.body?.layerId === 'string'
-            ? req.body.layerId
-            : typeof req.body?.layer_id === 'string'
-                ? req.body.layer_id
-                : typeof req.body?.layer === 'string'
-                    ? req.body.layer
-                    : null;
-        const normalizedLayerId = normalizeLayerId(layerId || undefined) || null;
-        const selectionMode = typeof req.body?.selectionMode === 'string'
-            ? req.body.selectionMode
-            : typeof req.body?.selection_mode === 'string'
-                ? req.body.selection_mode
-                : typeof req.body?.mode === 'string'
-                    ? req.body.mode
-                    : 'filter';
-        const predicate = req.body?.predicate && typeof req.body.predicate === 'object'
-            ? req.body.predicate
-            : req.body?.query_spec && typeof req.body.query_spec === 'object'
-                ? req.body.query_spec
-                : {};
-        const selection = await selectionRepository.saveSelection({
-            selectionId,
-            layerId: normalizedLayerId,
-            selectionMode,
-            predicate,
-            geometryJson: req.body?.geometry && typeof req.body.geometry === 'object' ? req.body.geometry : null,
-            metadata: req.body?.metadata && typeof req.body.metadata === 'object' ? req.body.metadata : {},
-            expiresAt: typeof req.body?.expiresAt === 'string' ? req.body.expiresAt : undefined,
-        });
+        const saveInput = parseSelectionSaveInput(req.body || {});
+        const selection = await selectionRepository.saveSelection(saveInput);
         const shouldMaterialize = req.body?.materialize === true || req.body?.metadata?.materialize === true;
         const materialization = shouldMaterialize
             ? await agentToolService.materializeSelection(selection.selection_id, { limit: req.body?.materializeLimit || req.body?.maxItems })
@@ -963,39 +1045,8 @@ app.post('/api/selections/:selectionId/patch', async (req, res) => {
             res.status(404).json({ error: 'Selection not found' });
             return;
         }
-        const layerId = typeof req.body?.layerId === 'string'
-            ? req.body.layerId
-            : typeof req.body?.layer_id === 'string'
-                ? req.body.layer_id
-                : typeof req.body?.layer === 'string'
-                    ? req.body.layer
-                    : current.layer_id;
-        const normalizedLayerId = normalizeLayerId(layerId || undefined) || null;
-        const selectionMode = typeof req.body?.selectionMode === 'string'
-            ? req.body.selectionMode
-            : typeof req.body?.selection_mode === 'string'
-                ? req.body.selection_mode
-                : typeof req.body?.mode === 'string'
-                    ? req.body.mode
-                    : current.selection_mode;
-        const patchPredicate = req.body?.predicate && typeof req.body.predicate === 'object'
-            ? req.body.predicate
-            : req.body?.query_spec && typeof req.body.query_spec === 'object'
-                ? req.body.query_spec
-                : null;
-        const selection = await selectionRepository.saveSelection({
-            selectionId: current.selection_id,
-            layerId: normalizedLayerId,
-            selectionMode,
-            predicate: patchPredicate
-                ? { ...(current.predicate || {}), ...patchPredicate }
-                : current.predicate,
-            geometryJson: req.body?.geometry && typeof req.body.geometry === 'object' ? req.body.geometry : current.geometry_json,
-            metadata: req.body?.metadata && typeof req.body.metadata === 'object'
-                ? { ...(current.metadata || {}), ...req.body.metadata }
-                : current.metadata,
-            expiresAt: typeof req.body?.expiresAt === 'string' ? req.body.expiresAt : current.expires_at || undefined,
-        });
+        const saveInput = parseSelectionSaveInput(req.body || {}, current);
+        const selection = await selectionRepository.saveSelection(saveInput);
         const shouldMaterialize = req.body?.materialize === true || req.body?.metadata?.materialize === true;
         const materialization = shouldMaterialize
             ? await agentToolService.materializeSelection(selection.selection_id, { limit: req.body?.materializeLimit || req.body?.maxItems })
@@ -1093,13 +1144,16 @@ function acledIngestCredentialsConfigured(): boolean {
     return email && password && process.env.ACLED_ENABLE_PASSWORD_OAUTH === 'true';
 }
 
-const SOURCE_FETCH_CAPABILITIES: Record<string, {
+type SourceFetchStatus = 'available' | 'auth_required' | 'unsupported' | 'planned';
+type SourceFetchCapability = {
     source: string;
-    status: 'available' | 'auth_required' | 'unsupported' | 'planned';
+    status: SourceFetchStatus;
     history: string;
     notes: string;
     policy?: Record<string, unknown>;
-}> = {
+};
+
+const SOURCE_FETCH_CAPABILITIES: Record<string, SourceFetchCapability> = {
     'cloudflare-outages': {
         source: 'cloudflare_radar',
         status: process.env.CLOUDFLARE_API_TOKEN ? 'available' : 'auth_required',
@@ -1248,6 +1302,32 @@ const SOURCE_FETCH_CAPABILITIES: Record<string, {
     },
 };
 
+function currentSourceFetchStatus(operation: string, base: SourceFetchCapability): SourceFetchStatus {
+    if (operation === 'cloudflare-outages') return process.env.CLOUDFLARE_API_TOKEN ? 'available' : 'auth_required';
+    if (operation === 'gfw-events') return process.env.GFW_TOKEN ? 'available' : 'auth_required';
+    if (operation === 'acled-conflicts') return acledIngestCredentialsConfigured() ? 'planned' : 'auth_required';
+    if (operation === 'opensky-tracks') return process.env.OPENSKY_USERNAME && process.env.OPENSKY_PASSWORD ? 'planned' : 'auth_required';
+    if (operation === 'spacetrack-gp-history') return process.env.SPACETRACK_EMAIL && process.env.SPACETRACK_PASSWORD ? 'planned' : 'auth_required';
+    if (operation === 'firms-fires') return process.env.FIRMS_MAP_KEY || process.env.NASA_FIRMS_MAP_KEY ? 'available' : 'auth_required';
+    if (operation === 'copernicus-sentinel-imagery') return process.env.COPERNICUS_CLIENT_ID && process.env.COPERNICUS_CLIENT_SECRET ? 'available' : 'auth_required';
+    return base.status;
+}
+
+function currentSourceFetchCapability(operation: string): SourceFetchCapability | null {
+    const base = SOURCE_FETCH_CAPABILITIES[operation];
+    if (!base) return null;
+    return {
+        ...base,
+        status: currentSourceFetchStatus(operation, base),
+    };
+}
+
+function currentSourceFetchCapabilities(): Record<string, SourceFetchCapability> {
+    return Object.fromEntries(
+        Object.keys(SOURCE_FETCH_CAPABILITIES).map((operation) => [operation, currentSourceFetchCapability(operation)!]),
+    );
+}
+
 function envInt(name: string, fallback: number): number {
     const parsed = Number.parseInt(process.env[name] || '', 10);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -1362,9 +1442,27 @@ function providerPolicyForSource(sourceId: string): Record<string, unknown> | nu
 function authConfigured(manifest: any): boolean | null {
     const auth = manifest?.auth;
     if (!auth || auth.required === false) return true;
+    const sourceId = String(manifest?.id || manifest?.source_id || manifest?.slug || '').trim().toLowerCase();
+    if (sourceId === 'acled') return acledIngestCredentialsConfigured();
     const keys = Array.isArray(auth.env_keys) ? auth.env_keys : [];
     if (keys.length === 0) return null;
     return keys.every((key: string) => Boolean(process.env[key]));
+}
+
+function sourceFetchAuthMetadata(manifest: any): Record<string, unknown> | null {
+    const auth = manifest?.source_fetch_auth;
+    if (!auth) return null;
+    const envKeys = Array.isArray(auth.env_keys) ? auth.env_keys.map((key: unknown) => String(key)).filter(Boolean) : [];
+    const required = Boolean(auth.required);
+    return {
+        required,
+        configured: required
+            ? (envKeys.length > 0 ? envKeys.some((key: string) => Boolean(process.env[key])) : null)
+            : true,
+        method: auth.method || null,
+        env_keys: envKeys,
+        limits: auth.limits || null,
+    };
 }
 
 function stableHash(value: unknown): string {
@@ -1607,6 +1705,7 @@ function buildGibsSceneDescriptor(input: {
         gibsLayer: layerId,
         date: requestedDate,
         opacity: Number.isFinite(opacity) ? Math.max(0, Math.min(opacity, 1)) : 0.72,
+        switchBase: true,
         ...(input.bbox ? { bbox: input.bbox } : {}),
     };
     return {
@@ -1649,6 +1748,7 @@ function buildGibsSceneDescriptor(input: {
 }
 
 async function buildSourceCapabilityMatrix() {
+    const currentCapabilities = currentSourceFetchCapabilities();
     const [sources, layers, ingestRows] = await Promise.all([
         catalogReadService.listSources(),
         catalogReadService.listLayers(),
@@ -1666,7 +1766,7 @@ async function buildSourceCapabilityMatrix() {
         bindingsBySource.get(binding.sourceId)!.push(binding);
     }
     const operationsBySource = new Map<string, Array<any>>();
-    for (const [operation, capability] of Object.entries(SOURCE_FETCH_CAPABILITIES)) {
+    for (const [operation, capability] of Object.entries(currentCapabilities)) {
         if (!operationsBySource.has(capability.source)) operationsBySource.set(capability.source, []);
         operationsBySource.get(capability.source)!.push({
             operation,
@@ -1700,6 +1800,7 @@ async function buildSourceCapabilityMatrix() {
         const ingest = ingestBySource.get(sourceId) || [];
         const sourceFetchOperations = operationsBySource.get(sourceId) || [];
         const liveContract = manifest.live_contract || source.live_contract || null;
+        const sourceFetchAuth = sourceFetchAuthMetadata(manifest);
         return {
             source_id: sourceId,
             slug: source.slug || manifest.slug || sourceId,
@@ -1717,6 +1818,7 @@ async function buildSourceCapabilityMatrix() {
                 env_keys: Array.isArray(manifest.auth?.env_keys) ? manifest.auth.env_keys : [],
                 limits: manifest.auth?.limits || null,
             },
+            source_fetch_auth: sourceFetchAuth,
             live_contract: liveContract,
             local_storage: {
                 layers: boundLayers,
@@ -1756,7 +1858,7 @@ async function buildSourceCapabilityMatrix() {
 
     return {
         sources: matrix.sort((a, b) => a.source_id.localeCompare(b.source_id)),
-        operations: Object.entries(SOURCE_FETCH_CAPABILITIES)
+        operations: Object.entries(currentCapabilities)
             .map(([operationId, capability]) => ({
                 operation: operationId,
                 ...capability,
@@ -1768,10 +1870,110 @@ async function buildSourceCapabilityMatrix() {
             bound_sources: matrix.filter((source) => !source.notes.inactive_catalog_entry).length,
             inactive_catalog_entries: matrix.filter((source) => source.notes.inactive_catalog_entry).length,
             auth_required_sources: matrix.filter((source) => source.auth.required && source.auth.configured !== true).length,
-            source_fetch_operations: Object.keys(SOURCE_FETCH_CAPABILITIES).length,
-            actionable_source_fetch_operations: Object.values(SOURCE_FETCH_CAPABILITIES)
+            source_fetch_operations: Object.keys(currentCapabilities).length,
+            actionable_source_fetch_operations: Object.values(currentCapabilities)
                 .filter((operation) => operation.status === 'available' || operation.status === 'auth_required').length,
         },
+    };
+}
+
+function compactProviderPolicyForCapabilityResponse(policy: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
+    if (!policy) return null;
+    return {
+        account_tier: policy.account_tier || null,
+        local_cadence: policy.local_cadence || null,
+    };
+}
+
+function compactOperationPolicyForCapabilityResponse(policy: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
+    if (!policy) return null;
+    const compact: Record<string, unknown> = {};
+    for (const key of [
+        'max_window_hours',
+        'max_search_window_days',
+        'max_bbox_area_degrees2',
+        'max_results',
+        'max_day_range',
+        'min_fetch_interval_ms',
+        'min_provider_request_interval_ms',
+        'live_poll_ms',
+        'default_poll_minutes',
+        'provider_fetch_status',
+        'local_incremental_ingest_status',
+        'product_status',
+        'selected_date_rule',
+        'resolution',
+        'upstream_granularity',
+    ]) {
+        if (policy[key] !== undefined && policy[key] !== null) compact[key] = policy[key];
+    }
+    return Object.keys(compact).length > 0 ? compact : null;
+}
+
+function sourceFetchStatusMeaning(status: string): string {
+    if (status === 'available') return 'callable_now';
+    if (status === 'auth_required') return 'needs_credentials_or_plan';
+    if (status === 'planned') return 'not_executable_yet';
+    if (status === 'unsupported') return 'not_supported';
+    return status;
+}
+
+function compactSourceCapabilityMatrixForAgent(matrix: Awaited<ReturnType<typeof buildSourceCapabilityMatrix>>) {
+    return {
+        operations: matrix.operations.map((operation: any) => ({
+            operation: operation.operation,
+            source: operation.source,
+            status: operation.status,
+            meaning: sourceFetchStatusMeaning(operation.status),
+            policy: compactOperationPolicyForCapabilityResponse(operation.policy),
+        })),
+        sources: matrix.sources
+            .filter((source: any) => (
+                !source.notes?.inactive_catalog_entry
+                || (source.source_fetch_operations || []).length > 0
+                || source.auth?.required
+            ))
+            .map((source: any) => ({
+                source_id: source.source_id,
+                display_name: source.display_name,
+                provider: source.provider,
+                category: source.category,
+                auth: {
+                    required: source.auth?.required,
+                    configured: source.auth?.configured,
+                    env_keys: source.auth?.env_keys || [],
+                },
+                source_fetch_auth: source.source_fetch_auth
+                    ? {
+                        required: source.source_fetch_auth.required,
+                        configured: source.source_fetch_auth.configured,
+                        method: source.source_fetch_auth.method || null,
+                        env_keys: source.source_fetch_auth.env_keys || [],
+                        limits: source.source_fetch_auth.limits || null,
+                    }
+                    : null,
+                local_storage: {
+                    has_local_history: source.local_storage?.has_local_history,
+                    replay_supported: source.local_storage?.replay_supported,
+                    live_only: source.local_storage?.live_only,
+                    layers: (source.local_storage?.layers || []).map((layer: any) => layer.layer_id),
+                },
+                provider_policy: compactProviderPolicyForCapabilityResponse(source.provider_policy),
+                source_fetch_operations: (source.source_fetch_operations || []).map((operation: any) => ({
+                    operation: operation.operation,
+                    status: operation.status,
+                    meaning: sourceFetchStatusMeaning(operation.status),
+                })),
+                latest_ingest: (source.latest_ingest || []).map((ingest: any) => ({
+                    layer_id: ingest.layer_id,
+                    status: ingest.status,
+                    completeness: ingest.completeness,
+                    latest_completed_at: ingest.latest_completed_at,
+                    normalized_count: ingest.normalized_count,
+                    error_message: ingest.error_message,
+                })),
+            })),
+        summary: matrix.summary,
     };
 }
 
@@ -1836,23 +2038,35 @@ app.post('/api/agent-tools/sql-query', async (req, res) => {
             res.status(400).json({ status: 'error', error: { code: 'REASON_REQUIRED', message: 'Read-only SQL requires a reason' } });
             return;
         }
-        let limit = Number(req.body?.limit || 500);
-        if (!Number.isFinite(limit)) limit = 500;
-        limit = Math.max(1, Math.min(5000, Math.floor(limit)));
-        let timeoutMs = Number(req.body?.timeout_ms || req.body?.timeoutMs || 5000);
-        if (!Number.isFinite(timeoutMs)) timeoutMs = 5000;
-        timeoutMs = Math.max(100, Math.min(30000, Math.floor(timeoutMs)));
+        const rawLimit = req.body?.limit;
+        const limit = rawLimit === undefined || rawLimit === null || rawLimit === ''
+            ? null
+            : Number(rawLimit);
+        if (limit !== null && (!Number.isFinite(limit) || limit <= 0)) {
+            res.status(400).json({ status: 'error', error: { code: 'BAD_LIMIT', message: 'limit must be a positive integer when provided' } });
+            return;
+        }
+        const rawTimeoutMs = req.body?.timeout_ms ?? req.body?.timeoutMs;
+        const timeoutMs = rawTimeoutMs === undefined || rawTimeoutMs === null || rawTimeoutMs === ''
+            ? null
+            : Number(rawTimeoutMs);
+        if (timeoutMs !== null && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
+            res.status(400).json({ status: 'error', error: { code: 'BAD_TIMEOUT', message: 'timeout_ms must be a positive integer when provided' } });
+            return;
+        }
+        const limitClause = limit === null ? '' : `LIMIT ${Math.trunc(limit)}`;
 
         const rows = await databaseService.withTransaction(async () => {
             await databaseService.query('SET TRANSACTION READ ONLY');
             await databaseService.query('SET LOCAL ROLE app_agent_readonly');
-            // timeoutMs is integer-clamped above before interpolation.
-            await databaseService.query(`SET LOCAL statement_timeout = '${timeoutMs}ms'`);
+            if (timeoutMs !== null) {
+                await databaseService.query(`SET LOCAL statement_timeout = '${Math.trunc(timeoutMs)}ms'`);
+            }
             const result = await databaseService.query(
                 `
                     SELECT *
                     FROM (${sql}) AS agent_q
-                    LIMIT ${limit}
+                    ${limitClause}
                 `,
             );
             return result?.rows || [];
@@ -1862,7 +2076,7 @@ app.post('/api/agent-tools/sql-query', async (req, res) => {
             status: 'ok',
             data: { rows },
             meta: {
-                limit,
+                limit: limit === null ? null : Math.trunc(limit),
                 timeout_ms: timeoutMs,
                 reason,
             },
@@ -1934,22 +2148,26 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
         }
         if (operation === 'capabilities') {
             const matrix = await buildSourceCapabilityMatrix();
+            const detail = String(args.detail || args.view || args.mode || '').trim().toLowerCase();
+            const full = detail === 'full' || args.full === true || args.compact === false;
+            const data = full ? matrix : compactSourceCapabilityMatrixForAgent(matrix);
             res.json({
                 status: 'ok',
                 data: {
-                    operations: matrix.operations,
-                    sources: matrix.sources,
-                    summary: matrix.summary,
+                    operation: 'capabilities',
+                    ...data,
                 },
                 meta: {
                     executed: false,
                     operation_count: matrix.operations.length,
                     source_count: matrix.sources.length,
+                    detail: full ? 'full' : 'compact',
+                    full_detail_hint: full ? null : 'Use source-fetch.sh capabilities --detail full for the verbose operator matrix.',
                 },
             });
             return;
         }
-        const capability = SOURCE_FETCH_CAPABILITIES[operation];
+        const capability = currentSourceFetchCapability(operation);
         if (!capability) {
             res.status(400).json({
                 status: 'error',
@@ -2029,7 +2247,12 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
                 return;
             }
             const mapKey = process.env.FIRMS_MAP_KEY || process.env.NASA_FIRMS_MAP_KEY;
-            const url = `https://firms.modaps.eosdis.nasa.gov/api/area/csv/${encodeURIComponent(mapKey || '')}/${encodeURIComponent(source)}/${encodeURIComponent(area)}/${dayRange}/${encodeURIComponent(date)}`;
+            const areaPath = area === 'world'
+                ? 'world'
+                : bbox
+                    ? bbox.join(',')
+                    : area;
+            const url = `https://firms.modaps.eosdis.nasa.gov/api/area/csv/${encodeURIComponent(mapKey || '')}/${encodeURIComponent(source)}/${areaPath}/${dayRange}/${encodeURIComponent(date)}`;
             const response = await axios.get<string>(url, { timeout: 60_000, responseType: 'text' });
             const records = parseFirmsCsv(response.data);
             if (persist) await sourcePersistenceService.persistFires(records, { rawCsv: response.data });
@@ -2181,6 +2404,15 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
                 res.status(400).json({ status: 'error', error: { code: 'BAD_DATE', message: 'gpsjam-history requires --date YYYY-MM-DD or --from ISO timestamp' } });
                 return;
             }
+            if (dryRun) {
+                res.json({
+                    status: 'ok',
+                    data: { operation, source: capability.source, date, capability: capabilityWithPolicy },
+                    meta: { executed: false, persisted: false, dry_run: true, granularity: 'daily' },
+                    warnings: ['Dry run only. No GPSJam provider request was sent and no local data was written.'],
+                });
+                return;
+            }
             let fetched;
             try {
                 fetched = await gpsJamService.fetchDate(date, { persist });
@@ -2257,6 +2489,29 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
                 res.status(400).json({ status: 'error', error: { code: 'BAD_WINDOW', message: 'gfw-events requires --from and --to ISO timestamps' } });
                 return;
             }
+            const gfwWarnings = args.bbox
+                ? ['GFW gap-event source-fetch currently applies the date window only; bbox is accepted by the CLI envelope but not forwarded to the GFW provider. Use local query/layer filters after import for AOI narrowing.']
+                : [];
+            if (dryRun) {
+                res.json({
+                    status: 'ok',
+                    data: {
+                        operation,
+                        source: capability.source,
+                        startDate: from.slice(0, 10),
+                        endDate: to.slice(0, 10),
+                        bbox: args.bbox || null,
+                        bbox_supported: false,
+                        capability: capabilityWithPolicy,
+                    },
+                    meta: { executed: false, persisted: false, dry_run: true, granularity: 'daily-window' },
+                    warnings: [
+                        'Dry run only. No GFW provider request was sent and no local data was written.',
+                        ...gfwWarnings,
+                    ],
+                });
+                return;
+            }
             const fetched = await gfwService.fetchEventsWindow({ startDate: from.slice(0, 10), endDate: to.slice(0, 10), persist });
             res.json({
                 status: 'ok',
@@ -2269,7 +2524,10 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
                     metadata: fetched.metadata,
                 },
                 meta: { executed: true, persisted: persist, granularity: 'daily-window' },
-                warnings: fetched.metadata?.pagination?.truncated ? ['GFW fetch hit pagination or malformed-page limit; result may be incomplete.'] : [],
+                warnings: [
+                    ...(fetched.metadata?.pagination?.truncated ? ['GFW fetch hit pagination or malformed-page limit; result may be incomplete.'] : []),
+                    ...gfwWarnings,
+                ],
             });
             return;
         }
@@ -2373,6 +2631,7 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
                             to: scene.render.to,
                             maxCloudCover: scene.render.maxCloudCover,
                             opacity: Number(args.opacity ?? 0.72),
+                            switchBase: true,
                         },
                     },
                 } : {},
@@ -2422,7 +2681,8 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
             ],
         });
     } catch (err: any) {
-        sendError(res, err);
+        const failedOperation = String(req.body?.operation || 'source-fetch').trim() || 'source-fetch';
+        sendSourceFetchProviderError(res, failedOperation, err);
     }
 });
 
@@ -2460,17 +2720,19 @@ app.get('/api/imagery/copernicus/render', async (req, res) => {
 
 function sendAgentToolError(res: express.Response, err: any): void {
     const message = err?.message || 'Agent tool failed';
-    const status = /not found/i.test(message) ? 404
+    const explicitStatus = Number(err?.status || err?.statusCode);
+    const status = Number.isInteger(explicitStatus) && explicitStatus >= 400 && explicitStatus < 600 ? explicitStatus
+        : /not found/i.test(message) ? 404
         : /requires|must be|invalid|missing|bad/i.test(message) ? 400
             : /not ready|required/i.test(message) ? 503
                 : 500;
     res.status(status).json({
         status: 'error',
         error: {
-            code: status === 404 ? 'NOT_FOUND'
+            code: err?.code || (status === 404 ? 'NOT_FOUND'
                 : status === 400 ? 'BAD_REQUEST'
                     : status === 503 ? 'UNAVAILABLE'
-                        : 'AGENT_TOOL_FAILED',
+                        : 'AGENT_TOOL_FAILED'),
             message,
         },
     });
@@ -2518,7 +2780,7 @@ app.post('/api/agent-tools/geometry/aoi', async (req, res) => {
 app.post('/api/agent-tools/query/aggregate', async (req, res) => {
     try {
         const data = await agentToolService.aggregate(req.body || {});
-        res.json({ status: 'ok', data, warnings: [] });
+        res.json({ status: data.query_status?.status || 'ok', data, warnings: [] });
     } catch (err: any) {
         sendAgentToolError(res, err);
     }
@@ -2554,7 +2816,7 @@ app.post('/api/agent-tools/query/satellite-overpasses', async (req, res) => {
 app.post('/api/agent-tools/geo/corridor', async (req, res) => {
     try {
         const data = await agentToolService.corridorSearch(req.body || {});
-        res.json({ status: 'ok', data, warnings: [] });
+        res.json({ status: data.query_status?.status || 'ok', data, warnings: [] });
     } catch (err: any) {
         sendAgentToolError(res, err);
     }
@@ -2572,7 +2834,11 @@ app.post('/api/agent-tools/geo/spatial-join', async (req, res) => {
 app.post('/api/agent-tools/geo/simplify', async (req, res) => {
     try {
         const data = await agentToolService.simplifiedGeometry(req.body || {});
-        res.json({ status: data.count > 0 ? 'ok' : 'empty', data, warnings: data.count > 0 ? [] : ['No geometry matched these filters.'] });
+        res.json({
+            status: data.query_status?.status || (data.count > 0 ? 'ok' : 'empty'),
+            data,
+            warnings: data.count > 0 ? [] : ['No geometry matched these filters.'],
+        });
     } catch (err: any) {
         sendAgentToolError(res, err);
     }
@@ -2612,6 +2878,57 @@ app.get('/api/agent-tools/view/summary', async (_req, res) => {
     try {
         const data = await agentToolService.getViewSummary();
         res.json({ status: 'ok', data, warnings: [] });
+    } catch (err: any) {
+        sendAgentToolError(res, err);
+    }
+});
+
+app.get('/api/agent-tools/view/request-context', async (req, res) => {
+    try {
+        const runId = String(req.query.run_id || '').trim();
+        if (!runId) {
+            res.json({
+                status: 'ok',
+                data: {
+                    available: false,
+                    run_id: null,
+                    session_id: null,
+                    context: null,
+                    reason: 'AGENT_RUN_ID is not set. This command is meant for an active product agent run.',
+                },
+                warnings: [],
+            });
+            return;
+        }
+        const run = await agentRuntimeService.getRun(runId);
+        if (!run) {
+            res.json({
+                status: 'ok',
+                data: {
+                    available: false,
+                    run_id: runId,
+                    session_id: null,
+                    context: null,
+                    reason: 'No agent run found for this run_id.',
+                },
+                warnings: [],
+            });
+            return;
+        }
+        const context = run.metadata?.requestContext && typeof run.metadata.requestContext === 'object'
+            ? run.metadata.requestContext
+            : null;
+        res.json({
+            status: 'ok',
+            data: {
+                available: Boolean(context),
+                run_id: run.agent_run_id,
+                session_id: run.agent_session_id,
+                context,
+                captured_at: context?.view?.capturedAt || null,
+            },
+            warnings: [],
+        });
     } catch (err: any) {
         sendAgentToolError(res, err);
     }
@@ -2742,8 +3059,45 @@ app.post('/api/agent-tools/map-command', async (req, res) => {
                 res.status(404).json({ status: 'error', error: { code: 'SELECTION_NOT_FOUND', message: 'Selection not found or expired' } });
                 return;
             }
+            const status = String(selection.materialization_status || 'none');
+            const materializedMs = Date.parse(String(selection.materialized_at || ''));
+            const updatedMs = Date.parse(String(selection.updated_at || ''));
+            const allowPartialMaterialization = payload.allow_partial_materialization === true
+                || payload.allowPartialMaterialization === true;
+            const reusableStatuses = allowPartialMaterialization
+                ? ['materialized', 'partial', 'empty']
+                : ['materialized', 'empty'];
+            const hasReusableMaterialization = reusableStatuses.includes(status)
+                && Number.isFinite(materializedMs)
+                && (!Number.isFinite(updatedMs) || materializedMs + 1000 >= updatedMs)
+                && payload.force_materialize !== true
+                && payload.rematerialize !== true;
+            const materialization = hasReusableMaterialization
+                ? {
+                    selection_id: selection.selection_id,
+                    layer: selection.layer_id,
+                    materialized_count: selection.materialized_count || 0,
+                    materialization_status: status,
+                    materialized_at: selection.materialized_at || null,
+                    reused: true,
+                }
+                : await agentToolService.materializeSelection(selectionId, {
+                    limit: payload.materialize_limit || payload.max_items || payload.limit,
+                    timeout_ms: payload.materialize_timeout_ms || payload.materialization_timeout_ms || payload.timeout_ms || payload.timeoutMs,
+                });
+            if (materialization.materialization_status === 'partial' && !allowPartialMaterialization) {
+                res.status(409).json({
+                    status: 'partial',
+                    error: {
+                        code: 'SELECTION_PARTIAL_MATERIALIZATION',
+                        message: 'Selection materialized only partially; pass allow_partial_materialization=true to apply that subset explicitly.',
+                    },
+                    data: { command, layer, selection_id: selectionId, mode, materialization },
+                });
+                return;
+            }
             const result = await viewControlService.applySelectionWithExplanation(layer, selectionId, mode);
-            res.json({ status: 'ok', data: { command, layer, selection_id: selectionId, mode, ...result } });
+            res.json({ status: 'ok', data: { command, layer, selection_id: selectionId, mode, materialization, ...result } });
             return;
         }
 
@@ -2806,10 +3160,20 @@ app.post('/api/agent-tools/map-command', async (req, res) => {
                         ...(payload.to ? { to: payload.to } : {}),
                         ...(payload.observed_from ? { observed_from: payload.observed_from } : {}),
                         ...(payload.observed_to ? { observed_to: payload.observed_to } : {}),
-                        ...(Array.isArray(payload.ids) ? { ids: payload.ids.slice(0, 5000) } : {}),
-                        ...(Array.isArray(payload.entity_ids) ? { ids: payload.entity_ids.slice(0, 5000) } : {}),
+                        ...(Array.isArray(payload.ids) ? { ids: payload.ids } : {}),
+                        ...(Array.isArray(payload.entity_ids) ? { ids: payload.entity_ids } : {}),
+                        ...(Array.isArray(payload.event_ids) ? { event_ids: payload.event_ids } : {}),
+                        ...(Array.isArray(payload.asset_ids) ? { asset_ids: payload.asset_ids } : {}),
+                        ...(payload.source_id ? { source_id: payload.source_id } : {}),
+                        ...(Array.isArray(payload.source_ids) ? { source_ids: payload.source_ids } : {}),
                         ...(payload.subtype ? { subtype: payload.subtype } : {}),
                         ...(Array.isArray(payload.subtype_in) ? { subtype_in: payload.subtype_in } : {}),
+                        ...(payload.entity_kind ? { entity_kind: payload.entity_kind } : {}),
+                        ...(Array.isArray(payload.entity_kind_in) ? { entity_kind_in: payload.entity_kind_in } : {}),
+                        ...(payload.event_kind ? { event_kind: payload.event_kind } : {}),
+                        ...(Array.isArray(payload.event_kind_in) ? { event_kind_in: payload.event_kind_in } : {}),
+                        ...(payload.asset_kind ? { asset_kind: payload.asset_kind } : {}),
+                        ...(Array.isArray(payload.asset_kind_in) ? { asset_kind_in: payload.asset_kind_in } : {}),
                     };
             if (!layer) {
                 res.status(400).json({ status: 'error', error: { code: 'BAD_LAYER_FILTER', message: 'layer.filter requires layer' } });
@@ -2837,8 +3201,31 @@ app.post('/api/agent-tools/map-command', async (req, res) => {
                 expiresAt: payload.expires_at || payload.expiresAt || new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
             });
             const materialization = await agentToolService.materializeSelection(selection.selection_id, {
-                limit: payload.materialize_limit || payload.max_items || payload.limit || 5000,
+                limit: payload.materialize_limit || payload.max_items || payload.limit,
+                timeout_ms: payload.materialize_timeout_ms || payload.materialization_timeout_ms || payload.timeout_ms || payload.timeoutMs,
             });
+            const allowPartialMaterialization = payload.allow_partial_materialization === true
+                || payload.allowPartialMaterialization === true;
+            if (materialization.materialization_status === 'partial' && !allowPartialMaterialization) {
+                res.status(409).json({
+                    status: 'partial',
+                    error: {
+                        code: 'SELECTION_PARTIAL_MATERIALIZATION',
+                        message: 'Layer filter materialized only partially; pass allow_partial_materialization=true to apply that subset explicitly.',
+                    },
+                    data: {
+                        command,
+                        layer,
+                        selection_id: selection.selection_id,
+                        mode,
+                        predicate,
+                        geometry: selection.geometry_json,
+                        expires_at: selection.expires_at || null,
+                        materialization,
+                    },
+                });
+                return;
+            }
             const result = await viewControlService.applySelectionWithExplanation(layer, selection.selection_id, mode);
             res.json({
                 status: 'ok',
@@ -3101,6 +3488,7 @@ const API_KEY_DEFS: Record<string, { label: string; envVars: string[] }> = {
     airspace: { label: 'OpenAIP', envVars: ['OPENAIP_API_KEY'] },
     gfw: { label: 'Global Fishing Watch', envVars: ['GFW_TOKEN'] },
     outages: { label: 'Cloudflare Radar', envVars: ['CLOUDFLARE_API_TOKEN'] },
+    fires: { label: 'NASA FIRMS', envVars: ['FIRMS_MAP_KEY', 'NASA_FIRMS_MAP_KEY'] },
     wifi: { label: 'WiGLE', envVars: ['WIGLE_API_NAME', 'WIGLE_API_TOKEN'] },
     imagery: { label: 'Copernicus Data Space', envVars: ['COPERNICUS_CLIENT_ID', 'COPERNICUS_CLIENT_SECRET'] },
 };
@@ -3346,19 +3734,30 @@ function parseLayerLimitMap(value: string | undefined): Record<string, number> {
 
 // 2026-04-24: убрал жёсткий потолок Math.min(5000, ...) — это был скрытый
 // максимум для любого endpoint'а использующего этот helper. Теперь если
-// клиент явно передал limit=N, он получает ровно N. Защита от бреда остаётся:
-// невалидное значение → fallback.
+// клиент явно передал limit=N, он получает ровно N.
+// 2026-05-05: explicit bad limit/offset values are request errors, not silent
+// fallbacks. Omitted values may still use an endpoint default page size.
 function parsePositiveLimit(value: string | undefined, fallback = 200): number {
     if (!value) return fallback;
     const parsed = Number(value);
-    if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+    if (!Number.isFinite(parsed) || parsed <= 0 || !Number.isInteger(parsed)) {
+        const err = new Error('Invalid limit (expected positive integer)') as Error & { status?: number; code?: string };
+        err.status = 400;
+        err.code = 'BAD_LIMIT';
+        throw err;
+    }
     return Math.max(1, Math.trunc(parsed));
 }
 
 function parseNonNegativeOffset(value: string | undefined): number {
     if (!value) return 0;
     const parsed = Number(value);
-    if (!Number.isFinite(parsed) || parsed < 0) return 0;
+    if (!Number.isFinite(parsed) || parsed < 0 || !Number.isInteger(parsed)) {
+        const err = new Error('Invalid offset (expected non-negative integer)') as Error & { status?: number; code?: string };
+        err.status = 400;
+        err.code = 'BAD_OFFSET';
+        throw err;
+    }
     return Math.max(0, Math.trunc(parsed));
 }
 
@@ -3393,15 +3792,87 @@ function queryItemTime(item: any): string | null {
         || null;
 }
 
+function publicQueryFilters(filters: Record<string, any>): Record<string, any> {
+    const next = { ...filters };
+    if (Array.isArray(next.bbox) && next.bbox.length === 4) {
+        const [south, west, north, east] = next.bbox;
+        next.bbox = [west, south, east, north];
+        next.bbox_order = 'west,south,east,north';
+    }
+    return next;
+}
+
+function compactQuerySearchItem(kind: 'entities' | 'events' | 'assets', item: any): Record<string, any> {
+    if (kind === 'entities') {
+        return {
+            entity_id: item.entity_id,
+            layer_id: item.layer_id,
+            source_id: item.source_id,
+            entity_kind: item.entity_kind,
+            subtype: item.subtype,
+            display_name: item.display_name,
+            first_observed_at: item.first_observed_at,
+            last_observed_at: item.last_observed_at,
+            position_observed_at: item.position_observed_at,
+            updated_at: item.updated_at,
+            display_lat: item.display_lat,
+            display_lng: item.display_lng,
+            altitude_m: item.altitude_m,
+            heading_deg: item.heading_deg,
+            speed_mps: item.speed_mps,
+        };
+    }
+    if (kind === 'events') {
+        return {
+            event_id: item.event_id,
+            layer_id: item.layer_id,
+            source_id: item.source_id,
+            event_kind: item.event_kind,
+            subtype: item.subtype,
+            observed_at: item.observed_at,
+            valid_from: item.valid_from,
+            valid_to: item.valid_to,
+            first_observed_at: item.first_observed_at,
+            last_observed_at: item.last_observed_at,
+            updated_at: item.updated_at,
+            display_lat: item.display_lat,
+            display_lng: item.display_lng,
+        };
+    }
+    return {
+        asset_id: item.asset_id,
+        layer_id: item.layer_id,
+        source_id: item.source_id,
+        asset_kind: item.asset_kind,
+        subtype: item.subtype,
+        display_name: item.display_name,
+        first_observed_at: item.first_observed_at,
+        last_observed_at: item.last_observed_at,
+        updated_at: item.updated_at,
+        display_lat: item.display_lat,
+        display_lng: item.display_lng,
+    };
+}
+
+function normalizeQueryDetail(value: unknown): 'full' | 'compact' {
+    const detail = String(value || '').trim().toLowerCase();
+    return detail === 'compact' || detail === 'summary' ? 'compact' : 'full';
+}
+
 function buildQuerySearchResponse(
     kind: 'entities' | 'events' | 'assets',
     filters: Record<string, any>,
     rawItems: any[],
     requestedLimit: number,
     offset: number,
+    detail: 'full' | 'compact' = 'full',
+    limitDefaulted = false,
 ) {
     const hasMore = rawItems.length > requestedLimit;
-    const items = hasMore ? rawItems.slice(0, requestedLimit) : rawItems;
+    const returnedItems = hasMore ? rawItems.slice(0, requestedLimit) : rawItems;
+    const items = detail === 'compact'
+        ? returnedItems.map((item) => compactQuerySearchItem(kind, item))
+        : returnedItems;
     const times = items
         .map(queryItemTime)
         .filter((value): value is string => Boolean(value))
@@ -3419,8 +3890,9 @@ function buildQuerySearchResponse(
         status,
         mode: 'latest',
         kind,
+        detail,
         filters: {
-            ...filters,
+            ...publicQueryFilters(filters),
             limit: requestedLimit,
             offset,
         },
@@ -3430,7 +3902,10 @@ function buildQuerySearchResponse(
             reason: items.length === 0 ? 'empty_result' : hasMore ? 'limit_exceeded' : 'within_limit',
         },
         pagination: {
+            requested_limit: requestedLimit,
             limit: requestedLimit,
+            defaulted: limitDefaulted,
+            capped: false,
             offset,
             returned: items.length,
             has_more: hasMore,
@@ -3446,7 +3921,38 @@ function buildQuerySearchResponse(
         },
         count: items.length,
         items,
+        detail_note: detail === 'compact'
+            ? 'Compact query.search omits heavy geometry/properties. Use --detail full, geo.simplify, query.related or object.open when full geometry/properties are needed.'
+            : null,
         warnings,
+    };
+}
+
+function buildReplayPage<T>(
+    rawItems: T[],
+    requestedLimit: number,
+    offset: number,
+    limitDefaulted = false,
+) {
+    const hasMore = rawItems.length > requestedLimit;
+    const items = hasMore ? rawItems.slice(0, requestedLimit) : rawItems;
+    return {
+        items,
+        pagination: {
+            requested_limit: requestedLimit,
+            limit: requestedLimit,
+            defaulted: limitDefaulted,
+            capped: false,
+            offset,
+            returned: items.length,
+            has_more: hasMore,
+            next_offset: hasMore ? offset + items.length : null,
+        },
+        query_status: {
+            status: items.length === 0 ? 'empty' : hasMore ? 'partial' : 'ok',
+            complete: !hasMore,
+            reason: items.length === 0 ? 'empty_result' : hasMore ? 'page_has_more' : 'within_limit',
+        },
     };
 }
 
@@ -3591,6 +4097,9 @@ app.get('/api/replay/events', async (req, res) => {
     }
 
     try {
+        const limitDefaulted = req.query.limit === undefined || req.query.limit === '';
+        const limit = parsePositiveLimit(req.query.limit as string | undefined, 200);
+        const offset = parseNonNegativeOffset(req.query.offset as string | undefined);
         const filters = {
             layerId: normalizeLayerId((req.query.layerId as string | undefined) || (req.query.layer as string | undefined)),
             sourceId: req.query.sourceId as string | undefined,
@@ -3600,17 +4109,26 @@ app.get('/api/replay/events', async (req, res) => {
             from: from || undefined,
             to: to || undefined,
             bbox: bbox || undefined,
-            limit: parsePositiveLimit(req.query.limit as string | undefined, 200),
+            limit: limit + 1,
+            offset,
         };
         const [items, summary] = await Promise.all([
             eventQueryService.listSnapshots(filters),
             eventQueryService.summarizeSnapshots(filters),
         ]);
+        const page = buildReplayPage(items, limit, offset, limitDefaulted);
         res.json({
             mode: 'history',
-            filters,
+            filters: {
+                ...publicQueryFilters(filters),
+                limit,
+                offset,
+            },
             summary,
-            items,
+            count: page.items.length,
+            pagination: page.pagination,
+            query_status: page.query_status,
+            items: page.items,
         });
     } catch (err: any) {
         sendError(res, err);
@@ -3755,6 +4273,25 @@ app.post('/api/replay/render-chunks/prewarm', async (req, res) => {
         sendError(res, err);
     }
 });
+
+function sendLegacyReplayTileGone(_req: any, res: any) {
+    res.status(410).json({
+        status: 'gone',
+        error: {
+            code: 'LEGACY_REPLAY_TILE_ENDPOINT_REMOVED',
+            message: 'Legacy replay tile endpoints were removed. Use render-chunks for map rendering or replay state for semantic data queries.',
+        },
+        replacement: {
+            render_chunks: '/api/replay/render-chunks',
+            semantic_state: '/api/replay/state',
+        },
+    });
+}
+
+app.get('/api/replay/manifest', sendLegacyReplayTileGone);
+app.get('/api/replay/tile-bundle', sendLegacyReplayTileGone);
+app.get(/^\/api\/replay\/tile(?:\/.*)?$/, sendLegacyReplayTileGone);
+app.get(/^\/static\/replay-tiles(?:\/.*)?$/, sendLegacyReplayTileGone);
 
 app.get('/api/replay/render-chunks', async (req, res) => {
     if (!replayQueryService.isReady()) {
@@ -4038,89 +4575,6 @@ app.get('/api/replay/render-feature', async (req, res) => {
     }
 });
 
-app.get('/api/replay/manifest', async (req, res) => {
-    if (!replayQueryService.isReady()) {
-        res.status(503).json({ error: 'Replay database is not ready' });
-        return;
-    }
-
-    const from = parseIsoDateOrNull(req.query.from as string | undefined);
-    const to = parseIsoDateOrNull(req.query.to as string | undefined);
-    if (!from || !to) {
-        res.status(400).json({ error: 'Missing or invalid from/to timestamp' });
-        return;
-    }
-
-    const bbox = parsePublicBbox(req.query.bbox as string | undefined, req.query.bbox_order || req.query.bboxOrder);
-    if (req.query.bbox && !bbox) {
-        res.status(400).json({ error: 'Invalid bbox (expected west,south,east,north)' });
-        return;
-    }
-
-    const zRaw = req.query.z as string | undefined;
-    const z = zRaw == null ? 0 : Number(zRaw);
-    if (zRaw != null && (!Number.isInteger(z) || z < 0 || z > 6)) {
-        res.status(400).json({ error: 'Invalid z (expected integer 0..6)' });
-        return;
-    }
-
-    const layers = parseLayerScopeList(req.query.layers as string | undefined);
-    if (layers.length === 0) {
-        res.status(400).json({ error: 'Manifest requires at least one layer' });
-        return;
-    }
-
-    try {
-        const manifest = await replayTileBuilderService.buildManifest({
-            from,
-            to,
-            layers,
-            z,
-            bbox: bbox || undefined,
-        });
-        res.json(manifest);
-    } catch (err: any) {
-        sendError(res, err);
-    }
-});
-
-app.get('/api/replay/tile/:layer/:z/:x/:y/:tBucketIso', async (req, res) => {
-    if (!replayQueryService.isReady()) {
-        res.status(503).json({ error: 'Replay database is not ready' });
-        return;
-    }
-
-    const layerId = normalizeLayerId(req.params.layer);
-    const z = Number(req.params.z);
-    const x = Number(req.params.x);
-    const y = Number(req.params.y);
-    const tBucket = parseIsoDateOrNull(req.params.tBucketIso);
-    if (!layerId || !Number.isInteger(z) || !Number.isInteger(x) || !Number.isInteger(y) || !tBucket) {
-        res.status(400).json({ error: 'Invalid tile coordinates or tBucket' });
-        return;
-    }
-
-    try {
-        const tile = await replayTileBuilderService.readTileBuffer({
-            layerId,
-            z,
-            x,
-            y,
-            tBucket,
-        });
-        if (!tile) {
-            res.status(404).json({ error: 'Replay tile not found' });
-            return;
-        }
-        res.setHeader('Content-Type', 'application/msgpack');
-        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-        res.setHeader('ETag', tile.entry.contentHash);
-        res.send(tile.buffer);
-    } catch (err: any) {
-        sendError(res, err);
-    }
-});
-
 app.post('/api/perf-event', (req, res) => {
     const body = req.body;
     if (Array.isArray(body)) {
@@ -4129,123 +4583,6 @@ app.post('/api/perf-event', (req, res) => {
         logPerfEventFromClient(body);
     }
     res.status(204).end();
-});
-
-app.post('/api/replay/tile-bundle', async (req, res) => {
-    const urls: string[] = Array.isArray(req.body?.urls) ? req.body.urls : [];
-    if (urls.length === 0) {
-        res.status(400).json({ error: 'urls[] required' });
-        return;
-    }
-    if (urls.length > 2000) {
-        res.status(400).json({ error: 'urls[] too large (max 2000)' });
-        return;
-    }
-    const tileRoot = path.resolve(__dirname, '../var/replay-tiles');
-    try {
-        const layerSet = new Set<string>();
-        for (const u of urls) {
-            if (typeof u !== 'string') continue;
-            const parts = u.split('/');
-            if (parts[3]) layerSet.add(parts[3]);
-        }
-        await withSpan('replay.tile_bundle', {
-            'http.route': '/api/replay/tile-bundle',
-            'replay.tiles': urls.length,
-            'replay.layers': Array.from(layerSet).join(','),
-        }, async () => {
-            const t0 = performance.now();
-            const tRead0 = performance.now();
-            const buffers = await withSpan('replay.tile_bundle.read', {
-                'replay.tiles': urls.length,
-                'replay.layers': Array.from(layerSet).join(','),
-            }, async () => Promise.all(urls.map(async (url) => {
-                // url формат: /static/replay-tiles/{layer}/{z}/{x}/{y}/{filename}
-                if (typeof url !== 'string' || !url.startsWith('/static/replay-tiles/')) return null;
-                const rel = url.slice('/static/replay-tiles/'.length);
-                if (rel.includes('..')) return null;
-                const filePath = path.join(tileRoot, rel);
-                const tOne = performance.now();
-                try {
-                    const buffer = await fs.promises.readFile(filePath);
-                    const readMs = performance.now() - tOne;
-                    if (readMs > 250) {
-                        logPerfEvent('replay.tile_bundle_read_slow', {
-                            source: 'backend',
-                            url,
-                            bytes: buffer.byteLength,
-                            ms: Math.round(readMs),
-                        });
-                    }
-                    return buffer;
-                } catch {
-                    return null;
-                }
-            })));
-            const readMs = performance.now() - tRead0;
-            const readBytes = buffers.reduce((acc, b) => acc + (b?.length || 0), 0);
-            const missing = buffers.reduce((acc, b) => acc + (b ? 0 : 1), 0);
-            recordReplayTileBundlePhase('read', urls.length, readBytes, readMs);
-
-            const tEncode0 = performance.now();
-            const out = await withSpan('replay.tile_bundle.encode', {
-                'replay.tiles': urls.length,
-                'replay.bytes.read': readBytes,
-                'replay.missing': missing,
-            }, async () => {
-                const urlBufs = urls.map((u) => Buffer.from(u, 'utf8'));
-                const totalSize = 4 + buffers.reduce((acc, b, i) => acc + 4 + urlBufs[i].length + 4 + (b?.length || 0), 0);
-                const encoded = Buffer.allocUnsafe(totalSize);
-                let off = 0;
-                encoded.writeUInt32LE(buffers.length, off); off += 4;
-                for (let i = 0; i < buffers.length; i += 1) {
-                    const kb = urlBufs[i];
-                    encoded.writeUInt32LE(kb.length, off); off += 4;
-                    kb.copy(encoded, off); off += kb.length;
-                    const pb = buffers[i];
-                    const plen = pb?.length || 0;
-                    encoded.writeUInt32LE(plen, off); off += 4;
-                    if (pb && plen > 0) { pb.copy(encoded, off); off += plen; }
-                }
-                return encoded;
-            });
-            const encodeMs = performance.now() - tEncode0;
-            recordReplayTileBundlePhase('encode', urls.length, out.length, encodeMs);
-
-            const took = performance.now() - t0;
-            recordReplayTileBundle(urls.length, out.length, took);
-            logPerfEvent('replay.tile_bundle', {
-                source: 'backend',
-                tileCount: urls.length,
-                bytes: out.length,
-                ms: Math.round(took),
-                readMs: Math.round(readMs),
-                encodeMs: Math.round(encodeMs),
-                missing,
-                layers: Array.from(layerSet),
-            });
-            if (urls.length > 50 || took > 200) {
-                console.log(`[tile-bundle] ${urls.length} tiles, ${out.length} bytes, ${Math.round(took)}ms read=${Math.round(readMs)}ms encode=${Math.round(encodeMs)}ms missing=${missing}`);
-            }
-            res.setHeader('Content-Type', 'application/octet-stream');
-            res.setHeader('Cache-Control', 'no-store');
-            const tSend0 = performance.now();
-            res.send(out);
-            const sendMs = performance.now() - tSend0;
-            recordReplayTileBundlePhase('send', urls.length, out.length, sendMs);
-            logPerfEvent('replay.tile_bundle_phase', {
-                source: 'backend',
-                phase: 'send',
-                tileCount: urls.length,
-                bytes: out.length,
-                ms: Math.round(sendMs),
-                layers: Array.from(layerSet),
-            });
-        });
-    } catch (err: any) {
-        console.error('[api/replay/tile-bundle] failed:', err?.message || err);
-        res.status(500).json({ error: err?.message || 'tile-bundle-failed' });
-    }
 });
 
 // Cache satellite-TLE responses for ~5 min: TLE elements barely change in
@@ -4314,7 +4651,6 @@ app.get('/api/replay/satellite-tle', async (req, res) => {
 });
 
 app.get('/api/replay/state', async (req, res) => {
-    console.warn('[deprecated] /api/replay/state called');
     if (!replayQueryService.isReady()) {
         res.status(503).json({ error: 'Replay database is not ready' });
         return;
@@ -4454,6 +4790,9 @@ app.get('/api/replay/track/:entityId', async (req, res) => {
     }
 
     try {
+        const limitDefaulted = req.query.limit === undefined || req.query.limit === '';
+        const limit = parsePositiveLimit(req.query.limit as string | undefined, 1000);
+        const offset = parseNonNegativeOffset(req.query.offset as string | undefined);
         const routeStartedAt = performance.now();
         const [entityState, items] = await Promise.all([
             replayQueryService.listEntityStateAt({
@@ -4466,7 +4805,8 @@ app.get('/api/replay/track/:entityId', async (req, res) => {
                     entityId: req.params.entityId,
                     from: from || undefined,
                     to: to || undefined,
-                    limit: parsePositiveLimit(req.query.limit as string | undefined, 1000),
+                    limit: limit + 1,
+                    offset,
                     order,
                     stepSeconds: stepSeconds || undefined,
                 })
@@ -4474,12 +4814,14 @@ app.get('/api/replay/track/:entityId', async (req, res) => {
                     entityId: req.params.entityId,
                     from: from || undefined,
                     to: to || undefined,
-                    limit: parsePositiveLimit(req.query.limit as string | undefined, 1000),
+                    limit: limit + 1,
+                    offset,
                     order,
                 }),
         ]);
+        const page = buildReplayPage(items, limit, offset, limitDefaulted);
 
-        recordReplayRequest('track', performance.now() - routeStartedAt, items.length, req.params.entityId);
+        recordReplayRequest('track', performance.now() - routeStartedAt, page.items.length, req.params.entityId);
 
         res.json({
             mode: 'historical-replay',
@@ -4487,8 +4829,10 @@ app.get('/api/replay/track/:entityId', async (req, res) => {
             entityId: req.params.entityId,
             order,
             entity: entityState[0] || null,
-            count: items.length,
-            items,
+            count: page.items.length,
+            pagination: page.pagination,
+            query_status: page.query_status,
+            items: page.items,
         });
     } catch (err: any) {
         sendError(res, err);
@@ -4502,15 +4846,22 @@ app.get('/api/replay/events/:eventId/snapshots', async (req, res) => {
     }
 
     try {
+        const limitDefaulted = req.query.limit === undefined || req.query.limit === '';
+        const limit = parsePositiveLimit(req.query.limit as string | undefined, 500);
+        const offset = parseNonNegativeOffset(req.query.offset as string | undefined);
         const items = await eventQueryService.listSnapshots({
             eventId: req.params.eventId,
-            limit: parsePositiveLimit(req.query.limit as string | undefined, 500),
+            limit: limit + 1,
+            offset,
         });
+        const page = buildReplayPage(items, limit, offset, limitDefaulted);
         res.json({
             mode: 'event-history',
             eventId: req.params.eventId,
-            count: items.length,
-            items,
+            count: page.items.length,
+            pagination: page.pagination,
+            query_status: page.query_status,
+            items: page.items,
         });
     } catch (err: any) {
         sendError(res, err);
@@ -4676,8 +5027,10 @@ app.get('/api/query/events/latest', async (req, res) => {
     }
 
     try {
+        const limitDefaulted = req.query.limit === undefined || req.query.limit === '';
         const limit = parsePositiveLimit(req.query.limit as string | undefined, 200);
         const offset = parseNonNegativeOffset(req.query.offset as string | undefined);
+        const detail = normalizeQueryDetail(req.query.detail || req.query.view || req.query.mode);
         const filters = {
             layerId: normalizeLayerId((req.query.layerId as string | undefined) || (req.query.layer as string | undefined)),
             sourceId: req.query.sourceId as string | undefined,
@@ -4691,7 +5044,7 @@ app.get('/api/query/events/latest', async (req, res) => {
             offset,
         };
         const items = await eventQueryService.listLatest(filters);
-        res.json(buildQuerySearchResponse('events', filters, items, limit, offset));
+        res.json(buildQuerySearchResponse('events', filters, items, limit, offset, detail, limitDefaulted));
     } catch (err: any) {
         sendError(res, err);
     }
@@ -4717,8 +5070,10 @@ app.get('/api/query/entities/latest', async (req, res) => {
     }
 
     try {
+        const limitDefaulted = req.query.limit === undefined || req.query.limit === '';
         const limit = parsePositiveLimit(req.query.limit as string | undefined, 200);
         const offset = parseNonNegativeOffset(req.query.offset as string | undefined);
+        const detail = normalizeQueryDetail(req.query.detail || req.query.view || req.query.mode);
         const filters = {
             layerId: normalizeLayerId((req.query.layerId as string | undefined) || (req.query.layer as string | undefined)),
             sourceId: req.query.sourceId as string | undefined,
@@ -4732,7 +5087,7 @@ app.get('/api/query/entities/latest', async (req, res) => {
             offset,
         };
         const items = await entityQueryService.listLatest(filters);
-        res.json(buildQuerySearchResponse('entities', filters, items, limit, offset));
+        res.json(buildQuerySearchResponse('entities', filters, items, limit, offset, detail, limitDefaulted));
     } catch (err: any) {
         sendError(res, err);
     }
@@ -4791,18 +5146,31 @@ app.get('/api/query/entities/:entityId/track', async (req, res) => {
     const order = req.query.order === 'desc' ? 'desc' : 'asc';
 
     try {
-        const items = await entityQueryService.listTrack({
+        const limit = parsePositiveLimit(req.query.limit as string | undefined, 1000);
+        const offset = parseNonNegativeOffset(req.query.offset as string | undefined);
+        const rows = await entityQueryService.listTrack({
             entityId: req.params.entityId,
             from: from || undefined,
             to: to || undefined,
-            limit: parsePositiveLimit(req.query.limit as string | undefined, 1000),
+            limit: limit + 1,
+            offset,
             order,
         });
+        const hasMore = rows.length > limit;
+        const items = hasMore ? rows.slice(0, limit) : rows;
         res.json({
             mode: 'track',
             entityId: req.params.entityId,
             order,
+            limit,
+            offset,
             count: items.length,
+            pagination: {
+                limit,
+                offset,
+                has_more: hasMore,
+                next_offset: hasMore ? offset + limit : null,
+            },
             items,
         });
     } catch (err: any) {
@@ -4830,8 +5198,10 @@ app.get('/api/query/assets/latest', async (req, res) => {
     }
 
     try {
+        const limitDefaulted = req.query.limit === undefined || req.query.limit === '';
         const limit = parsePositiveLimit(req.query.limit as string | undefined, 200);
         const offset = parseNonNegativeOffset(req.query.offset as string | undefined);
+        const detail = normalizeQueryDetail(req.query.detail || req.query.view || req.query.mode);
         const filters = {
             layerId: normalizeLayerId((req.query.layerId as string | undefined) || (req.query.layer as string | undefined)),
             sourceId: req.query.sourceId as string | undefined,
@@ -4845,7 +5215,7 @@ app.get('/api/query/assets/latest', async (req, res) => {
             offset,
         };
         const items = await assetQueryService.listLatest(filters);
-        res.json(buildQuerySearchResponse('assets', filters, items, limit, offset));
+        res.json(buildQuerySearchResponse('assets', filters, items, limit, offset, detail, limitDefaulted));
     } catch (err: any) {
         sendError(res, err);
     }
@@ -4871,6 +5241,9 @@ app.get('/api/replay/assets', async (req, res) => {
     }
 
     try {
+        const limitDefaulted = req.query.limit === undefined || req.query.limit === '';
+        const limit = parsePositiveLimit(req.query.limit as string | undefined, 500);
+        const offset = parseNonNegativeOffset(req.query.offset as string | undefined);
         const filters = {
             layerId: normalizeLayerId((req.query.layerId as string | undefined) || (req.query.layer as string | undefined)),
             sourceId: req.query.sourceId as string | undefined,
@@ -4880,14 +5253,22 @@ app.get('/api/replay/assets', async (req, res) => {
             from: from || undefined,
             to: to || undefined,
             bbox: bbox || undefined,
-            limit: parsePositiveLimit(req.query.limit as string | undefined, 500),
+            limit: limit + 1,
+            offset,
         };
         const items = await assetQueryService.listSnapshots(filters);
+        const page = buildReplayPage(items, limit, offset, limitDefaulted);
         res.json({
             mode: 'history',
-            filters,
-            count: items.length,
-            items,
+            filters: {
+                ...publicQueryFilters(filters),
+                limit,
+                offset,
+            },
+            count: page.items.length,
+            pagination: page.pagination,
+            query_status: page.query_status,
+            items: page.items,
         });
     } catch (err: any) {
         sendError(res, err);
@@ -4901,15 +5282,22 @@ app.get('/api/replay/assets/:assetId/snapshots', async (req, res) => {
     }
 
     try {
+        const limitDefaulted = req.query.limit === undefined || req.query.limit === '';
+        const limit = parsePositiveLimit(req.query.limit as string | undefined, 1000);
+        const offset = parseNonNegativeOffset(req.query.offset as string | undefined);
         const items = await assetQueryService.listSnapshots({
             assetId: req.params.assetId,
-            limit: parsePositiveLimit(req.query.limit as string | undefined, 1000),
+            limit: limit + 1,
+            offset,
         });
+        const page = buildReplayPage(items, limit, offset, limitDefaulted);
         res.json({
             mode: 'asset-history',
             assetId: req.params.assetId,
-            count: items.length,
-            items,
+            count: page.items.length,
+            pagination: page.pagination,
+            query_status: page.query_status,
+            items: page.items,
         });
     } catch (err: any) {
         sendError(res, err);
@@ -5587,6 +5975,22 @@ app.get('/api/status', async (_req, res) => {
         completeness: acledH.status === 'streaming' && effectiveGdeltH.status === 'streaming' ? 'complete' : 'incomplete',
         providers: { acled: acledH, gdelt: effectiveGdeltH },
     };
+    const sourceStatuses = await collectSourceIngestStatus();
+    const gpsJamH = gpsJamService.getHealth();
+    const gpsJamPersisted = sourceStatuses.find((row) => row.sourceId === 'gpsjam' && row.layerId === 'jamming');
+    const gpsJamPersistedCount = gpsJamH.status === 'streaming'
+        ? 0
+        : await countCurrentCanonicalEvents('jamming', 'gpsjam');
+    const effectiveGpsJamH = gpsJamH.status === 'streaming' || gpsJamPersistedCount <= 0 || gpsJamPersisted?.status !== 'completed'
+        ? gpsJamH
+        : {
+            ...gpsJamH,
+            status: 'streaming' as const,
+            count: Math.max(Number(gpsJamH.count || 0), gpsJamPersistedCount),
+            note: `serving ${gpsJamPersistedCount} persisted current GPSJam zones; latest live fetch ${gpsJamH.status}${gpsJamH.note ? `: ${gpsJamH.note}` : ''}`,
+            upstreamStatus: gpsJamH.status,
+            upstreamNote: gpsJamH.note,
+        };
 
     const statusPayload = {
         database: databaseService.getHealth(),
@@ -5595,7 +5999,7 @@ app.get('/api/status', async (_req, res) => {
         maritime: adsbHealth.maritime,
         cables: extendedHealth.cables,
         fires: extendedHealth.fires,
-        jamming: gpsJamService.getHealth(),
+        jamming: effectiveGpsJamH,
         airspace: airspaceService.getHealth(),
         acled: acledH,
         conflicts: conflictsHealth,
@@ -5616,7 +6020,7 @@ app.get('/api/status', async (_req, res) => {
         infrastructure: { status: infraStatus, note: infraNote },
         wifi: wigleService.getHealth(),
         overture: os ?? { state: 'disabled' },
-        sources: await collectSourceIngestStatus(),
+        sources: sourceStatuses,
         storage: await collectStorageStatus(),
     };
 
@@ -5702,13 +6106,9 @@ async function bootstrap() {
     server.listen(PORT, () => {
         console.log(`Backend server running on port ${PORT}`);
     });
-    void refreshReplayTilesWindow();
     setTimeout(() => {
         void prewarmReplayRenderChunksWindow('startup');
     }, 2500);
-    setInterval(() => {
-        void refreshReplayTilesWindow();
-    }, 10 * 60 * 1000);
     setInterval(() => {
         void prewarmReplayRenderChunksWindow('interval');
     }, 15 * 60 * 1000);

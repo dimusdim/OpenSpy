@@ -299,8 +299,8 @@
         "celestrak_gp_json": "JSON/XML GP format with rich metadata (vs raw TLE). Includes country, launch date, RCS, object type",
         "celestrak_supplemental": "TLE for classified objects (analyst-derived orbits for spy satellites)",
         "celestrak_satcat": "full satellite catalog with international designator, launch info, decay status",
-        "spectator_search_imagery": "search for actual satellite imagery over an area. Could show what satellites recently imaged a location",
-        "spectator_tasking": "request new satellite imagery of a target area"
+        "spectator_sensor_footprints": "sensor footprint metadata for selected commercial/open satellites",
+        "spectator_pass_metadata": "pass and platform metadata that can enrich satellite footprint visualization"
       }
     },
     {
@@ -313,14 +313,11 @@
       "type": "near-real-time",
       "refresh": "5 min",
       "live_contract": {
-        "delivery_mode": "incremental",
-        "poll_ms": 3600000,
-        "cursor": "latest core.events.observed_at with overlap",
-        "bootstrap_lookback_days": 3,
-        "max_window_days": 7,
-        "overlap_hours": 6,
+        "delivery_mode": "replace",
+        "poll_ms": 300000,
         "stale_after_sec": null,
-        "remove_after_sec": null
+        "remove_after_sec": null,
+        "notes": "GDACS MAP endpoint returns the current bulletin collection; OpenSpy replaces the live disaster view on each poll while canonical event snapshots remain append/idempotent in storage."
       },
       "endpoints": [
         "https://www.gdacs.org/gdacsapi/api/events/geteventlist/MAP"
@@ -505,8 +502,8 @@
       ],
       "auth": {
         "required": true,
-        "method": "email + API key",
-        "env_keys": ["ACLED_EMAIL", "ACLED_KEY"],
+        "method": "email + API key, or explicit password OAuth",
+        "env_keys": ["ACLED_EMAIL", "ACLED_KEY", "ACLED_PASSWORD", "ACLED_AUTH_MODE", "ACLED_ENABLE_PASSWORD_OAUTH"],
         "limits": "free academic/non-commercial"
       },
       "legend": {
@@ -707,6 +704,11 @@
         "method": "none",
         "env_keys": [],
         "limits": "none"
+      },
+      "source_fetch_auth": {
+        "required": true,
+        "method": "NASA FIRMS MAP_KEY for historical Area API imports",
+        "env_keys": ["FIRMS_MAP_KEY", "NASA_FIRMS_MAP_KEY"]
       },
       "legend": {
         "subtypes": ["high", "medium", "low"],
@@ -985,7 +987,7 @@
         "remove_after_sec": null
       },
       "endpoints": [
-        "https://api.ioda.caida.org/dev/outages/alerts/country"
+        "https://api.ioda.inetintel.cc.gatech.edu/v2/outages/alerts"
       ],
       "auth": {
         "required": false,
@@ -1774,7 +1776,7 @@
     },
     {
       "id": "spectator_earth",
-      "name": "Spectator Earth — Satellite Imagery Catalog",
+      "name": "Spectator Earth — Satellite Footprint Metadata",
       "provider": "Spectator Earth",
       "category": "space",
       "layer": "Satellite (enrichment only)",
@@ -1801,9 +1803,9 @@
         "platform": "satellite platform/bus type — not shown"
       },
       "fields_available_not_loaded": {
-        "search_imagery": "Spectator has image search API — find actual captured imagery over an area",
-        "acquisition_plans": "planned satellite passes over a location",
-        "imagery_metadata": "resolution, bands, cloud cover for available imagery"
+        "sensor_footprints": "additional footprint metadata for supported satellites",
+        "pass_metadata": "planned pass and platform metadata where account access allows it",
+        "sensor_resolution": "sensor resolution and platform descriptors for footprint interpretation"
       }
     },
     {
@@ -1811,8 +1813,8 @@
       "name": "Copernicus / Sentinel Hub — High-Res Imagery",
       "provider": "European Space Agency (ESA) / Copernicus",
       "category": "imagery",
-      "layer": "Not integrated",
-      "status": "NEEDS_KEY",
+      "layer": "Imagery overlay",
+      "status": "SOURCE_FETCH",
       "type": "near-real-time",
       "refresh": "Sentinel-2 revisit: 5 days",
       "endpoints": [
@@ -1821,7 +1823,7 @@
       "auth": {
         "required": true,
         "method": "OAuth2",
-        "env_keys": [],
+        "env_keys": ["COPERNICUS_CLIENT_ID", "COPERNICUS_CLIENT_SECRET"],
         "limits": "10,000 Processing Units/month free"
       },
       "fields_available_not_loaded": {
@@ -1830,6 +1832,29 @@
         "sentinel2_swir": "short-wave infrared — burn scar detection",
         "sentinel1_sar": "SAR imagery — see through clouds, detect ships/changes. VERY HIGH VALUE",
         "change_detection": "compare two dates to detect construction, destruction, troop movements"
+      }
+    },
+    {
+      "id": "usgs_landsat",
+      "name": "USGS Landsat STAC — Historical Imagery",
+      "provider": "USGS / Landsat",
+      "category": "imagery",
+      "layer": "Not integrated",
+      "status": "PLANNED",
+      "type": "historical archive",
+      "refresh": "Landsat archive cadence",
+      "endpoints": [
+        "https://landsatlook.usgs.gov/stac-server"
+      ],
+      "auth": {
+        "required": false,
+        "method": "public STAC metadata / product-dependent asset access",
+        "env_keys": [],
+        "limits": "USGS terms and product availability"
+      },
+      "fields_available_not_loaded": {
+        "landsat_scene_search": "historical AOI/time scene search",
+        "before_after_context": "lower-cadence archive imagery for older incident reconstruction"
       }
     },
     {

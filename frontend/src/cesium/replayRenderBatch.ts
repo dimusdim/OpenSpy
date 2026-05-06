@@ -253,7 +253,9 @@ type ApplyLayerOptions = {
     atIso: string;
     fromIso?: string;
     toIso?: string;
+    bbox?: [number, number, number, number];
     aggregateFires?: boolean;
+    fetchFeatureRefs?: boolean;
     isCancelled?: () => boolean;
     beforeCommit?: () => void;
 };
@@ -659,6 +661,12 @@ export class ReplayRenderBatchManager {
     private readonly onPointAdd?: (id: string, billboard: Cesium.Billboard) => void;
     private readonly onPointRemove?: (id: string) => void;
     private readonly layerStates = new Map<string, LayerRenderState>();
+    private readonly renderChunkIndexCache = new Map<string, RenderChunksResponse>();
+    private readonly renderChunkIndexInFlight = new Map<string, Promise<RenderChunksResponse>>();
+    private readonly chunkDataCache = new Map<string, { layerId: string; buffer: ArrayBuffer }>();
+    private readonly chunkDataInFlight = new Map<string, Promise<ArrayBuffer>>();
+    private readonly featureRefsCache = new Map<string, { layerId: string; refs: RenderFeatureRefsResponse }>();
+    private readonly featureRefsInFlight = new Map<string, Promise<RenderFeatureRefsResponse>>();
 
     constructor(options: {
         scene: Cesium.Scene;
@@ -678,10 +686,94 @@ export class ReplayRenderBatchManager {
         this.resolveVisible = resolveVisible;
     }
 
+    private async getRenderChunkIndex(url: string): Promise<RenderChunksResponse> {
+        const cached = this.renderChunkIndexCache.get(url);
+        if (cached) return cached;
+        const inFlight = this.renderChunkIndexInFlight.get(url);
+        if (inFlight) return inFlight;
+        let request: Promise<RenderChunksResponse>;
+        request = replayHttpGet<RenderChunksResponse>(url)
+            .then((manifest) => {
+                this.renderChunkIndexCache.set(url, manifest);
+                return manifest;
+            })
+            .finally(() => {
+                if (this.renderChunkIndexInFlight.get(url) === request) {
+                    this.renderChunkIndexInFlight.delete(url);
+                }
+            });
+        this.renderChunkIndexInFlight.set(url, request);
+        return request;
+    }
+
+    private pruneRenderChunkIndexCache(layerId: string, keepUrl: string): void {
+        for (const [url, manifest] of Array.from(this.renderChunkIndexCache.entries())) {
+            if (url === keepUrl) continue;
+            if (Object.prototype.hasOwnProperty.call(manifest.layers || {}, layerId)) {
+                this.renderChunkIndexCache.delete(url);
+            }
+        }
+    }
+
+    private async getChunkData(layerId: string, url: string): Promise<ArrayBuffer> {
+        const cached = this.chunkDataCache.get(url);
+        if (cached) return cached.buffer;
+        const inFlight = this.chunkDataInFlight.get(url);
+        if (inFlight) return inFlight;
+        let request: Promise<ArrayBuffer>;
+        request = replayHttpGet<ArrayBuffer>(url, { responseType: 'arraybuffer' })
+            .then((buffer) => {
+                this.chunkDataCache.set(url, { layerId, buffer });
+                return buffer;
+            })
+            .finally(() => {
+                if (this.chunkDataInFlight.get(url) === request) {
+                    this.chunkDataInFlight.delete(url);
+                }
+            });
+        this.chunkDataInFlight.set(url, request);
+        return request;
+    }
+
+    private async getFeatureRefs(layerId: string, url: string): Promise<RenderFeatureRefsResponse> {
+        const cached = this.featureRefsCache.get(url);
+        if (cached) return cached.refs;
+        const inFlight = this.featureRefsInFlight.get(url);
+        if (inFlight) return inFlight;
+        let request: Promise<RenderFeatureRefsResponse>;
+        request = replayHttpGet<RenderFeatureRefsResponse>(url)
+            .then((refs) => {
+                this.featureRefsCache.set(url, { layerId, refs });
+                return refs;
+            })
+            .finally(() => {
+                if (this.featureRefsInFlight.get(url) === request) {
+                    this.featureRefsInFlight.delete(url);
+                }
+            });
+        this.featureRefsInFlight.set(url, request);
+        return request;
+    }
+
+    private pruneLayerChunkCache(layerId: string, keepDataUrls = new Set<string>(), keepRefsUrls = new Set<string>()): void {
+        for (const [url, cached] of Array.from(this.chunkDataCache.entries())) {
+            if (cached.layerId === layerId && !keepDataUrls.has(url)) this.chunkDataCache.delete(url);
+        }
+        for (const [url, cached] of Array.from(this.featureRefsCache.entries())) {
+            if (cached.layerId === layerId && !keepRefsUrls.has(url)) this.featureRefsCache.delete(url);
+        }
+    }
+
     clearAll(): void {
         for (const layerId of Array.from(this.layerStates.keys())) {
             this.clearLayer(layerId);
         }
+        this.renderChunkIndexCache.clear();
+        this.renderChunkIndexInFlight.clear();
+        this.chunkDataCache.clear();
+        this.chunkDataInFlight.clear();
+        this.featureRefsCache.clear();
+        this.featureRefsInFlight.clear();
         clearReplayRenderBatchMetadata();
     }
 
@@ -741,11 +833,18 @@ export class ReplayRenderBatchManager {
             layers: options.layerId,
             z: '0',
         });
+        if (options.bbox) {
+            params.set('bbox', options.bbox.join(','));
+            params.set('bbox_order', 'west,south,east,north');
+        }
         if (options.layerId === 'fire' && options.aggregateFires === false) params.set('cluster', '0');
-        const manifest = await replayHttpGet<RenderChunksResponse>(
-            absoluteApiUrl(this.apiUrl, `/api/replay/render-chunks?${params.toString()}`),
-        );
+        const manifestUrl = absoluteApiUrl(this.apiUrl, `/api/replay/render-chunks?${params.toString()}`);
+        const manifest = await this.getRenderChunkIndex(manifestUrl);
+        this.pruneRenderChunkIndexCache(options.layerId, manifestUrl);
         const chunks = manifest.layers[options.layerId] || [];
+        const keepDataUrls = new Set(chunks.map((chunk) => absoluteApiUrl(this.apiUrl, chunk.dataUrl)));
+        const keepRefsUrls = new Set(chunks.map((chunk) => absoluteApiUrl(this.apiUrl, chunk.detailsUrl)));
+        this.pruneLayerChunkCache(options.layerId, keepDataUrls, keepRefsUrls);
         const decoded: Array<{ manifest: RenderChunkManifest; data: DecodedChunk; refs: RenderFeatureRef[] }> = [];
         let bytes = 0;
         const degraded: Record<string, number | string | boolean> = {};
@@ -756,13 +855,13 @@ export class ReplayRenderBatchManager {
             // Full render chunks carry feature hashes in the binary feature
             // table. Card/details metadata is loaded on demand by hash/id, so
             // initial paint does not need to download the per-feature refs JSON.
-            const shouldFetchRefs = false;
+            const shouldFetchRefs = Boolean(options.fetchFeatureRefs);
+            const dataUrl = absoluteApiUrl(this.apiUrl, chunk.dataUrl);
+            const detailsUrl = absoluteApiUrl(this.apiUrl, chunk.detailsUrl);
             const [buffer, refs] = await Promise.all([
-                replayHttpGet<ArrayBuffer>(absoluteApiUrl(this.apiUrl, chunk.dataUrl), {
-                    responseType: 'arraybuffer',
-                }),
+                this.getChunkData(options.layerId, dataUrl),
                 shouldFetchRefs
-                    ? replayHttpGet<RenderFeatureRefsResponse>(absoluteApiUrl(this.apiUrl, chunk.detailsUrl))
+                    ? this.getFeatureRefs(options.layerId, detailsUrl)
                     : Promise.resolve({
                         chunkId: chunk.chunkId,
                         at: chunk.at,
@@ -924,6 +1023,7 @@ export class ReplayRenderBatchManager {
         layerId: string;
         atIso: string;
         sinceIso?: string;
+        bbox?: [number, number, number, number];
         partial?: boolean;
         aggregateFires?: boolean;
         isCancelled?: () => boolean;
@@ -964,6 +1064,10 @@ export class ReplayRenderBatchManager {
             format: 'bin',
         });
         if (options.sinceIso) params.set('since', options.sinceIso);
+        if (options.bbox) {
+            params.set('bbox', options.bbox.join(','));
+            params.set('bbox_order', 'west,south,east,north');
+        }
         if (options.layerId === 'fire' && options.aggregateFires === false) params.set('cluster', '0');
         const buffer = await replayHttpGet<ArrayBuffer>(
             absoluteApiUrl(this.apiUrl, `/api/replay/render-point-deltas?${params.toString()}`),
@@ -1068,7 +1172,12 @@ export class ReplayRenderBatchManager {
                 if (isCancelled()) return cancelledResult();
                 const scale = pointScaleForStyle(options.layerId, style);
                 const rotation = Number.isFinite(heading) ? Cesium.Math.toRadians(-heading) : 0;
-                const visible = this.resolveVisible(pickId, options.layerId, subtype, sourceId);
+                const visibilityId = featureId || pickId;
+                const visible = this.resolveVisible(visibilityId, options.layerId, subtype, sourceId);
+                if (!visible) {
+                    if (!(await maybeYieldPointWork())) return cancelledResult();
+                    continue;
+                }
                 const billboard = collection.add({
                     id: pickId,
                     position: new Cesium.Cartesian3(x, y, z),
@@ -1083,7 +1192,7 @@ export class ReplayRenderBatchManager {
                     targetId: pickId,
                     billboard,
                     scratch: new Cesium.Cartesian3(x, y, z),
-                    getVisible: () => this.resolveVisible(pickId!, options.layerId, subtype, sourceId),
+                    getVisible: () => this.resolveVisible(visibilityId, options.layerId, subtype, sourceId),
                 };
                 if (featureId) {
                     state.pointSlotsByFeatureId.set(featureId, slot);
@@ -1128,7 +1237,8 @@ export class ReplayRenderBatchManager {
             const effectiveSubtype = subtype ?? existingMeta?.subtype ?? null;
             const effectiveSourceId = sourceId ?? existingMeta?.source ?? null;
             if (!existingMeta || previousSubtype !== effectiveSubtype || previousSourceId !== effectiveSourceId) {
-                slot.billboard.show = this.resolveVisible(pickId, options.layerId, effectiveSubtype, effectiveSourceId);
+                const visibilityId = featureId || existingMeta?.extra?.featureId || pickId;
+                slot.billboard.show = this.resolveVisible(String(visibilityId), options.layerId, effectiveSubtype, effectiveSourceId);
             }
             const styleChanged = effectiveStyleId != null && (!Number.isFinite(previousStyleId) || previousStyleId !== effectiveStyleId);
             if (styleChanged || previousSubtype !== effectiveSubtype) {
@@ -1246,6 +1356,7 @@ export class ReplayRenderBatchManager {
         const motionTracks: ReplayRenderBatchMotionTrack[] = [];
         const footprints: ReplayRenderBatchFootprint[] = [];
         const addedPickIds = new Set<string>();
+        const renderedFeaturePickIds = new Set<string>();
 
         const cleanupPartialRender = (): null => {
             for (const collection of pointCollections) {
@@ -1312,16 +1423,19 @@ export class ReplayRenderBatchManager {
                 if (isCancelled()) return cleanupPartialRender();
                 const scale = pointScaleForStyle(manifest.layerId, style);
                 const rotation = props.headingDeg != null ? Cesium.Math.toRadians(-props.headingDeg) : 0;
+                const pickId = makeRenderId(manifest.chunkId, row.featureIndex);
+                const visibilityId = ref?.id || pickId;
                 const visible = this.resolveVisible(
-                    makeRenderId(manifest.chunkId, row.featureIndex),
+                    visibilityId,
                     style?.layerId || manifest.layerId,
                     style?.subtype,
                     style?.sourceId,
                 );
+                if (!visible) continue;
                 const bboxOffset = rowIndex * 4;
                 const lng = (decoded.featureBboxes[bboxOffset] + decoded.featureBboxes[bboxOffset + 2]) / 2;
                 const lat = (decoded.featureBboxes[bboxOffset + 1] + decoded.featureBboxes[bboxOffset + 3]) / 2;
-                const pickId = makeRenderId(manifest.chunkId, row.featureIndex);
+                renderedFeaturePickIds.add(pickId);
                 addedPickIds.add(pickId);
                 replayRenderBatchMetaMap.set(pickId, {
                     id: pickId,
@@ -1375,7 +1489,7 @@ export class ReplayRenderBatchManager {
                         billboard,
                         scratch: new Cesium.Cartesian3(),
                         getVisible: () => this.resolveVisible(
-                            pickId,
+                            visibilityId,
                             style?.layerId || manifest.layerId,
                             style?.subtype,
                             style?.sourceId,
@@ -1440,15 +1554,18 @@ export class ReplayRenderBatchManager {
             const featureFamily = ref?.family || featureFamilyForLayer(manifest.layerId);
             const props = getFeatureProperties(decoded, row.featureIndex);
             const pickId = makeRenderId(manifest.chunkId, row.featureIndex);
+            const visibilityId = ref?.id || pickId;
             const visible = this.resolveVisible(
-                pickId,
+                visibilityId,
                 style?.layerId || manifest.layerId,
                 style?.subtype,
                 style?.sourceId,
             );
+            if (!visible) continue;
             const bboxOffset = rowIndex * 4;
             const lng = (decoded.featureBboxes[bboxOffset] + decoded.featureBboxes[bboxOffset + 2]) / 2;
             const lat = (decoded.featureBboxes[bboxOffset + 1] + decoded.featureBboxes[bboxOffset + 3]) / 2;
+            renderedFeaturePickIds.add(pickId);
             if (!replayRenderBatchMetaMap.has(pickId)) {
                 addedPickIds.add(pickId);
                 replayRenderBatchMetaMap.set(pickId, {
@@ -1559,8 +1676,10 @@ export class ReplayRenderBatchManager {
             const sampleStart = decoded.trackRows[i + 1];
             const sampleCount = decoded.trackRows[i + 2];
             if (sampleCount === 0) continue;
+            const targetId = makeRenderId(manifest.chunkId, featureIndex);
+            if (!renderedFeaturePickIds.has(targetId)) continue;
             motionTracks.push({
-                targetId: makeRenderId(manifest.chunkId, featureIndex),
+                targetId,
                 sampleAtMs: new Float64Array(decoded.trackSampleTimes.slice(sampleStart, sampleStart + sampleCount)),
                 samplePositions: new Float32Array(decoded.trackSamplePositions.slice(sampleStart * 3, (sampleStart + sampleCount) * 3)),
             });
@@ -1598,7 +1717,7 @@ export class ReplayRenderBatchManager {
             pickIdByFeatureIndex,
             pointCount,
             shapeCount,
-            featureCount,
+            featureCount: renderedFeaturePickIds.size,
             motionTrackCount: motionTracks.length,
             footprintCount: footprints.length,
             motionTracks,

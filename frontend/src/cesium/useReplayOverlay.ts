@@ -7,7 +7,6 @@ import { withSpan } from '../lib/otel';
 import { safeCartesianFromDegrees } from './position-utils';
 import { COMPOSITE_LAYER_SOURCES, getLayerSourceVisibilityKey, normalizeLayerSourceId, type CompositeLayerCode } from '../lib/source-visibility';
 import { ReplayShapeBatch, type ReplayShapeDescriptor } from './replayShapeBatch';
-import { ReplayTileCache, type ReplayManifest, type ReplayTilePayload } from './replayTileCache';
 import { createSatellitePositionsSAB, type SatellitePositionsSAB } from './satellitePositionsSAB';
 import { applyFastBillboardPosition, clearSatelliteApplySource, setSatelliteApplySource, type SatelliteApplySlot } from './satelliteApplyManager';
 import { useReplayTrailsOverlay } from './useReplayTrailsOverlay';
@@ -21,7 +20,6 @@ import {
     getReplayApplyChunkSize,
     getReplayHydrationStage,
     getReplayLayerBucketSeconds,
-    getReplayLayerHotTtlMs,
     getReplayMotionModel,
     getReplayMotionTrackRefreshSeconds,
     getReplayPlaybackPriority,
@@ -39,7 +37,6 @@ import {
     strokeColorForStyle,
     toHudLayerName,
 } from './renderStyleRegistry';
-import { replayHttpGet } from './replayHttp';
 
 type ReplayEntity = {
     entity_id: string;
@@ -112,55 +109,6 @@ type ReplayStateResponse = {
     motionSamples?: Map<string, ReplayMotionSampleRaw[]>;
 };
 
-type ReplayWindowItem =
-    | {
-        at: string;
-        family: 'entity';
-        op: 'upsert';
-        target_id: string;
-        layer_id: string;
-        source_id: string | null;
-        item: ReplayEntity;
-    }
-    | {
-        at: string;
-        family: 'entity';
-        op: 'remove';
-        target_id: string;
-        layer_id: string;
-        source_id: string | null;
-        entity_id: string;
-        reason: string;
-    }
-    | {
-        at: string;
-        family: 'event';
-        op: 'upsert';
-        target_id: string;
-        layer_id: string;
-        source_id: string | null;
-        item: ReplayEvent;
-    }
-    | {
-        at: string;
-        family: 'event';
-        op: 'remove';
-        target_id: string;
-        layer_id: string;
-        source_id: string | null;
-        event_id: string;
-        reason: string;
-    }
-    | {
-        at: string;
-        family: 'asset';
-        op: 'upsert';
-        target_id: string;
-        layer_id: string;
-        source_id: string | null;
-        item: ReplayAsset;
-    };
-
 type ReplaySatelliteTleItem = {
     entity_id: string;
     layer_id: string;
@@ -177,14 +125,6 @@ type ReplaySatelliteTleItem = {
     tle_line1: string | null;
     tle_line2: string | null;
     orbital_properties: any;
-};
-
-type ReplaySatelliteTleResponse = {
-    mode: 'historical-replay';
-    replay_kind: 'satellite-tle';
-    at: string;
-    count: number;
-    items: ReplaySatelliteTleItem[];
 };
 
 type ReplayFootprintState = {
@@ -310,17 +250,28 @@ const REPLAY_LAYER_BY_STORE_KEY = new Map<LayerName, string>(
 const REPLAY_STORE_KEY_BY_LAYER = new Map<string, LayerName>(
     REPLAY_LAYER_BINDINGS.map((binding) => [binding.layerId, binding.storeKey]),
 );
-// Все клиентские обрезки сняты 2026-04-24 по указанию пользователя:
-// "никаких искусственных ограничений на показ данных по объёму".
-// Если слой физически не помещается в сцену — это задача LOD/culling,
-// а не скрытой обрезки.
-const REPLAY_LAYER_LIMITS: Partial<Record<string, number>> = {};
 const REPLAY_MOTION_APPLY_BUDGET_MS = 4;
 const REPLAY_MOTION_APPLY_CHECK_INTERVAL = 32;
 const REPLAY_FOOTPRINT_UPDATE_MS = 250;
 const REPLAY_FOOTPRINT_RAY_COUNT = 8;
 const REPLAY_POINT_DELTA_FULL_SYNC_EVERY = 10;
 const REPLAY_POINT_DELTA_MAX_SPAN_MS = 5 * 60 * 1000;
+
+function fingerprintStrings(values: readonly string[]): string {
+    let hash = 0x811c9dc5;
+    let count = 0;
+    for (let valueIndex = 0; valueIndex < values.length; valueIndex += 1) {
+        const value = values[valueIndex];
+        count += 1;
+        const str = String(value || '');
+        for (let i = 0; i < str.length; i += 1) {
+            hash ^= str.charCodeAt(i);
+            hash = Math.imul(hash, 0x01000193) >>> 0;
+        }
+    }
+    return `${count}:${hash.toString(16)}`;
+}
+
 function toStoreLayerKey(layerId: string): LayerName | null {
     return REPLAY_STORE_KEY_BY_LAYER.get(layerId) || null;
 }
@@ -431,8 +382,8 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
     const visibility = useTimelineStore((s) => s.visibility);
     const subtypeVisibility = useTimelineStore((s) => s.subtypeVisibility);
     const sourceVisibility = useTimelineStore((s) => s.sourceVisibility);
+    const appliedSelections = useTimelineStore((s) => s.appliedSelections);
     const isolatedEntityId = useTimelineStore((s) => s.isolatedEntityId);
-    const satelliteRenderLimit = useTimelineStore((s) => s.satelliteRenderLimit);
     const clusteringEnabled = useTimelineStore((s) => s.clusteringEnabled);
 
     const pointCollectionRef = useRef<Cesium.BillboardCollection | null>(null);
@@ -450,13 +401,6 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
     // that wrote the current track). Prevents a slow earlier apply
     // from clobbering a fast later apply's fresher track.
     const motionTrackAppliedAtRef = useRef<Map<string, number>>(new Map());
-    const tileCacheRef = useRef<ReplayTileCache | null>(null);
-    const manifestCacheRef = useRef<Map<string, ReplayManifest>>(new Map());
-    // When a manifest was fetched from the server, in ms. Used to expire
-    // hot-bucket manifests per-layer so fresh position_fixes land on the
-    // client instead of being pinned by a stale content_hash.
-    const manifestFetchedAtRef = useRef<Map<string, number>>(new Map());
-    const manifestFlightRef = useRef<Map<string, Promise<ReplayManifest>>>(new Map());
     const replaySatelliteWorkerRef = useRef<Worker | null>(null);
     const replaySatelliteSabRef = useRef<SatellitePositionsSAB | null>(null);
     const replaySatelliteApplySlotsRef = useRef<SatelliteApplySlot[]>([]);
@@ -509,11 +453,12 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
         error: null,
     });
     const layersKeyRef = useRef<string>('');
-    const seekRequestRef = useRef<{ targetMs: number; reason: 'user-seek' | 'mode-change' | 'layers-change' | 'time-change' } | null>(null);
+    const seekRequestRef = useRef<{ targetMs: number; reason: 'user-seek' | 'mode-change' | 'layers-change' | 'time-change' | 'viewport-change' } | null>(null);
     const replayBusyRef = useRef(false);
     const replayPendingRef = useRef(false);
     const playbackRefreshBusyLayersRef = useRef<Set<string>>(new Set());
     const replayCancelVersionRef = useRef(0);
+    const replayOperationIdRef = useRef(0);
     const replayWarmPrimeKeyRef = useRef<string | null>(null);
     const replayWarmPrimePromiseRef = useRef<Promise<void> | null>(null);
     // In-flight detached hydration tasks (warm-prime, deferred). Counter
@@ -524,6 +469,14 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
     // the counter is zero.
     const replayHydrationInflightRef = useRef(0);
     const [replayDrainVersion, setReplayDrainVersion] = useState(0);
+    const replayViewportKeyRef = useRef<string>('');
+    const [replayViewportVersion, setReplayViewportVersion] = useState(0);
+
+    const replaySnapshotHasVisibleContent = () => {
+        const totals = renderBatchManagerRef.current?.getTotals();
+        if (totals && (totals.features > 0 || totals.points > 0 || totals.shapes > 0)) return true;
+        return pointMapRef.current.size > 0 || shapeMapRef.current.size > 0;
+    };
 
     const activeReplayLayers = useMemo(() => {
         return REPLAY_CANONICAL_STORE_KEYS
@@ -532,7 +485,66 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
             .filter((layerId): layerId is string => Boolean(layerId));
     }, [sources, visibility]);
 
-    const layersKey = `${activeReplayLayers.join(',')}|fireCluster:${clusteringEnabled ? 1 : 0}`;
+    const appliedSelectionSets = useMemo(() => {
+        const result: Record<string, { mode: string; ids: Set<string>; truncated: boolean; fingerprint: string }> = {};
+        for (const [layer, selection] of Object.entries(appliedSelections || {})) {
+            const ids = Array.isArray(selection?.itemIds)
+                ? selection.itemIds.map((id) => normalizeReplayId(String(id))).filter(Boolean)
+                : [];
+            const mode = String(selection?.mode || 'only');
+            const itemCount = Number(selection?.itemCount ?? ids.length);
+            const status = String(selection?.materializationStatus || '').toLowerCase();
+            const knownEmptyOnlySelection = mode !== 'exclude'
+                && ids.length === 0
+                && (
+                    selection?.truncated === false
+                    || itemCount === 0
+                    || status === 'empty'
+                    || status === 'materialized'
+                );
+            if (!selection?.selectionId || (ids.length === 0 && !knownEmptyOnlySelection)) continue;
+            result[layer] = {
+                mode,
+                ids: new Set(ids),
+                truncated: Boolean(selection.truncated),
+                fingerprint: typeof selection?.itemFingerprint === 'string' && selection.itemFingerprint
+                    ? selection.itemFingerprint
+                    : fingerprintStrings(ids),
+            };
+        }
+        return result;
+    }, [appliedSelections]);
+
+    const appliedSelectionForLayer = (layerId: string) => {
+        const storeLayer = toStoreLayerKey(layerId);
+        return appliedSelectionSets[layerId] || (storeLayer ? appliedSelectionSets[storeLayer] : undefined) || null;
+    };
+
+    const appliedSelectionKey = useMemo(() => Object.entries(appliedSelectionSets)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([layer, selection]) => {
+            return `${layer}:${selection.mode}:${selection.truncated ? 1 : 0}:${selection.fingerprint}`;
+        })
+        .join('|'), [appliedSelectionSets]);
+    const subtypeVisibilityKey = useMemo(() => Object.entries(subtypeVisibility || {})
+        .filter(([, enabled]) => enabled === false)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key]) => key)
+        .join('|'), [subtypeVisibility]);
+    const sourceVisibilityKey = useMemo(() => Object.entries(sourceVisibility || {})
+        .filter(([, enabled]) => enabled === false)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key]) => key)
+        .join('|'), [sourceVisibility]);
+
+    const layersKey = [
+        `layers:${activeReplayLayers.join(',')}`,
+        `fireCluster:${clusteringEnabled ? 1 : 0}`,
+        `sel:${appliedSelectionKey}`,
+        `sub:${subtypeVisibilityKey}`,
+        `src:${sourceVisibilityKey}`,
+        `iso:${isolatedEntityId ? normalizeReplayId(isolatedEntityId) : ''}`,
+    ].join('|');
     const requestSceneRender = () => {
         if (!viewer || viewer.isDestroyed()) return;
         viewer.scene.requestRender();
@@ -841,15 +853,6 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
         replayMotionGenerationRef.current += 1;
         resetReplayMotionApplyProgress();
     };
-    if (!tileCacheRef.current) {
-        tileCacheRef.current = new ReplayTileCache(API_URL);
-    }
-    const getReplayLayerLimit = (layerId: string): number | null => {
-        if (layerId === 'satellite') {
-            return satelliteRenderLimit ?? REPLAY_LAYER_LIMITS.satellite ?? null;
-        }
-        return REPLAY_LAYER_LIMITS[layerId] ?? null;
-    };
     const waitForRenderTurn = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
     const updateRuntimeQueueLength = () => {
         runtimePerfRef.current.queuedItems = 0;
@@ -892,236 +895,6 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
         const previousIso = lastAppliedLayerTimeRef.current.get(layerId);
         if (!previousIso || previousIso === atIso) return false;
         return hasRenderedLayerState(layerId);
-    };
-    const getGroupedManifestRange = (layerIds: string[], centerIso: string, paddingBuckets = 1) => {
-        const centerMs = new Date(centerIso).getTime();
-        let fromMs = centerMs;
-        let toMs = centerMs;
-        for (const layerId of layerIds) {
-            const bucketMs = getReplayLayerBucketSeconds(layerId) * 1000;
-            const bucketStartMs = Math.floor(centerMs / bucketMs) * bucketMs;
-            // Codex round-6 fix (2026-04-21): for daily-bucket static
-            // layers (airspace/pipeline/cable/borders/infrastructure),
-            // padding=1 expands a single seek into 4 daily tiles =
-            // 90+ MB of msgpack work that rebuildStateFromTilePayloads
-            // immediately discards (snapshots > atMs). Force padding=0
-            // for these — the current bucket already contains the
-            // whole-day snapshot.
-            // Trade-off: cross-midnight playback now needs an extra
-            // bucket fetch when the clock crosses 00:00 UTC. That cost
-            // is one bucket per day per layer, infinitely cheaper than
-            // the 4× overfetch on every seek.
-            const effectivePadding = bucketMs >= 24 * 3600 * 1000 ? 0 : paddingBuckets;
-            fromMs = Math.min(fromMs, bucketStartMs - effectivePadding * bucketMs);
-            toMs = Math.max(toMs, bucketStartMs + (effectivePadding + 1) * bucketMs);
-        }
-        // Codex round-7 fix (2026-04-21): backend bucketRange() is closed/
-        // inclusive (`while (t <= toMs)` in replay-tile-builder.service.ts:194),
-        // so a half-open frontend window like [bucketStart, bucketStart+1*bucket)
-        // becomes 2 buckets server-side because the upper bound EXACTLY equals
-        // the next bucket start. Subtracting 1 ms from toMs converts the
-        // window to truly half-open and shrinks 2→1 (static), 4→3 (moving)
-        // without touching backend semantics (used in hot-bucket detection
-        // and build paths).
-        return {
-            fromIso: new Date(fromMs).toISOString(),
-            toIso: new Date(toMs - 1).toISOString(),
-        };
-    };
-    const getManifestCacheKey = (layerIds: string[], fromIso: string, toIso: string) =>
-        `${fromIso}|${toIso}|${[...layerIds].sort().join(',')}|z0|global`;
-    // Reject the cached manifest if the requested window overlaps any
-    // open bucket of a hot-TTL layer AND the cache is older than that
-    // TTL. This is the client-side half of the backend hot-bucket
-    // freshness policy — backend rebuilds the tile with a new
-    // content_hash, so a cached manifest pointing at the old hash
-    // would keep the client on stale tile URLs.
-    const isManifestStaleForHotBuckets = (
-        layerIds: string[],
-        fetchedAtMs: number,
-        requestedFromMs: number,
-        requestedToMs: number,
-    ): boolean => {
-        const nowMs = Date.now();
-        for (const layerId of layerIds) {
-            const ttlMs = getReplayLayerHotTtlMs(layerId);
-            if (ttlMs === null) continue;
-            const bucketMs = getReplayLayerBucketSeconds(layerId) * 1000;
-            const startMs = Math.floor(requestedFromMs / bucketMs) * bucketMs;
-            for (let t = startMs; t <= requestedToMs; t += bucketMs) {
-                const bucketEndMs = t + bucketMs;
-                if (bucketEndMs > nowMs) {
-                    // open bucket inside requested window
-                    if (nowMs - fetchedAtMs > ttlMs) return true;
-                }
-            }
-        }
-        return false;
-    };
-    const findCachedManifest = (layerIds: string[], fromIso: string, toIso: string): ReplayManifest | null => {
-        const requestedLayersKey = [...layerIds].sort().join(',');
-        const requestedFromMs = new Date(fromIso).getTime();
-        const requestedToMs = new Date(toIso).getTime();
-        for (const [cacheKey, manifest] of Array.from(manifestCacheRef.current.entries())) {
-            const keyParts = cacheKey.split('|');
-            const cachedLayersKey = keyParts[2] || '';
-            if (cachedLayersKey !== requestedLayersKey) continue;
-            const manifestFromMs = new Date(manifest.from).getTime();
-            const manifestToMs = new Date(manifest.to).getTime();
-            if (manifestFromMs <= requestedFromMs && manifestToMs >= requestedToMs) {
-                const fetchedAtMs = manifestFetchedAtRef.current.get(cacheKey) ?? 0;
-                if (isManifestStaleForHotBuckets(layerIds, fetchedAtMs, requestedFromMs, requestedToMs)) {
-                    // evict and skip
-                    manifestCacheRef.current.delete(cacheKey);
-                    manifestFetchedAtRef.current.delete(cacheKey);
-                    continue;
-                }
-                return manifest;
-            }
-        }
-        return null;
-    };
-    const scheduleIdlePrefetch = (task: () => void) => {
-        if (typeof window === 'undefined') return;
-        if ('requestIdleCallback' in window) {
-            (window as any).requestIdleCallback(() => task(), { timeout: 250 });
-            return;
-        }
-        globalThis.setTimeout(task, 0);
-    };
-    const fetchManifestForGroup = async (groupLayers: string[], centerIso: string, paddingBuckets: number): Promise<ReplayManifest> => {
-        const range = getGroupedManifestRange(groupLayers, centerIso, paddingBuckets);
-        const cached = findCachedManifest(groupLayers, range.fromIso, range.toIso);
-        if (cached) return cached;
-        const cacheKey = getManifestCacheKey(groupLayers, range.fromIso, range.toIso);
-        const inFlight = manifestFlightRef.current.get(cacheKey);
-        if (inFlight) return inFlight;
-        const promise = (async () => {
-            try {
-                const params = new URLSearchParams({
-                    from: range.fromIso,
-                    to: range.toIso,
-                    layers: groupLayers.join(','),
-                    z: '0',
-                });
-                const data = await replayHttpGet<ReplayManifest>(`${API_URL}/api/replay/manifest?${params.toString()}`);
-                // Diagnostic: log actual tile count per layer in this manifest.
-                // Codex round-5 (2026-04-21) suspected padded windows produce
-                // 4 daily global tiles for static layers (airspace/pipeline/cable)
-                // even though rebuildStateFromTilePayloads drops snapshots > atMs.
-                try {
-                    const tileBreakdown: Record<string, { tiles: number; bytes: number }> = {};
-                    for (const layerId of Object.keys(data.layers || {})) {
-                        const layer = data.layers[layerId];
-                        tileBreakdown[layerId] = {
-                            tiles: layer.tiles?.length ?? 0,
-                            bytes: layer.tiles?.reduce((acc, t) => acc + (t.bytes || 0), 0) ?? 0,
-                        };
-                    }
-                    perfLog('replay.manifest_buckets', {
-                        cacheKey,
-                        from: data.from,
-                        to: data.to,
-                        layers: groupLayers,
-                        breakdown: tileBreakdown,
-                    });
-                } catch {}
-                manifestCacheRef.current.set(cacheKey, data);
-                manifestFetchedAtRef.current.set(cacheKey, Date.now());
-                // LRU-trim: a long session with many seeks accumulates
-                // manifests indefinitely. 32 entries covers typical
-                // scrubbing without unbounded growth; eviction order
-                // is insertion order (Map preserves it), which is a
-                // close-enough approximation of LRU for our churn.
-                const MAX_MANIFEST_CACHE = 32;
-                while (manifestCacheRef.current.size > MAX_MANIFEST_CACHE) {
-                    const oldest = manifestCacheRef.current.keys().next().value;
-                    if (!oldest) break;
-                    manifestCacheRef.current.delete(oldest);
-                    manifestFetchedAtRef.current.delete(oldest);
-                }
-                // No background prefetch from manifest. Codex round-6 review
-                // (2026-04-21) showed that even tiny event-layer prefetches
-                // started at manifest-fetch time put bytes on the wire BEFORE
-                // first_visible, contributing to overlap with foreground
-                // hydration. The deferred-hydration pipeline already fetches
-                // these layers explicitly later; manifest stays a pure planning
-                // step now.
-                for (const layerId of groupLayers) {
-                    lastBufferedLayerTimeRef.current.set(layerId, data.to);
-                }
-                return data;
-            } catch (error: any) {
-                const message = error?.message || String(error);
-                console.error('[ReplayOverlay] grouped manifest failed:', message);
-                setReplayError(`Replay manifest failed: ${message}`);
-                throw error;
-            } finally {
-                manifestFlightRef.current.delete(cacheKey);
-            }
-        })();
-        manifestFlightRef.current.set(cacheKey, promise);
-        return promise;
-    };
-
-    const getWindowManifest = async (layerIds: string[], centerIso: string, paddingBuckets = 1): Promise<ReplayManifest> => {
-        const normalizedLayers = Array.from(new Set(layerIds.filter((layerId) => getReplayMotionModel(layerId) !== 'tle_sgp4')));
-        if (normalizedLayers.length === 0) {
-            return {
-                from: centerIso,
-                to: centerIso,
-                layers: {},
-            };
-        }
-        // Group layers by bucketSeconds — otherwise a 24h-bucket layer
-        // (airspace/cable/pipeline) inflates the window for 10-min-bucket
-        // layers (aircraft/vessel) into a 3-day request with 200+ tiles.
-        const groups = new Map<number, string[]>();
-        for (const layerId of normalizedLayers) {
-            const bs = getReplayLayerBucketSeconds(layerId);
-            const arr = groups.get(bs) || [];
-            arr.push(layerId);
-            groups.set(bs, arr);
-        }
-        const groupManifests = await Promise.all(
-            Array.from(groups.values()).map((g) => fetchManifestForGroup(g.slice().sort(), centerIso, paddingBuckets)),
-        );
-        const merged: ReplayManifest = {
-            from: groupManifests[0]?.from || centerIso,
-            to: groupManifests[0]?.to || centerIso,
-            layers: {},
-        };
-        let fromMs = Number.POSITIVE_INFINITY;
-        let toMs = Number.NEGATIVE_INFINITY;
-        for (const m of groupManifests) {
-            const fm = new Date(m.from).getTime();
-            const tm = new Date(m.to).getTime();
-            if (fm < fromMs) fromMs = fm;
-            if (tm > toMs) toMs = tm;
-            for (const [k, v] of Object.entries(m.layers)) {
-                merged.layers[k] = v;
-            }
-        }
-        if (Number.isFinite(fromMs)) merged.from = new Date(fromMs).toISOString();
-        if (Number.isFinite(toMs)) merged.to = new Date(toMs).toISOString();
-        updateRuntimeQueueLength();
-        publishReplayStats();
-        return merged;
-    };
-    const makeSnapshotManifest = (atIso: string): ReplayManifest => ({
-        from: atIso,
-        to: atIso,
-        layers: {},
-    });
-    const scheduleManifestPrefetch = (layerIds: string[], centerIso: string) => {
-        const normalizedLayers = layerIds.filter((layerId) => getReplayMotionModel(layerId) !== 'tle_sgp4');
-        if (normalizedLayers.length === 0) return;
-        scheduleIdlePrefetch(() => {
-            void getWindowManifest(normalizedLayers, centerIso).catch((error: any) => {
-                const message = error?.message || String(error);
-                console.error('[ReplayOverlay] manifest prefetch failed:', message);
-            });
-        });
     };
     const publishReplayStats = () => {
         if (typeof window === 'undefined') return;
@@ -1275,11 +1048,6 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
             shapeBatchRef.current.clear();
             renderBatchManagerRef.current?.destroy();
             renderBatchManagerRef.current = null;
-            tileCacheRef.current?.destroy();
-            tileCacheRef.current = null;
-            manifestCacheRef.current.clear();
-            manifestFetchedAtRef.current.clear();
-            manifestFlightRef.current.clear();
             targetLayerMapRef.current.clear();
             layerCountsRef.current.clear();
             motionTrackMapRef.current.clear();
@@ -1368,6 +1136,15 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
         const normalizedTargetId = normalizeReplayId(targetId);
         const normalizedIsolatedId = isolatedEntityId ? normalizeReplayId(isolatedEntityId) : null;
         if (normalizedIsolatedId && normalizedIsolatedId !== normalizedTargetId) return false;
+        const selection = appliedSelectionForLayer(layerId);
+        if (selection && !selection.truncated) {
+            const selected = selection.ids.has(normalizedTargetId);
+            if (selection.mode === 'exclude') {
+                if (selected) return false;
+            } else if (!selected) {
+                return false;
+            }
+        }
         const storeLayer = toStoreLayerKey(layerId);
         if (!storeLayer) return true;
         if (subtypeVisibility[`${storeLayer}:${subtype || ''}`] === false) return false;
@@ -1377,6 +1154,38 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
             if (normalizedSource && sourceVisibility[getLayerSourceVisibilityKey(compositeLayer, normalizedSource)] === false) return false;
         }
         return true;
+    };
+
+    const getReplayViewportBbox = (): [number, number, number, number] | undefined => {
+        if (!viewer || viewer.isDestroyed()) return undefined;
+        const rectangle = viewer.camera.computeViewRectangle(viewer.scene.globe.ellipsoid);
+        if (!rectangle) return undefined;
+        let west = Cesium.Math.toDegrees(rectangle.west);
+        let south = Cesium.Math.toDegrees(rectangle.south);
+        let east = Cesium.Math.toDegrees(rectangle.east);
+        let north = Cesium.Math.toDegrees(rectangle.north);
+        if (![west, south, east, north].every(Number.isFinite)) return undefined;
+        west = Math.max(-180, Math.min(180, west));
+        east = Math.max(-180, Math.min(180, east));
+        south = Math.max(-90, Math.min(90, south));
+        north = Math.max(-90, Math.min(90, north));
+        if (east <= west || north <= south) return undefined;
+        if (east - west >= 350 && north - south >= 170) return undefined;
+        return [west, south, east, north];
+    };
+
+    const getReplayViewportKey = (): string => {
+        const bbox = getReplayViewportBbox();
+        return bbox ? bbox.map((value) => value.toFixed(3)).join(',') : 'global';
+    };
+
+    const invalidateReplayViewportScopedLayers = () => {
+        for (const layerId of activeReplayLayers) {
+            if (!isReplayRenderBatchLayer(layerId)) continue;
+            lastAppliedLayerTimeRef.current.delete(layerId);
+            lastBufferedLayerTimeRef.current.delete(layerId);
+            pointDeltaRunRef.current.delete(layerId);
+        }
     };
 
     const getRenderBatchManager = () => {
@@ -1462,95 +1271,6 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
     const clearLayer = (layerId: string) => {
         renderBatchManagerRef.current?.clearLayer(layerId);
         clearLegacyLayerState(layerId);
-    };
-
-    const compareReplayWindowItems = (left: ReplayWindowItem, right: ReplayWindowItem) => {
-        const leftAt = new Date(left.at).getTime();
-        const rightAt = new Date(right.at).getTime();
-        if (leftAt !== rightAt) return leftAt - rightAt;
-        const leftPriority = getReplayPlaybackPriority(left.layer_id);
-        const rightPriority = getReplayPlaybackPriority(right.layer_id);
-        if (leftPriority !== rightPriority) return leftPriority - rightPriority;
-        return left.target_id.localeCompare(right.target_id);
-    };
-
-    const getTilePayloadsForLayer = async (manifest: ReplayManifest, layerId: string): Promise<ReplayTilePayload[]> => {
-        const layer = manifest?.layers?.[layerId];
-        if (!layer || layer.tiles.length === 0) return [];
-        return withSpan(
-            'replay.getTilePayloadsForLayer',
-            {
-                'replay.layer': layerId,
-                'replay.tiles': layer.tiles.length,
-                'replay.manifest_from': manifest.from,
-                'replay.manifest_to': manifest.to,
-            },
-            async (span) => {
-                if (typeof performance !== 'undefined') {
-                    performance.mark(`replay-tile-read:${layerId}:start`);
-                }
-                const payloads = await tileCacheRef.current!.fetchTilesBundle(layer.tiles, (phase, ms, extra) => {
-                    perfLog('replay.tile_bundle_phase', {
-                        layer: layerId,
-                        phase,
-                        ms: Math.round(ms),
-                        ...(extra || {}),
-                    });
-                    span?.addEvent(`tile_bundle.${phase}`, {
-                        'phase.ms': Math.round(ms),
-                        ...(extra ? Object.fromEntries(Object.entries(extra).filter(([, v]) => v !== undefined && typeof v !== 'object')) : {}),
-                    });
-                });
-                const sortedPayloads = payloads.sort((left, right) => {
-                    if (left.tBucket !== right.tBucket) return new Date(left.tBucket).getTime() - new Date(right.tBucket).getTime();
-                    if (left.x !== right.x) return left.x - right.x;
-                    return left.y - right.y;
-                });
-                if (typeof performance !== 'undefined') {
-                    performance.mark(`replay-tile-read:${layerId}:end`);
-                    performance.measure(`replay-tile-read:${layerId}`, `replay-tile-read:${layerId}:start`, `replay-tile-read:${layerId}:end`);
-                }
-                span?.setAttribute('replay.payloads', sortedPayloads.length);
-                return sortedPayloads;
-            },
-        ) as Promise<ReplayTilePayload[]>;
-    };
-
-    const loadSatelliteTleState = async (atIso: string): Promise<ReplaySatelliteTleResponse> => {
-        try {
-            const params = new URLSearchParams({ at: atIso });
-            const layerLimit = getReplayLayerLimit('satellite');
-            if (layerLimit != null) {
-                params.set('limit', String(layerLimit));
-            }
-            return await replayHttpGet<ReplaySatelliteTleResponse>(`${API_URL}/api/replay/satellite-tle?${params.toString()}`);
-        } catch (error: any) {
-            const message = error?.message || String(error);
-            console.error('[ReplayOverlay] satellite TLE seek failed:', message);
-            setReplayError(`Replay satellite load failed: ${message}`);
-            throw error;
-        }
-    };
-
-    const loadRawFireState = async (atIso: string): Promise<ReplayStateResponse> => {
-        const params = new URLSearchParams({
-            at: atIso,
-            layers: 'fire',
-            cluster: '0',
-        });
-        const data = await replayHttpGet<{
-            at: string;
-            entities: ReplayEntity[];
-            events: ReplayEvent[];
-            assets: ReplayAsset[];
-        }>(`${API_URL}/api/replay/state?${params.toString()}`);
-        return {
-            at: data.at || atIso,
-            entities: data.entities || [],
-            events: data.events || [],
-            assets: data.assets || [],
-            motionSamples: new Map(),
-        };
     };
 
     const applySatelliteTleState = async (
@@ -1932,160 +1652,6 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
         });
     };
 
-    const rebuildStateFromTilePayloads = (
-        atIso: string,
-        payloads: ReplayTilePayload[],
-    ): ReplayStateResponse => {
-        if (typeof performance !== 'undefined') {
-            performance.mark('replay-rebuild-state:start');
-        }
-        const entityMap = new Map<string, ReplayEntity>();
-        const eventMap = new Map<string, ReplayEvent>();
-        const assetMap = new Map<string, ReplayAsset>();
-        const atMs = new Date(atIso).getTime();
-
-        // Use snapshots ONLY from payloads whose snapshotAt <= atMs.
-        // Sort so the latest valid snapshot wins for any given entity.
-        // Earlier code blindly merged all snapshots, so a 17:50 snapshot
-        // (positions from the future) overwrote a 17:20 baseline when
-        // seeking to 17:30 — making playback show frozen "future" coords
-        // and never advance.
-        const validSnapshots = payloads
-            .filter((p) => {
-                const snapMs = p.snapshotAt ? new Date(p.snapshotAt).getTime() : Number.NaN;
-                return Number.isFinite(snapMs) && snapMs <= atMs;
-            })
-            .sort((a, b) => new Date(a.snapshotAt).getTime() - new Date(b.snapshotAt).getTime());
-        for (const payload of validSnapshots) {
-            for (const entity of payload.snapshot.entities || []) entityMap.set(entity.entity_id, entity as ReplayEntity);
-            for (const event of payload.snapshot.events || []) eventMap.set(event.event_id, event as ReplayEvent);
-            for (const asset of payload.snapshot.assets || []) assetMap.set(asset.asset_id, asset as ReplayAsset);
-        }
-
-        const items = payloads
-            .flatMap((payload) => payload.items || [])
-            .sort(compareReplayWindowItems);
-
-        // Collect ALL samples per entity across the window so the motion
-        // worker can binary-search the surrounding pair for any atMs.
-        // Ordering + dedup happens below after the pass. Per-atMs dedup
-        // (keyed on the ms timestamp) guards against the same position
-        // appearing in items[] AND snapshot.entities for boundary buckets.
-        const motionSamples = new Map<string, Map<number, ReplayMotionSampleRaw>>();
-        const tryAddMotionSample = (
-            entityId: string,
-            sample: ReplayMotionSampleRaw,
-        ) => {
-            let slot = motionSamples.get(entityId);
-            if (!slot) {
-                slot = new Map();
-                motionSamples.set(entityId, slot);
-            }
-            const existing = slot.get(sample.atMs);
-            if (!existing) slot.set(sample.atMs, sample);
-        };
-
-        for (const item of items) {
-            if (item.family === 'entity' && item.op === 'upsert' && isReplayMovingFixLayer(item.layer_id)) {
-                const ent = (item as any).item as ReplayEntity;
-                const poIso = (ent as any).position_observed_at || (item as any).at;
-                const poMs = poIso ? new Date(poIso).getTime() : Number.NaN;
-                const lat = Number((ent as any).display_lat);
-                const lng = Number((ent as any).display_lng);
-                const alt = Number((ent as any).altitude_m ?? 0) || 0;
-                if (Number.isFinite(poMs) && Number.isFinite(lat) && Number.isFinite(lng)) {
-                    tryAddMotionSample(ent.entity_id, { atMs: poMs, lat, lng, alt });
-                }
-            }
-            if (new Date(item.at).getTime() > atMs) continue;
-            if (item.family === 'entity') {
-                if (item.op === 'remove') entityMap.delete(item.entity_id);
-                else entityMap.set(item.item.entity_id, item.item as ReplayEntity);
-                continue;
-            }
-            if (item.family === 'event') {
-                if (item.op === 'remove') eventMap.delete(item.event_id);
-                else eventMap.set(item.item.event_id, item.item as ReplayEvent);
-                continue;
-            }
-            assetMap.set(item.item.asset_id, item.item as ReplayAsset);
-        }
-
-        // Also treat snapshot entities as motion samples — this is
-        // critical when a tile has no items (just a snapshot) because
-        // that's still a valid historical position observation.
-        for (const payload of validSnapshots) {
-            for (const ent of payload.snapshot.entities || []) {
-                if (!isReplayMovingFixLayer((ent as any).layer_id)) continue;
-                const poIso = (ent as any).position_observed_at;
-                const poMs = poIso ? new Date(poIso).getTime() : Number.NaN;
-                const lat = Number((ent as any).display_lat);
-                const lng = Number((ent as any).display_lng);
-                const alt = Number((ent as any).altitude_m ?? 0) || 0;
-                if (!Number.isFinite(poMs) || !Number.isFinite(lat) || !Number.isFinite(lng)) continue;
-                tryAddMotionSample((ent as any).entity_id, { atMs: poMs, lat, lng, alt });
-            }
-        }
-
-        const orderedMotionSamples = new Map<string, ReplayMotionSampleRaw[]>();
-        motionSamples.forEach((slot, entityId) => {
-            const list = Array.from(slot.values()).sort((a, b) => a.atMs - b.atMs);
-            if (list.length > 0) orderedMotionSamples.set(entityId, list);
-        });
-        const state = {
-            at: atIso,
-            entities: Array.from(entityMap.values()),
-            events: Array.from(eventMap.values()),
-            assets: Array.from(assetMap.values()),
-            motionSamples: orderedMotionSamples,
-        };
-        if (typeof performance !== 'undefined') {
-            performance.mark('replay-rebuild-state:end');
-            performance.measure('replay-rebuild-state', 'replay-rebuild-state:start', 'replay-rebuild-state:end');
-        }
-        return state;
-    };
-
-        const loadLayerStateFromTiles = async (
-        layerId: string,
-        atIso: string,
-        manifest: ReplayManifest,
-    ): Promise<ReplayStateResponse> => {
-        if (layerId === 'fire' && !clusteringEnabled) {
-            const tRaw = performance.now();
-            const rawState = await loadRawFireState(atIso);
-            perfLog('replay.fire.raw_state', {
-                ms: Math.round(performance.now() - tRaw),
-                events: rawState.events.length,
-                clusteringEnabled,
-            });
-            return rawState;
-        }
-        const tNet = performance.now();
-        const payloads = await getTilePayloadsForLayer(manifest, layerId);
-        const tNetEnd = performance.now();
-        const state = rebuildStateFromTilePayloads(atIso, payloads);
-        const tBuild = performance.now();
-        const itemCount = payloads.reduce((acc, p) => acc + (p.items?.length || 0), 0);
-        const snapshotEntities = payloads.reduce((acc, p) => acc + (p.snapshot?.entities?.length || 0), 0);
-        const snapshotEvents = payloads.reduce((acc, p) => acc + (p.snapshot?.events?.length || 0), 0);
-        const snapshotAssets = payloads.reduce((acc, p) => acc + (p.snapshot?.assets?.length || 0), 0);
-        perfLog('replay.layer.sub_stages', {
-            layer: layerId,
-            tilesMs: Math.round(tNetEnd - tNet),
-            rebuildMs: Math.round(tBuild - tNetEnd),
-            tileCount: payloads.length,
-            items: itemCount,
-            snapshotEntities,
-            snapshotEvents,
-            snapshotAssets,
-            rebuiltEntities: state.entities.length,
-            rebuiltEvents: state.events.length,
-            rebuiltAssets: state.assets.length,
-        });
-        return state;
-    };
-
     const shouldUseReplayRenderBatch = (layerId: string, options?: { renderChunks?: boolean }) => {
         if (options?.renderChunks === false) return false;
         return isReplayRenderBatchLayer(layerId);
@@ -2094,7 +1660,6 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
     const applyReplayRenderBatchLayer = async (
         layerId: string,
         atIso: string,
-        manifest: ReplayManifest,
         isCancelled: () => boolean,
         options?: { renderChunks?: boolean },
     ): Promise<boolean | null> => {
@@ -2108,7 +1673,9 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                 atIso,
                 fromIso: atIso,
                 toIso: atIso,
-                aggregateFires: layerId === 'fire' ? clusteringEnabled : true,
+                bbox: getReplayViewportBbox(),
+                aggregateFires: layerId === 'fire' ? (clusteringEnabled && !appliedSelectionForLayer(layerId)) : true,
+                fetchFeatureRefs: Boolean(appliedSelectionForLayer(layerId)),
                 isCancelled,
                 beforeCommit: () => clearLegacyLayerState(layerId),
             });
@@ -2184,6 +1751,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                 layerId,
                 atIso,
                 sinceIso: usePartialDelta ? sinceIso || undefined : undefined,
+                bbox: getReplayViewportBbox(),
                 partial: usePartialDelta,
                 aggregateFires: layerId === 'fire' ? clusteringEnabled : true,
                 isCancelled,
@@ -2657,7 +2225,6 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
     const syncLayerState = async (
         layerId: string,
         atIso: string,
-        manifest: ReplayManifest,
         isCancelled: () => boolean = () => false,
         options?: { renderChunks?: boolean },
     ): Promise<boolean> => {
@@ -2666,8 +2233,6 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
             {
                 'replay.layer': layerId,
                 'replay.at': atIso,
-                'replay.manifest_from': manifest.from,
-                'replay.manifest_to': manifest.to,
                 'replay.render_chunks': options?.renderChunks !== false,
             },
             async (span) => {
@@ -2685,7 +2250,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
             if (isCancelled()) return false;
             span?.setAttribute('sync.point_delta_promoted_full', true);
         }
-        const renderBatchApplied = await applyReplayRenderBatchLayer(layerId, atIso, manifest, isCancelled, options);
+        const renderBatchApplied = await applyReplayRenderBatchLayer(layerId, atIso, isCancelled, options);
         if (renderBatchApplied === true) {
             lastAppliedLayerTimeRef.current.set(layerId, atIso);
             lastBufferedLayerTimeRef.current.set(layerId, atIso);
@@ -2694,71 +2259,11 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
         }
         if (renderBatchApplied === false) return false;
 
-        if (layerId === 'satellite') {
-            const tHttp0 = performance.now();
-            const tleState = await loadSatelliteTleState(atIso);
-            const tHttp = performance.now() - tHttp0;
-            if (isCancelled()) return false;
-            const tApply0 = performance.now();
-            const applied = await applySatelliteTleState(atIso, tleState.items, isCancelled);
-            const tApply = performance.now() - tApply0;
-            perfLog('replay.satellite.stages', {
-                httpMs: Math.round(tHttp),
-                applyMs: Math.round(tApply),
-                items: tleState.items?.length ?? 0,
-            });
-            if (!applied || isCancelled()) return false;
-            lastAppliedLayerTimeRef.current.set(layerId, atIso);
-            lastBufferedLayerTimeRef.current.set(layerId, atIso);
-            return true;
-        }
-        const legacyManifest = manifest.layers[layerId]
-            ? manifest
-            : await getWindowManifest([layerId], atIso, 0);
-        const tFetchStart = performance.now();
-        const state = await loadLayerStateFromTiles(layerId, atIso, legacyManifest);
-        const tFetched = performance.now();
-        const cancelledAfterFetch = isCancelled();
-        if (isReplayMovingFixLayer(layerId)) {
-            perfLog('replay.sync.after_fetch', {
-                layer: layerId, atIso, entities: state.entities.length, cancelled: cancelledAfterFetch,
-            });
-        }
-        if (cancelledAfterFetch) return false;
-        const applied = await applyLayerState(layerId, state, isCancelled, undefined, options);
-        const tApplied = performance.now();
-        perfLog('replay.layer.stages', {
-            layer: layerId,
-            tilesAndRebuildMs: Math.round(tFetched - tFetchStart),
-            applyMs: Math.round(tApplied - tFetched),
-            entities: state.entities.length,
-            events: state.events.length,
-            assets: state.assets.length,
-        });
-        const cancelledAfterApply = isCancelled();
-        if (isReplayMovingFixLayer(layerId)) {
-            perfLog('replay.sync.after_apply', {
-                layer: layerId, atIso, applied, cancelled: cancelledAfterApply,
-            });
-        }
-        if (!applied || cancelledAfterApply) return false;
-        if (isReplayMovingFixLayer(layerId)) {
-            syncReplayMotionTracks(atIso);
-            const trackCount = motionTrackMapRef.current.size;
-            let totalSamples = 0;
-            let multiSample = 0;
-            motionTrackMapRef.current.forEach((t) => {
-                totalSamples += t.samples.length;
-                if (t.samples.length > 1) multiSample += 1;
-            });
-            perfLog('replay.sync.motion_tracks', { layer: layerId, atIso, tracks: trackCount, multiSample, totalSamples });
-        }
-        lastAppliedLayerTimeRef.current.set(layerId, atIso);
-        lastBufferedLayerTimeRef.current.set(layerId, legacyManifest.to);
-        pointDeltaRunRef.current.delete(layerId);
-        span?.setAttribute('sync.fetch_ms', Math.round(tFetched - tFetchStart));
-        span?.setAttribute('sync.apply_ms', Math.round(tApplied - tFetched));
-        return true;
+        const message = `Replay layer ${layerId} is not configured for render-batch hydration`;
+        console.error('[ReplayOverlay] unsupported replay layer:', message);
+        setReplayError(message);
+        perfLog('replay.layer.unsupported', { layer: layerId, atIso });
+        return false;
             },
         ) as Promise<boolean>;
     };
@@ -2768,6 +2273,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
         const showReplay = mode === 'playback' && playbackKind === 'historical';
         if (pointCollection) pointCollection.show = showReplay;
         if (!showReplay) {
+            replayOperationIdRef.current += 1;
             clearReplay();
             lastAppliedTimeRef.current = null;
             lastAppliedSeekVersionRef.current = useTimelineStore.getState().replaySeekVersion;
@@ -2899,7 +2405,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
 
     useEffect(() => {
         replayCancelVersionRef.current += 1;
-    }, [mode, playbackKind, replaySeekVersion, layersKey, satelliteRenderLimit]);
+    }, [mode, playbackKind, replaySeekVersion, layersKey]);
 
     useEffect(() => {
         const unsubscribe = useTimelineStore.subscribe((state, prevState) => {
@@ -2936,7 +2442,8 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
         });
         renderBatchPointMapRef.current.forEach((bb, targetId) => {
             const meta = replayRenderBatchMetaMap.get(targetId);
-            bb.show = !meta || computeVisible(targetId, meta.layerId, meta.subtype, meta.source);
+            const featureId = meta?.extra?.featureId ? String(meta.extra.featureId) : targetId;
+            bb.show = !meta || computeVisible(featureId, meta.layerId, meta.subtype, meta.source);
         });
         targetLayerMapRef.current.forEach((layerId, targetId) => {
             const shapeIds = shapeMapRef.current.get(targetId) || [];
@@ -2949,7 +2456,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
         });
         requestSceneRender();
         publishReplayStats();
-    }, [mode, playbackKind, subtypeVisibility, sourceVisibility, isolatedEntityId]);
+    }, [mode, playbackKind, subtypeVisibility, sourceVisibility, appliedSelectionSets, isolatedEntityId]);
 
     useEffect(() => {
         if (mode !== 'playback' || playbackKind !== 'historical') {
@@ -2968,6 +2475,39 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
         }
         requestSceneRender();
     }, [mode, playbackKind, sources.satelliteFootprints, visibility.satelliteFootprints]);
+
+    useEffect(() => {
+        if (!viewer || mode !== 'playback' || playbackKind !== 'historical') {
+            replayViewportKeyRef.current = '';
+            return;
+        }
+        if (!activeReplayLayers.some((layerId) => isReplayRenderBatchLayer(layerId))) {
+            replayViewportKeyRef.current = getReplayViewportKey();
+            return;
+        }
+        replayViewportKeyRef.current = getReplayViewportKey();
+
+        const refreshForViewportChange = () => {
+            if (!viewer || viewer.isDestroyed()) return;
+            const nextKey = getReplayViewportKey();
+            if (nextKey === replayViewportKeyRef.current) return;
+            replayViewportKeyRef.current = nextKey;
+            invalidateReplayViewportScopedLayers();
+            const currentTime = useTimelineStore.getState().currentTime;
+            seekRequestRef.current = {
+                targetMs: currentTime.getTime(),
+                reason: 'viewport-change',
+            };
+            if (replayBusyRef.current) replayCancelVersionRef.current += 1;
+            setReplayViewportVersion((version) => version + 1);
+            publishReplayStats();
+        };
+
+        const removeMoveEnd = viewer.camera.moveEnd.addEventListener(refreshForViewportChange);
+        return () => {
+            removeMoveEnd();
+        };
+    }, [viewer, mode, playbackKind, activeReplayLayers, layersKey]);
 
     useEffect(() => {
         perfLog('replay.effect.enter', {
@@ -3011,6 +2551,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
             return;
         }
         let cancelVersion = replayCancelVersionRef.current;
+        const operationId = replayOperationIdRef.current + 1;
         const targetMs = explicitSeekRequest?.targetMs ?? stateCurrentTime.getTime();
         const currentTime = new Date(targetMs);
         const currentIso = currentTime.toISOString();
@@ -3070,6 +2611,13 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
         );
         const interactiveReplayLayers = bootstrapReplayLayers;
         const isCancelled = () => cancelVersion !== replayCancelVersionRef.current;
+        const isCurrentOperation = () => operationId === replayOperationIdRef.current;
+        const releaseReplayHydrationIfReady = () => {
+            if (!isCurrentOperation() || replayBusyRef.current || replayPendingRef.current) return;
+            if (replayHydrationInflightRef.current > 0) return;
+            setReplayHydrating(false);
+            publishReplayStats();
+        };
 
         const fetchReplay = async () => {
             const tFetchReplayStart = performance.now();
@@ -3082,36 +2630,12 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                 currentCancelVersion: replayCancelVersionRef.current,
             });
             setReplayError(null);
-            if (typeof performance !== 'undefined') {
-                performance.mark('replay-seek-manifest:start');
-            }
-            const primaryManifest = makeSnapshotManifest(currentIso);
-            perfLog('replay.fetch.primary_manifest_done', {
-                ms: Math.round(performance.now() - tFetchReplayStart),
-                layerKeys: Object.keys(primaryManifest.layers).slice(0, 8),
-                cancelled: isCancelled(),
-            });
-            if (typeof performance !== 'undefined') {
-                performance.mark('replay-seek-manifest:end');
-                performance.measure('replay-seek-manifest', 'replay-seek-manifest:start', 'replay-seek-manifest:end');
-            }
             if (isCancelled()) return;
-            const manifest = makeSnapshotManifest(currentIso);
-            perfLog('replay.fetch.full_manifest_done', {
-                ms: Math.round(performance.now() - tFetchReplayStart),
-                layerKeys: Object.keys(manifest.layers).slice(0, 8),
-                cancelled: isCancelled(),
-            });
-            if (isCancelled()) return;
-            perfLog('replay.fetch.after_prefetch_schedule', { shouldSeek, interactiveCount: interactiveReplayLayers.length });
-            const fetchLayerState = async (layerId: string, options?: { renderChunks?: boolean; usePrimaryManifest?: boolean }) => {
+            const fetchLayerState = async (layerId: string, options?: { renderChunks?: boolean }) => {
                 if (typeof performance !== 'undefined') {
                     performance.mark(`replay-seek-sync:${layerId}:start`);
                 }
-                const useManifest = options?.usePrimaryManifest && primaryManifest.layers[layerId]
-                    ? primaryManifest
-                    : manifest;
-                const applied = await syncLayerState(layerId, currentIso, useManifest, isCancelled, options);
+                const applied = await syncLayerState(layerId, currentIso, isCancelled, options);
                 if (typeof performance !== 'undefined') {
                     performance.mark(`replay-seek-sync:${layerId}:end`);
                     performance.measure(`replay-seek-sync:${layerId}`, `replay-seek-sync:${layerId}:start`, `replay-seek-sync:${layerId}:end`);
@@ -3149,7 +2673,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                     let visibleMarked = false;
                     const results = await Promise.all(interactiveReplayLayers.map(async (layerId) => {
                         const t0 = performance.now();
-                        const applied = await fetchLayerState(layerId, { usePrimaryManifest: true });
+                        const applied = await fetchLayerState(layerId);
                         const t1 = performance.now();
                         perfLog('replay.layer.ready', { layer: layerId, ms: Math.round(t1 - t0), applied });
                         if (applied && !visibleMarked && !isCancelled()) {
@@ -3207,7 +2731,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                             replayHydrationInflightRef.current += 1;
                             void (async () => {
                                 for (const layerId of warmLayers) {
-                                const applied = await syncLayerState(layerId, currentIso, manifest, isCancelled);
+                                const applied = await syncLayerState(layerId, currentIso, isCancelled);
                                 if (!applied || isCancelled()) {
                                     perfLog('replay.hydration_task', {
                                         kind: 'warm-prime',
@@ -3239,6 +2763,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                             });
                         }).finally(() => {
                             replayHydrationInflightRef.current = Math.max(0, replayHydrationInflightRef.current - 1);
+                            releaseReplayHydrationIfReady();
                             warmPrimeResolve();
                         });
                     } else {
@@ -3307,7 +2832,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                         parallelHydrationPromise = Promise.all(parallelHydrationLayers.map(async (layerId) => {
                             const t0 = performance.now();
                             try {
-                                const ok = await syncLayerState(layerId, currentIso, manifest, isCancelled);
+                                const ok = await syncLayerState(layerId, currentIso, isCancelled);
                                 if (!ok || isCancelled()) return false;
                                 publishReplayStats();
                                 perfLog('replay.hydration_task', {
@@ -3335,56 +2860,19 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                     }
 
                     const bgStart = performance.now();
-                    // 2026-04-23 hybrid: fetch+decode bg layers in PARALLEL
-                    // (network/worker bound — no contention), then apply
-                    // small-first SEQUENTIAL (main thread polygon rebuild
-                    // contends). Removes serial HTTP wait while keeping
-                    // Cesium primitive build isolated so airspace/pipeline
-                    // don't dog-pile each other with 5s longtasks.
-                    const bgLayersBySize = backgroundDeferredReplayLayers
+                    const backgroundSerialLayers = backgroundDeferredReplayLayers
                         .filter((layerId) => !shouldRunReplayHydrationInParallel(layerId))
                         .sort((a, b) => {
-                        const aBytes = (manifest.layers[a]?.tiles ?? []).reduce((s, t) => s + (t.bytes || 0), 0);
-                        const bBytes = (manifest.layers[b]?.tiles ?? []).reduce((s, t) => s + (t.bytes || 0), 0);
-                        return aBytes - bBytes;
-                    });
-                    const bgFetchT0 = performance.now();
-                    // Kick off all fetches in parallel — as each resolves its
-                    // state is held awaiting sequential apply.
-                    const fetchPromises = new Map<string, Promise<{ kind: 'render-batch' } | { kind: 'tile'; state: ReplayStateResponse } | null>>();
-                    for (const layerId of bgLayersBySize) {
-                        fetchPromises.set(layerId, (async () => {
-                            const t0 = performance.now();
-                            try {
-                                if (shouldUseReplayRenderBatch(layerId)) {
-                                    return { kind: 'render-batch' as const };
-                                }
-                                const state = await loadLayerStateFromTiles(layerId, currentIso, manifest);
-                                perfLog('replay.bg_fetch', { layer: layerId, ms: Math.round(performance.now() - t0), entities: state.entities.length, events: state.events.length, assets: state.assets.length });
-                                return { kind: 'tile' as const, state };
-                            } catch { return null; }
-                        })());
-                    }
-                    perfLog('replay.bg_fetch_parallel_kickoff', { layers: bgLayersBySize, kickoffMs: Math.round(performance.now() - bgFetchT0) });
+                            const aPriority = getReplaySeekPriority(a);
+                            const bPriority = getReplaySeekPriority(b);
+                            return aPriority - bPriority;
+                        });
 
                     const bgResults: boolean[] = [];
-                    for (const layerId of bgLayersBySize) {
+                    for (const layerId of backgroundSerialLayers) {
                         if (isCancelled()) { bgResults.push(false); break; }
                         const t0 = performance.now();
-                        const fetched = await fetchPromises.get(layerId)!;
-                        if (!fetched) { bgResults.push(false); continue; }
-                        let ok = false;
-                        if (fetched.kind === 'render-batch') {
-                            ok = await syncLayerState(layerId, currentIso, manifest, isCancelled);
-                        } else if (fetched.kind === 'tile') {
-                            ok = await applyLayerState(layerId, fetched.state, isCancelled, undefined, { renderChunks: false });
-                            if (ok && !isCancelled()) {
-                                lastAppliedLayerTimeRef.current.set(layerId, currentIso);
-                                lastBufferedLayerTimeRef.current.set(layerId, manifest.to);
-                                pointDeltaRunRef.current.delete(layerId);
-                                if (isReplayMovingFixLayer(layerId)) syncReplayMotionTracks(currentIso);
-                            }
-                        }
+                        const ok = await syncLayerState(layerId, currentIso, isCancelled);
                         perfLog('replay.bg_layer', { layer: layerId, ms: Math.round(performance.now() - t0), ok });
                         bgResults.push(ok);
                     }
@@ -3414,9 +2902,6 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                         return;
                     }
                     perfLog('replay.bg_done', { ms: Math.round(performance.now() - bgStart) });
-                    // Blocking replay snapshot is ready only after visible
-                    // background layers, including satellite, have applied.
-                    setReplayHydrating(false);
                     if (isCancelled()) {
                         perfLog('replay.hydration_task', {
                             kind: 'deferred',
@@ -3434,6 +2919,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                     lastAppliedLayerTimeRef.current = mergedLayerTimes;
                     lastBufferedLayerTimeRef.current = new Map(mergedLayerTimes);
                     publishReplayStats();
+                    releaseReplayHydrationIfReady();
                     perfLog('replay.hydration_task', {
                         kind: 'deferred',
                         phase: 'end',
@@ -3457,6 +2943,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                     });
                 }).finally(() => {
                     replayHydrationInflightRef.current = Math.max(0, replayHydrationInflightRef.current - 1);
+                    releaseReplayHydrationIfReady();
                 });
                 return;
             }
@@ -3466,6 +2953,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
             publishReplayStats();
         };
 
+        replayOperationIdRef.current = operationId;
         replayBusyRef.current = true;
         replayPendingRef.current = false;
 
@@ -3481,12 +2969,17 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                 if (seekRequestRef.current?.targetMs === targetMs && seekRequestRef.current?.reason === explicitSeekRequest?.reason) {
                     seekRequestRef.current = null;
                 }
+                if (!isCurrentOperation()) {
+                    publishReplayStats();
+                    return;
+                }
                 if (cancelVersion !== replayCancelVersionRef.current) {
                     replayBusyRef.current = false;
                     if (replayPendingRef.current) {
                         replayPendingRef.current = false;
                         setReplayDrainVersion((version) => version + 1);
                     }
+                    releaseReplayHydrationIfReady();
                     publishReplayStats();
                     return;
                 }
@@ -3495,9 +2988,40 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                     replayPendingRef.current = false;
                     setReplayDrainVersion((version) => version + 1);
                 }
+                releaseReplayHydrationIfReady();
                 publishReplayStats();
             });
-    }, [viewer, mode, playbackKind, replaySeekVersion, layersKey, activeReplayLayers, satelliteRenderLimit, replayDrainVersion, setReplayHydrating]);
+    }, [viewer, mode, playbackKind, replaySeekVersion, layersKey, activeReplayLayers, replayDrainVersion, replayViewportVersion, setReplayHydrating]);
+
+    useEffect(() => {
+        if (!viewer || mode !== 'playback' || playbackKind !== 'historical') return;
+        let cancelled = false;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+
+        const tick = () => {
+            if (cancelled || viewer.isDestroyed()) return;
+            const state = useTimelineStore.getState();
+            if (
+                state.mode === 'playback'
+                && state.playbackKind === 'historical'
+                && state.replayHydrating
+                && !replayBusyRef.current
+                && !replayPendingRef.current
+                && replayHydrationInflightRef.current === 0
+                && (replaySnapshotHasVisibleContent() || Boolean(lastAppliedTimeRef.current))
+            ) {
+                setReplayHydrating(false);
+                publishReplayStats();
+            }
+            timer = setTimeout(tick, 500);
+        };
+
+        tick();
+        return () => {
+            cancelled = true;
+            if (timer) clearTimeout(timer);
+        };
+    }, [viewer, mode, playbackKind, setReplayHydrating]);
 
     useEffect(() => {
         if (!viewer || mode !== 'playback' || playbackKind !== 'historical') return;
@@ -3522,7 +3046,6 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                 return aPriority - bPriority;
             });
             try {
-                const manifest = makeSnapshotManifest(currentIso);
                 // Refresh moving layers first. Event/static layers can lag a
                 // tick; they must not start a request burst that delays
                 // aircraft/vessel/satellite delta application.
@@ -3574,7 +3097,6 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                             await syncLayerState(
                                 layerId,
                                 currentIso,
-                                manifest,
                                 isCancelled,
                             );
                             return;
@@ -3584,7 +3106,6 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                             await syncLayerState(
                                 layerId,
                                 currentIso,
-                                manifest,
                                 isCancelled,
                             );
                         }

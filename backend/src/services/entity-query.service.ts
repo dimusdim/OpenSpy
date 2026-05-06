@@ -25,6 +25,7 @@ export type EntityTrackFilters = {
     from?: string;
     to?: string;
     limit?: number;
+    offset?: number;
     order?: 'asc' | 'desc';
 };
 
@@ -79,9 +80,9 @@ type LiveStatusSampleRow = {
     properties: any;
 };
 
-function clampLimit(limit: number | undefined, fallback = 200, max = 5000): number {
+function normalizeLimit(limit: number | undefined, fallback = 200): number {
     if (!Number.isFinite(limit)) return fallback;
-    return Math.max(1, Math.min(max, Math.trunc(limit as number)));
+    return Math.max(1, Math.trunc(limit as number));
 }
 
 export class EntityQueryService {
@@ -123,7 +124,7 @@ export class EntityQueryService {
         if (!this.database.isReady()) return [];
 
         const { clauses, params } = this.buildLatestWhere(filters);
-        const limit = clampLimit(filters.limit);
+        const limit = normalizeLimit(filters.limit);
         const offset = Math.max(0, Math.trunc(Number(filters.offset || 0)));
         params.push(limit, offset);
         const limitParam = params.length - 1;
@@ -189,7 +190,7 @@ export class EntityQueryService {
         }
         const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
         const freshnessMinutes = Math.max(1, Math.min(24 * 60, Math.trunc(filters.freshnessMinutes || 30)));
-        const limit = clampLimit(filters.limit, 20, 200);
+        const limit = normalizeLimit(filters.limit, 20);
 
         const summaryParams = [...params, freshnessMinutes];
         const freshnessParam = summaryParams.length;
@@ -256,7 +257,11 @@ export class EntityQueryService {
             clauses.push(`pf.observed_at <= $${params.length}::timestamptz`);
         }
 
-        params.push(clampLimit(filters.limit, 500, 10000));
+        const limit = normalizeLimit(filters.limit, 500);
+        const offset = Math.max(0, Math.trunc(Number(filters.offset || 0)));
+        params.push(limit, offset);
+        const limitParam = params.length - 1;
+        const offsetParam = params.length;
         const order = filters.order === 'desc' ? 'DESC' : 'ASC';
 
         const result = await this.database.query<TrackRow>(
@@ -277,7 +282,7 @@ export class EntityQueryService {
                 FROM core.position_fixes pf
                 WHERE ${clauses.join(' AND ')}
                 ORDER BY pf.observed_at ${order}, pf.created_at ${order}
-                LIMIT $${params.length}
+                LIMIT $${limitParam} OFFSET $${offsetParam}
             `,
             params,
         );

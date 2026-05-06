@@ -50,9 +50,9 @@ type LatestEventRow = {
     properties: any;
 };
 
-function clampLimit(limit: number | undefined): number {
-    if (!Number.isFinite(limit)) return 200;
-    return Math.max(1, Math.min(5000, Math.trunc(limit as number)));
+function normalizeLimit(limit: number | undefined, fallback = 200): number {
+    if (!Number.isFinite(limit)) return fallback;
+    return Math.max(1, Math.trunc(limit as number));
 }
 
 export class EventQueryService {
@@ -94,7 +94,7 @@ export class EventQueryService {
         if (!this.database.isReady()) return [];
 
         const { clauses, params } = this.buildWhere(filters, 's');
-        const limit = clampLimit(filters.limit);
+        const limit = normalizeLimit(filters.limit);
         const offset = Math.max(0, Math.trunc(Number(filters.offset || 0)));
         params.push(limit, offset);
         const limitParam = params.length - 1;
@@ -134,7 +134,7 @@ export class EventQueryService {
         if (!this.database.isReady()) return [];
 
         const { clauses, params } = this.buildWhere(filters, 'e');
-        const limit = clampLimit(filters.limit);
+        const limit = normalizeLimit(filters.limit);
         const offset = Math.max(0, Math.trunc(Number(filters.offset || 0)));
         params.push(limit, offset);
         const limitParam = params.length - 1;

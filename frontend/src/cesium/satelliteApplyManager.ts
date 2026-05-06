@@ -42,6 +42,12 @@ type SatelliteApplySource = {
     applyMeta?: boolean;
 };
 
+type ApplyProgress = {
+    epochMs: number;
+    cursor: number;
+    completed: boolean;
+};
+
 type MutableBillboard = Cesium.Billboard & {
     // Cesium 1.140.0 private layout: if upgrading, revalidate billboard internals before using fast path.
     _position?: Cesium.Cartesian3;
@@ -87,7 +93,7 @@ export function applyFastBillboardPosition(slot: SatelliteApplySlot, x: number, 
 
 class SatelliteApplyManager {
     private readonly sources = new Map<string, SatelliteApplySource>();
-    private readonly lastAppliedEpochMs = new Map<string, number>();
+    private readonly applyProgress = new Map<string, ApplyProgress>();
     private readonly removeCallback: Cesium.Event.RemoveCallback;
 
     constructor(private readonly scene: Cesium.Scene) {
@@ -97,7 +103,7 @@ class SatelliteApplyManager {
     setSource(key: string, source: SatelliteApplySource | null) {
         if (!source) {
             this.sources.delete(key);
-            this.lastAppliedEpochMs.delete(key);
+            this.applyProgress.delete(key);
             return;
         }
         this.sources.set(key, source);
@@ -106,7 +112,7 @@ class SatelliteApplyManager {
     destroy() {
         this.removeCallback();
         this.sources.clear();
-        this.lastAppliedEpochMs.clear();
+        this.applyProgress.clear();
     }
 
     private readonly handlePreRender = (_scene: Cesium.Scene, time: Cesium.JulianDate) => {
@@ -127,7 +133,17 @@ class SatelliteApplyManager {
 
         const { sab, slots, epochMs } = source.getState();
         if (!sab || !Number.isFinite(epochMs ?? NaN)) return;
-        if (this.lastAppliedEpochMs.get(sourceKey) === epochMs) return;
+        const epoch = epochMs!;
+        let progress = this.applyProgress.get(sourceKey);
+        if (!progress || progress.epochMs !== epoch) {
+            progress = {
+                epochMs: epoch,
+                cursor: 0,
+                completed: false,
+            };
+            this.applyProgress.set(sourceKey, progress);
+        }
+        if (progress.completed) return;
 
         const markName = source.measureName;
         const applyVisibility = source.applyVisibility === true;
@@ -144,26 +160,34 @@ class SatelliteApplyManager {
         // even after the cartoScratch fix removed the per-slot allocation.
         // Hover panels don't need 60 fps metadata freshness.
         const META_THROTTLE_MS = 250;
-        for (let slotIndex = 0; slotIndex < slots.length; slotIndex += 1) {
+        const APPLY_BUDGET_MS = 10;
+        const APPLY_CHECK_EVERY = 256;
+        const startCursor = progress.cursor;
+        for (let slotIndex = progress.cursor; slotIndex < slots.length; slotIndex += 1) {
             const slot = slots[slotIndex];
+            progress.cursor = slotIndex + 1;
             const offset = slot.index * 3;
             const x = view[offset];
             const y = view[offset + 1];
             const z = view[offset + 2];
-            if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
-            applyFastBillboardPosition(slot, x, y, z);
-            if (applyVisibility && slot.getVisible) slot.billboard.show = slot.getVisible();
-            if (applyMeta && slot.updateMeta) {
-                const lastMeta = slot.lastMetaUpdateMs ?? 0;
-                if (nowMs - lastMeta >= META_THROTTLE_MS) {
-                    slot.updateMeta(slot.scratch);
-                    slot.lastMetaUpdateMs = nowMs;
+            if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) {
+                applyFastBillboardPosition(slot, x, y, z);
+                if (applyVisibility && slot.getVisible) slot.billboard.show = slot.getVisible();
+                if (applyMeta && slot.updateMeta) {
+                    const lastMeta = slot.lastMetaUpdateMs ?? 0;
+                    if (nowMs - lastMeta >= META_THROTTLE_MS) {
+                        slot.updateMeta(slot.scratch);
+                        slot.lastMetaUpdateMs = nowMs;
+                    }
                 }
+                appliedCount += 1;
             }
-            appliedCount += 1;
+            if ((slotIndex + 1) % APPLY_CHECK_EVERY === 0 && performance.now() - tStart >= APPLY_BUDGET_MS) {
+                break;
+            }
         }
 
-        this.lastAppliedEpochMs.set(sourceKey, epochMs!);
+        progress.completed = progress.cursor >= slots.length;
         if (markName) {
             performance.mark(`${markName}:end`);
             performance.measure(markName, `${markName}:start`, `${markName}:end`);
@@ -176,9 +200,26 @@ class SatelliteApplyManager {
                 sourceKey,
                 slots: slots.length,
                 applied: appliedCount,
+                cursor: progress.cursor,
+                startedAt: startCursor,
+                completed: progress.completed,
                 applyVisibility,
                 applyMeta,
             });
+        }
+        if (typeof window !== 'undefined') {
+            (window as any).__openspySatelliteApplyStats = {
+                sourceKey,
+                epochMs: epoch,
+                slots: slots.length,
+                cursor: progress.cursor,
+                completed: progress.completed,
+                appliedLastPass: appliedCount,
+                lastPassMs: Math.round(ms),
+            };
+        }
+        if (!progress.completed) {
+            this.scene.requestRender();
         }
     };
 }

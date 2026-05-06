@@ -26,6 +26,8 @@ export interface AcledDeletedEvent {
     reason: 'deleted_endpoint' | 'event_type_out_of_scope';
 }
 
+type AcledAuthMode = 'oauth' | 'legacy-key';
+
 export class ACLEDService {
     private events: ConflictEvent[] = [];
     private timer: NodeJS.Timeout | null = null;
@@ -62,6 +64,7 @@ export class ACLEDService {
             count: this.events.length,
             completeness: this.lastCompleteness,
             cursorTimestampSec: this.lastSuccessfulTimestampSec,
+            auth: this.getAuthDiagnostic(),
         };
     }
 
@@ -300,17 +303,45 @@ export class ACLEDService {
         }
     }
 
-    private getAuthMode(): 'oauth' | 'legacy-key' | null {
+    private getAuthDiagnostic() {
         const mode = (process.env.ACLED_AUTH_MODE || '').trim().toLowerCase();
-        const email = process.env.ACLED_EMAIL;
-        const password = process.env.ACLED_PASSWORD;
-        const key = process.env.ACLED_KEY;
+        const email = Boolean(process.env.ACLED_EMAIL);
+        const password = Boolean(process.env.ACLED_PASSWORD);
+        const key = Boolean(process.env.ACLED_KEY);
         const passwordOauthEnabled = process.env.ACLED_ENABLE_PASSWORD_OAUTH === 'true';
-        if (mode === 'oauth') return email && password ? 'oauth' : null;
-        if (mode === 'legacy-key') return email && key ? 'legacy-key' : null;
-        if (email && key) return 'legacy-key';
-        if (email && password && passwordOauthEnabled) return 'oauth';
-        return null;
+        const requestedMode = mode === 'oauth' || mode === 'legacy-key' ? mode : null;
+        let effectiveMode: AcledAuthMode | null = null;
+        if (mode === 'oauth' && email && password) effectiveMode = 'oauth';
+        else if (mode === 'legacy-key' && email && key) effectiveMode = 'legacy-key';
+        else if (!requestedMode && email && key) effectiveMode = 'legacy-key';
+        else if (!requestedMode && email && password && passwordOauthEnabled) effectiveMode = 'oauth';
+
+        const missing = effectiveMode
+            ? []
+            : mode === 'oauth'
+                ? ['ACLED_EMAIL', 'ACLED_PASSWORD'].filter((name) => (name === 'ACLED_EMAIL' ? !email : !password))
+                : mode === 'legacy-key'
+                    ? ['ACLED_EMAIL', 'ACLED_KEY'].filter((name) => (name === 'ACLED_EMAIL' ? !email : !key))
+                    : email
+                        ? (key ? [] : password && !passwordOauthEnabled ? ['ACLED_KEY or ACLED_ENABLE_PASSWORD_OAUTH=true'] : ['ACLED_KEY'])
+                        : ['ACLED_EMAIL', 'ACLED_KEY'];
+
+        return {
+            configured: Boolean(effectiveMode),
+            requestedMode,
+            effectiveMode,
+            passwordOauthEnabled,
+            present: {
+                ACLED_EMAIL: email,
+                ACLED_KEY: key,
+                ACLED_PASSWORD: password,
+            },
+            missing,
+        };
+    }
+
+    private getAuthMode(): AcledAuthMode | null {
+        return this.getAuthDiagnostic().effectiveMode;
     }
 
     private async requestReadEndpoint(endpoint: 'acled/read' | 'deleted/read', params: URLSearchParams) {

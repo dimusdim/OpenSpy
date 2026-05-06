@@ -63,16 +63,25 @@ function imageryRenderSizeForBbox([west, south, east, north]: Bbox, maxPixels = 
     return { width: Math.max(128, Math.round(longSide * aspect)), height: longSide };
 }
 
-function setImageryLayerVisible(viewer: Cesium.Viewer) {
+function explicitBoolean(value: unknown): boolean {
+    return value === true || value === 'true' || value === 1 || value === '1';
+}
+
+function imageryPayloadSwitchesBase(payload: Record<string, unknown>): boolean {
+    const scene = payload.scene && typeof payload.scene === 'object'
+        ? payload.scene as Record<string, unknown>
+        : null;
+    return explicitBoolean(payload.switchBase)
+        || explicitBoolean(payload.switch_base)
+        || explicitBoolean(scene?.switchBase)
+        || explicitBoolean(scene?.switch_base);
+}
+
+function applyImageryDisplayOptions(viewer: Cesium.Viewer, payload: Record<string, unknown>) {
+    if (!imageryPayloadSwitchesBase(payload)) return;
     const store = useTimelineStore.getState();
-    useTimelineStore.setState({
-        sources: { ...store.sources, satellite_imagery: true },
-        visibility: { ...store.visibility, satellite_imagery: true },
-    });
-    if (store.tileMode === 'google') {
-        store.setTileMode('modis');
-        if (viewer.scene?.globe) viewer.scene.globe.show = true;
-    }
+    if (store.tileMode !== 'modis') store.setTileMode('modis');
+    if (viewer.scene?.globe) viewer.scene.globe.show = true;
 }
 
 function sourceLabel(source: string): string {
@@ -180,7 +189,6 @@ function showGibsImageryLayer(viewer: Cesium.Viewer, payload: Record<string, any
     const opacity = Number(payload.opacity ?? payload.alpha ?? 0.65);
 
     if (!viewer.imageryLayers?.addImageryProvider) {
-        useTimelineStore.getState().setTileMode('modis');
         return;
     }
 
@@ -239,7 +247,6 @@ export function showOpenSpyImageryLayer(viewer: Cesium.Viewer, payload: Record<s
     const source = String(payload.source || payload.provider || scene?.source || 'nasa_gibs').toLowerCase();
     const shouldReplace = payload.replace !== false && payload.mode !== 'compare';
     if (shouldReplace) clearOpenSpyImageryLayers(viewer);
-    setImageryLayerVisible(viewer);
     if (/copernicus|sentinel/.test(source)) {
         showCopernicusImageryLayer(viewer, payload);
     } else if (/(gibs|nasa|worldview)/.test(source)) {
@@ -247,6 +254,7 @@ export function showOpenSpyImageryLayer(viewer: Cesium.Viewer, payload: Record<s
     } else {
         throw new Error(`Unsupported imagery source: ${source}`);
     }
+    applyImageryDisplayOptions(viewer, payload);
     useTimelineStore.getState().setActiveImageryOverlay(buildImageryContext(payload, source));
     viewer.scene.requestRender();
 }
@@ -254,7 +262,8 @@ export function showOpenSpyImageryLayer(viewer: Cesium.Viewer, payload: Record<s
 export function showOpenSpyImageryCompare(viewer: Cesium.Viewer, payload: Record<string, any>): void {
     const before = payload.before && typeof payload.before === 'object' ? payload.before : null;
     const after = payload.after && typeof payload.after === 'object' ? payload.after : null;
-    if (before) showOpenSpyImageryLayer(viewer, { ...before, replace: true, opacity: before.opacity ?? 0.45 });
-    if (after) showOpenSpyImageryLayer(viewer, { ...after, replace: false, mode: 'compare', opacity: after.opacity ?? payload.opacity ?? 0.65 });
+    const switchBase = imageryPayloadSwitchesBase(payload) ? { switchBase: true } : {};
+    if (before) showOpenSpyImageryLayer(viewer, { ...before, ...switchBase, replace: true, opacity: before.opacity ?? 0.45 });
+    if (after) showOpenSpyImageryLayer(viewer, { ...after, ...switchBase, replace: false, mode: 'compare', opacity: after.opacity ?? payload.opacity ?? 0.65 });
     if (!before && !after) showOpenSpyImageryLayer(viewer, { ...payload, mode: 'compare' });
 }

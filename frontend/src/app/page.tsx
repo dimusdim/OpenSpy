@@ -30,9 +30,14 @@ export default function Home() {
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [imageryOpen, setImageryOpen] = useState(false);
   const [settingsHydrated, setSettingsHydrated] = useState(false);
+  const [uiMounted, setUiMounted] = useState(false);
 
   // Status polling — always-on, independent of which panels are open
   useStatusPoller();
+
+  useEffect(() => {
+    setUiMounted(true);
+  }, []);
 
   // Load persisted settings from server on mount
   useEffect(() => {
@@ -111,42 +116,48 @@ export default function Home() {
         ) : (
             <>
                 {/* Left column: hierarchical legend (self-positioned top-left) */}
-                <Legend />
+                {uiMounted ? <Legend /> : null}
 
                 {/* Right column: controls stacked vertically, no overlap */}
-                <div className="absolute top-4 right-4 z-10 flex flex-col gap-2 max-h-[calc(100vh-100px)] w-80">
-                    <SystemStorageStatus />
-                    <RenderPerfStatus />
-                    <SearchBar />
-                    <TileModeToggle />
-                    <ImageryToggle onClick={() => setImageryOpen(true)} />
-                    <ImageryContextBadge />
-                    <AIImageToggle />
-                    <AgentToggle onClick={() => setAgentsOpen(true)} />
-                    <button
-                        onClick={() => setSettingsOpen(true)}
-                        className="flex items-center gap-2 px-3 py-2 bg-black/70 backdrop-blur-xl border border-zinc-800 rounded-lg text-zinc-400 hover:text-white hover:border-zinc-700 transition-colors text-xs font-mono"
-                        title="Settings"
-                    >
-                        <Settings size={14} />
-                        <span>Settings</span>
-                    </button>
-                    <TrackReplay />
-                </div>
+                {uiMounted ? (
+                    <div className="absolute top-4 right-4 z-10 flex flex-col gap-2 max-h-[calc(100vh-100px)] w-80">
+                        <SystemStorageStatus />
+                        <RenderPerfStatus />
+                        <SearchBar />
+                        <TileModeToggle />
+                        <ImageryToggle onClick={() => setImageryOpen(true)} />
+                        <ImageryContextBadge />
+                        <AIImageToggle />
+                        <AgentToggle onClick={() => setAgentsOpen(true)} />
+                        <button
+                            onClick={() => setSettingsOpen(true)}
+                            className="flex items-center gap-2 px-3 py-2 bg-black/70 backdrop-blur-xl border border-zinc-800 rounded-lg text-zinc-400 hover:text-white hover:border-zinc-700 transition-colors text-xs font-mono"
+                            title="Settings"
+                        >
+                            <Settings size={14} />
+                            <span>Settings</span>
+                        </button>
+                        <TrackReplay />
+                    </div>
+                ) : null}
 
                 {/* Bottom bar */}
-                <TimelinePlayer />
+                {uiMounted ? <TimelinePlayer /> : null}
 
                 {/* Bottom-left: camera altitude + infra loading */}
-                <CameraHUD />
+                {uiMounted ? <CameraHUD /> : null}
 
                 {/* Overlay: entity info panel */}
-                <EntityHUD avoidRightPx={agentsOpen ? 472 : 0} />
+                {uiMounted ? <EntityHUD avoidRightPx={agentsOpen ? 472 : 0} /> : null}
 
                 {/* Settings modal */}
-                <ImageryPanel isOpen={imageryOpen} onClose={() => setImageryOpen(false)} />
-                <SettingsPanel isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
-                <AgentPanel isOpen={agentsOpen} onClose={() => setAgentsOpen(false)} />
+                {uiMounted ? (
+                    <>
+                        <ImageryPanel isOpen={imageryOpen} onClose={() => setImageryOpen(false)} />
+                        <SettingsPanel isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
+                        <AgentPanel isOpen={agentsOpen} onClose={() => setAgentsOpen(false)} />
+                    </>
+                ) : null}
             </>
         )}
     </main>

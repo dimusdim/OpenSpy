@@ -17,7 +17,7 @@ function normalizeOtlpEndpoint(base: string, signalPath: 'traces' | 'metrics'): 
     return `${trimmed}/v1/${signalPath}`;
 }
 
-const telemetryEnabled = envFlag(process.env.OTEL_ENABLED) || Boolean(process.env.OTEL_EXPORTER_OTLP_ENDPOINT);
+const telemetryEnabled = envFlag(process.env.OTEL_ENABLED);
 const serviceName = process.env.OTEL_SERVICE_NAME || process.env.DB_APP_NAME || 'openspy-backend';
 const serviceVersion = process.env.npm_package_version || '1.0.0';
 

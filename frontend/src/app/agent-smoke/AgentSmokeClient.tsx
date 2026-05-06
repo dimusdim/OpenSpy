@@ -20,6 +20,7 @@ export default function AgentSmokeClient() {
                 selectedEntityId: state.selectedEntityId,
                 selectedEntityData: state.selectedEntityData,
                 activeImageryOverlay: state.activeImageryOverlay,
+                appliedSelections: state.appliedSelections,
             };
         };
 

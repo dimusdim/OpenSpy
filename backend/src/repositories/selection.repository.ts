@@ -73,6 +73,22 @@ function normalizeSelectionPredicate(value: Record<string, any> | undefined): Re
         predicate.bbox_order = normalizedOrder || 'west,south,east,north';
         delete predicate.bboxOrder;
     }
+    if (predicate.observedFrom !== undefined && predicate.observed_from === undefined) {
+        predicate.observed_from = predicate.observedFrom;
+        delete predicate.observedFrom;
+    }
+    if (predicate.observedTo !== undefined && predicate.observed_to === undefined) {
+        predicate.observed_to = predicate.observedTo;
+        delete predicate.observedTo;
+    }
+    if (predicate.observedAt !== undefined && predicate.at === undefined && predicate.observed_at === undefined) {
+        predicate.at = predicate.observedAt;
+        delete predicate.observedAt;
+    }
+    if (predicate.layerId !== undefined && predicate.layer_id === undefined) {
+        predicate.layer_id = predicate.layerId;
+        delete predicate.layerId;
+    }
     return predicate;
 }
 
@@ -300,12 +316,30 @@ export class SelectionRepository {
     async listSelectionItems(
         selectionId: string,
         workspaceId: string = DEFAULT_WORKSPACE_ID,
-        limit = 500,
+        limit: number | null = 500,
         offset = 0,
     ): Promise<{ items: SelectionItemPayload[]; has_more: boolean; next_offset: number | null }> {
         if (!this.database.isReady()) return { items: [], has_more: false, next_offset: null };
-        const cappedLimit = Math.max(1, Math.min(5000, Math.trunc(limit)));
         const cappedOffset = Math.max(0, Math.trunc(offset));
+        if (limit === null) {
+            const result = await this.database.query<SelectionItemPayload>(
+                `
+                    SELECT selection_id, workspace_id, layer_id, object_kind, object_id,
+                           observed_at, display_lat, display_lng, properties
+                    FROM app.selection_items
+                    WHERE selection_id = $1 AND workspace_id = $2
+                    ORDER BY observed_at DESC NULLS LAST, object_kind, object_id
+                    OFFSET $3
+                `,
+                [selectionId, workspaceId, cappedOffset],
+            );
+            return {
+                items: result?.rows || [],
+                has_more: false,
+                next_offset: null,
+            };
+        }
+        const pageLimit = Math.max(1, Math.trunc(limit));
         const result = await this.database.query<SelectionItemPayload>(
             `
                 SELECT selection_id, workspace_id, layer_id, object_kind, object_id,
@@ -315,15 +349,15 @@ export class SelectionRepository {
                 ORDER BY observed_at DESC NULLS LAST, object_kind, object_id
                 LIMIT $3 OFFSET $4
             `,
-            [selectionId, workspaceId, cappedLimit + 1, cappedOffset],
+            [selectionId, workspaceId, pageLimit + 1, cappedOffset],
         );
         const rows = result?.rows || [];
-        const items = rows.slice(0, cappedLimit);
-        const hasMore = rows.length > cappedLimit;
+        const items = rows.slice(0, pageLimit);
+        const hasMore = rows.length > pageLimit;
         return {
             items,
             has_more: hasMore,
-            next_offset: hasMore ? cappedOffset + cappedLimit : null,
+            next_offset: hasMore ? cappedOffset + pageLimit : null,
         };
     }
 }
