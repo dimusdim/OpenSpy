@@ -204,7 +204,10 @@ export default function TimelinePlayer() {
     }));
 
     return (
-        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 w-[720px] bg-black/80 backdrop-blur-xl border border-zinc-800 rounded-2xl shadow-2xl z-10 flex flex-col overflow-hidden">
+        <div
+            data-timeline-player="true"
+            className="absolute bottom-6 left-1/2 -translate-x-1/2 w-[720px] bg-black/80 backdrop-blur-xl border border-zinc-800 rounded-2xl shadow-2xl z-10 flex flex-col overflow-hidden"
+        >
             <div className="flex items-center justify-between px-4 pt-3">
                 <div className="text-[10px] font-mono uppercase tracking-[0.2em] text-zinc-500">
                     Replay Range

@@ -29,60 +29,68 @@ export default function Home() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [imageryOpen, setImageryOpen] = useState(false);
+  const [settingsHydrated, setSettingsHydrated] = useState(false);
 
   // Status polling — always-on, independent of which panels are open
   useStatusPoller();
 
   // Load persisted settings from server on mount
   useEffect(() => {
+    let cancelled = false;
+    const fallback = window.setTimeout(() => {
+      if (!cancelled) setSettingsHydrated(true);
+    }, 3000);
     fetch(`${API_URL}/api/settings`)
       .then(r => r.json())
       .then(saved => {
+        if (cancelled) return;
         if (!saved || typeof saved !== 'object') return;
         const store = useTimelineStore.getState();
+        const patch: Partial<ReturnType<typeof useTimelineStore.getState>> = {};
         if (saved.sources) {
-          useTimelineStore.setState({
-            sources: { ...store.sources, ...saved.sources },
-          });
+          patch.sources = { ...store.sources, ...saved.sources };
         }
         if (saved.visibility) {
-          useTimelineStore.setState({
-            visibility: { ...store.visibility, ...saved.visibility },
-          });
+          patch.visibility = { ...store.visibility, ...saved.visibility };
         }
         if (saved.subtypeVisibility) {
-          useTimelineStore.setState({
-            subtypeVisibility: { ...store.subtypeVisibility, ...saved.subtypeVisibility },
-          });
+          patch.subtypeVisibility = { ...store.subtypeVisibility, ...saved.subtypeVisibility };
         }
         if (saved.sourceVisibility) {
-          useTimelineStore.setState({
-            sourceVisibility: { ...store.sourceVisibility, ...saved.sourceVisibility },
-          });
+          patch.sourceVisibility = { ...store.sourceVisibility, ...saved.sourceVisibility };
         }
         if (saved.tileMode) {
-          useTimelineStore.setState({ tileMode: saved.tileMode });
+          patch.tileMode = saved.tileMode;
         }
         if (typeof saved.showTrajectories === 'boolean') {
-          useTimelineStore.setState({ showTrajectories: saved.showTrajectories });
+          patch.showTrajectories = saved.showTrajectories;
         }
         if (typeof saved.clusteringEnabled === 'boolean') {
-          useTimelineStore.setState({ clusteringEnabled: saved.clusteringEnabled });
+          patch.clusteringEnabled = saved.clusteringEnabled;
         }
         if (
           saved.satelliteRenderLimit === null ||
           (typeof saved.satelliteRenderLimit === 'number' && Number.isInteger(saved.satelliteRenderLimit) && saved.satelliteRenderLimit >= 0)
         ) {
-          useTimelineStore.setState({ satelliteRenderLimit: saved.satelliteRenderLimit ?? null });
+          patch.satelliteRenderLimit = saved.satelliteRenderLimit ?? null;
         }
         if (typeof saved.activePreset === 'string' || saved.activePreset === null) {
-          useTimelineStore.setState({ activePreset: saved.activePreset ?? null });
+          patch.activePreset = saved.activePreset ?? null;
         }
         if (saved.activeIconSet === 'default' || saved.activeIconSet === 'enhanced') {
-          useTimelineStore.setState({ activeIconSet: saved.activeIconSet });
+          patch.activeIconSet = saved.activeIconSet;
         }
+        if (Object.keys(patch).length > 0) useTimelineStore.setState(patch as any);
       })
-      .catch(() => { /* no saved settings, use defaults */ });
+      .catch(() => { /* no saved settings, use defaults */ })
+      .finally(() => {
+        window.clearTimeout(fallback);
+        if (!cancelled) setSettingsHydrated(true);
+      });
+    return () => {
+      cancelled = true;
+      window.clearTimeout(fallback);
+    };
   }, []);
 
   useEffect(() => {
@@ -95,7 +103,7 @@ export default function Home() {
 
   return (
     <main className="relative w-screen h-screen overflow-hidden bg-zinc-950 text-white selection:bg-cyan-500 selection:text-black">
-        <GlobeDynamic />
+        {settingsHydrated ? <GlobeDynamic /> : null}
 
         {aiActive ? (
             /* AI Vision mode — only the panel, globe stays interactive */

@@ -6,7 +6,9 @@ import remarkGfm from 'remark-gfm';
 import * as Cesium from 'cesium';
 import {
     Bot,
+    ChevronDown,
     Database,
+    History,
     Loader2,
     MapPin,
     MessageSquare,
@@ -36,6 +38,8 @@ type AgentSession = {
     provider_session_id: string | null;
     status: string;
     metadata?: Record<string, any>;
+    first_user_prompt?: string | null;
+    last_user_prompt?: string | null;
     created_at: string;
     updated_at: string;
 };
@@ -178,6 +182,103 @@ function normalizeMessages(rows: any[]): AgentMessage[] {
         created_at: row.created_at,
         metadata: row.metadata || {},
     }));
+}
+
+function dedupeSessions(rows: AgentSession[]): AgentSession[] {
+    const byId = new Map<string, AgentSession>();
+    const order: string[] = [];
+    for (const row of rows) {
+        const id = String(row?.agent_session_id || '');
+        if (!id) continue;
+        if (!byId.has(id)) order.push(id);
+        const previous = byId.get(id);
+        byId.set(id, previous ? {
+            ...previous,
+            ...row,
+            metadata: {
+                ...(previous.metadata || {}),
+                ...(row.metadata || {}),
+            },
+            agent_session_id: id,
+        } : { ...row, agent_session_id: id });
+    }
+    return order.map((id) => byId.get(id)).filter(Boolean) as AgentSession[];
+}
+
+function dedupeMessages(rows: AgentMessage[]): AgentMessage[] {
+    const byId = new Map<string, AgentMessage>();
+    const order: string[] = [];
+    for (const row of rows) {
+        const id = String(row?.agent_message_id || '');
+        if (!id) continue;
+        if (!byId.has(id)) order.push(id);
+        const previous = byId.get(id);
+        byId.set(id, previous ? {
+            ...previous,
+            ...row,
+            content: row.content || previous.content,
+            content_json: row.content_json || previous.content_json || null,
+            metadata: {
+                ...(previous.metadata || {}),
+                ...(row.metadata || {}),
+            },
+        } : { ...row, agent_message_id: id });
+    }
+    return order.map((id) => byId.get(id)).filter(Boolean) as AgentMessage[];
+}
+
+function compactSingleLine(value: unknown): string {
+    const compact = String(value || '').replace(/\s+/g, ' ').trim();
+    return compact;
+}
+
+function singleLinePreview(value: unknown, maxChars = 72): string {
+    const compact = compactSingleLine(value);
+    if (!compact) return '';
+    return compact.length > maxChars ? `${compact.slice(0, maxChars - 1)}...` : compact;
+}
+
+function isDateLikeSessionLabel(value: unknown): boolean {
+    const compact = compactSingleLine(value);
+    if (!compact) return false;
+    if (Number.isFinite(Date.parse(compact))) return true;
+    return /^[\d\s:.,/+\-TZ]+$/i.test(compact);
+}
+
+function meaningfulSessionSnippet(value: unknown, maxChars = 72): string {
+    const compact = compactSingleLine(value);
+    if (!compact || isDateLikeSessionLabel(compact)) return '';
+    return singleLinePreview(compact, maxChars);
+}
+
+function firstLoadedUserPrompt(messages: AgentMessage[]): string {
+    return messages.find((message) => message.role === 'user' && meaningfulSessionSnippet(message.content))?.content || '';
+}
+
+function sessionPromptTitle(session: AgentSession, messages: AgentMessage[] = []): string {
+    const fromMetadata = typeof session.metadata?.title === 'string' ? session.metadata.title : '';
+    return meaningfulSessionSnippet(session.first_user_prompt)
+        || meaningfulSessionSnippet(firstLoadedUserPrompt(messages))
+        || meaningfulSessionSnippet(session.last_user_prompt)
+        || meaningfulSessionSnippet(fromMetadata)
+        || 'New chat';
+}
+
+function formatSessionDate(value: string): string {
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return '';
+    const now = new Date();
+    const options: Intl.DateTimeFormatOptions = date.getFullYear() === now.getFullYear()
+        ? { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }
+        : { month: 'short', day: 'numeric', year: 'numeric' };
+    return new Intl.DateTimeFormat(undefined, options).format(date);
+}
+
+function sessionSecondaryLabel(session: AgentSession, providers: ProviderInfo[]): string {
+    return [
+        providerLabel(session.provider, providers),
+        formatSessionDate(session.updated_at || session.created_at),
+    ].filter(Boolean).join(' - ');
 }
 
 function getActionIcon(type: string) {
@@ -613,7 +714,12 @@ function paramsToPayload(params: URLSearchParams, skip: Set<string> = new Set())
     const payload: Record<string, any> = {};
     params.forEach((value, key) => {
         if (skip.has(key)) return;
-        if (/^(lat|lng|lon|height|speed|alt|heading|heading_deg|speed_mps|opacity)$/i.test(key)) {
+        if (/^(bbox|bounds|center|coordinates)$/i.test(key)) {
+            const values = value.split(',').map((part) => Number(part.trim()));
+            payload[key] = values.length > 0 && values.every((part) => Number.isFinite(part)) ? values : value;
+            return;
+        }
+        if (/^(lat|lng|lon|height|height_m|speed|alt|heading|heading_deg|speed_mps|opacity|alpha|maxCloudCover|max_cloud_cover|width|height_px)$/i.test(key)) {
             const numeric = Number(value);
             payload[key] = Number.isFinite(numeric) ? numeric : value;
             return;
@@ -689,18 +795,36 @@ function parseOpenSpyLink(href: string, fallbackLabel?: string): AgentAction | n
     }
 
     if (target === 'selection') {
-        if (!payload.selection_id && !payload.selectionId) throw new Error('ospy://selection requires selection_id');
+        const type = params.get('type') || 'selection.apply';
+        if (type !== 'selection.clear' && !payload.selection_id && !payload.selectionId) {
+            throw new Error('ospy://selection requires selection_id');
+        }
+        if (!payload.layer && !payload.layer_id) throw new Error('ospy://selection requires layer');
+        const selectionId = payload.selection_id || payload.selectionId;
+        const layer = payload.layer || payload.layer_id;
         return {
-            type: params.get('type') || 'selection.apply',
-            label: label || 'Apply selection',
-            payload,
+            type,
+            label: label || (type === 'selection.clear' ? 'Clear selection' : 'Apply selection'),
+            payload: {
+                ...payload,
+                selection_id: selectionId,
+                selectionId,
+                layer,
+            },
         };
     }
 
     if (target === 'replay') {
-        const type = payload.from || payload.to ? 'replay.play_window' : 'replay.seek';
+        const explicitType = params.get('type');
+        const type = explicitType || (payload.from || payload.to ? 'replay.play_window' : 'replay.seek');
+        if (type === 'replay.play_window' && !payload.from && !payload.at && !payload.time) {
+            throw new Error('ospy://replay play_window requires from, at, or time');
+        }
+        if (type === 'replay.seek' && !payload.at && !payload.time) {
+            throw new Error('ospy://replay seek requires at or time');
+        }
         return {
-            type: params.get('type') || type,
+            type,
             label: label || (type === 'replay.seek' ? 'Seek replay' : 'Play replay'),
             payload,
         };
@@ -718,9 +842,14 @@ function parseOpenSpyLink(href: string, fallbackLabel?: string): AgentAction | n
     }
 
     if (target === 'map' || target === 'camera') {
+        const explicitType = params.get('type');
+        const hasLat = payload.lat !== undefined || payload.latitude !== undefined;
+        const hasLng = payload.lng !== undefined || payload.lon !== undefined || payload.longitude !== undefined;
+        const hasPoint = (hasLat && hasLng) || payload.center !== undefined;
+        const type = explicitType || (!hasPoint && payload.bbox ? 'map.add_aoi' : 'map.fly_to');
         return {
-            type: params.get('type') || 'map.fly_to',
-            label: label || 'Move map',
+            type,
+            label: label || (type === 'map.add_aoi' ? 'Show area' : 'Move map'),
             payload,
         };
     }
@@ -738,15 +867,20 @@ function parseOpenSpyLink(href: string, fallbackLabel?: string): AgentAction | n
     throw new Error(`Unsupported OpenSpy link target: ${target}`);
 }
 
-function inspectOpenSpyLink(href: string, fallbackLabel?: string): { target: string; actionType: string } {
-    if (!href || !href.startsWith('ospy://')) return { target: '', actionType: '' };
+function inspectOpenSpyLink(href: string, fallbackLabel?: string): { target: string; actionType: string; valid: boolean; error?: string } {
+    if (!href || !href.startsWith('ospy://')) return { target: '', actionType: '', valid: false };
     try {
         const url = new URL(href);
         const target = (url.hostname || url.pathname.replace(/^\/+/, '')).toLowerCase();
         const action = parseOpenSpyLink(href, fallbackLabel);
-        return { target, actionType: action?.type || '' };
-    } catch {
-        return { target: '', actionType: '' };
+        return { target, actionType: action?.type || '', valid: Boolean(target && action?.type) };
+    } catch (err) {
+        return {
+            target: '',
+            actionType: '',
+            valid: false,
+            error: err instanceof Error ? err.message : 'Invalid OpenSpy link',
+        };
     }
 }
 
@@ -794,6 +928,18 @@ function MarkdownBlock({
                     if (linkHref.startsWith('ospy://')) {
                         const label = childrenText(children);
                         const linkInfo = inspectOpenSpyLink(linkHref, label);
+                        if (!linkInfo.valid) {
+                            return (
+                                <span
+                                    title={linkInfo.error || 'Invalid OpenSpy link'}
+                                    data-ospy-invalid="true"
+                                    data-ospy-link={linkHref}
+                                    className="inline-flex max-w-full items-baseline rounded border border-red-900/70 bg-red-950/20 px-1 py-0.5 align-baseline font-mono text-[11px] leading-none text-red-200"
+                                >
+                                    {children}
+                                </span>
+                            );
+                        }
                         return (
                             <button
                                 type="button"
@@ -826,10 +972,25 @@ function MarkdownBlock({
     );
 }
 
+function isMessageCurrentlyStreaming(message: AgentMessage, runningRunId: string | null): boolean {
+    if (!runningRunId) return false;
+    const metadataRunId = typeof message.metadata?.run_id === 'string' ? message.metadata.run_id : '';
+    return message.agent_message_id === `run:${runningRunId}` || metadataRunId === runningRunId;
+}
+
 function displayPartsForMessage(message: AgentMessage, runningRunId: string | null): AgentStreamPart[] {
     const parts = streamPartsFromMetadata(message.metadata);
     if (parts.length === 0) return [];
+    if (!isMessageCurrentlyStreaming(message, runningRunId) && cleanVisibleText(message.content)) {
+        return parts.filter((part) => part.type !== 'text');
+    }
     return parts;
+}
+
+function shouldRenderFinalContent(message: AgentMessage, streamParts: AgentStreamPart[], runningRunId: string | null): boolean {
+    if (!message.content) return false;
+    if (streamParts.length === 0) return true;
+    return !isMessageCurrentlyStreaming(message, runningRunId);
 }
 
 function groupStreamParts(parts: AgentStreamPart[]): Array<{ type: 'text'; part: AgentStreamPart } | { type: 'tools'; parts: AgentStreamPart[] }> {
@@ -1177,12 +1338,46 @@ function toBoolean(value: any): boolean {
     return ['1', 'true', 'yes', 'on', 'enabled'].includes(String(value || '').toLowerCase());
 }
 
+function explicitBoolean(value: any): boolean | null {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+        if (['1', 'true', 'yes', 'on', 'enabled'].includes(normalized)) return true;
+        if (['0', 'false', 'no', 'off', 'disabled'].includes(normalized)) return false;
+    }
+    return null;
+}
+
 function normalizeFlagPatch(value: any): Record<string, boolean> {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
     const patch: Record<string, boolean> = {};
     for (const [rawKey, rawValue] of Object.entries(value)) {
         const key = normalizeLayerKey(rawKey);
         if (key) patch[key] = toBoolean(rawValue);
+    }
+    return patch;
+}
+
+function normalizeAppliedSelectionsPatch(value: any, current: Record<string, any> = {}): Record<string, any> {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+    const patch: Record<string, any> = {};
+    for (const [rawLayer, rawSelection] of Object.entries(value)) {
+        if (!rawSelection || typeof rawSelection !== 'object' || Array.isArray(rawSelection)) continue;
+        const selection = rawSelection as Record<string, any>;
+        const layer = normalizeCatalogLayerId(rawLayer) || String(rawLayer || '').trim();
+        const selectionId = String(selection.selectionId || selection.selection_id || '').trim();
+        if (!layer || !selectionId) continue;
+        const mode = ['replace', 'append', 'exclude', 'only'].includes(String(selection.mode))
+            ? String(selection.mode)
+            : 'only';
+        const existing = current[layer];
+        patch[layer] = {
+            ...(existing?.selectionId === selectionId ? existing : {}),
+            selectionId,
+            mode,
+            layer,
+            updatedAt: selection.updatedAt || selection.updated_at || existing?.updatedAt,
+        };
     }
     return patch;
 }
@@ -1203,6 +1398,12 @@ function applyViewStateToStore(viewState: any): void {
     if (viewState.sourceVisibility && typeof viewState.sourceVisibility === 'object') {
         patch.sourceVisibility = { ...current.sourceVisibility, ...viewState.sourceVisibility };
     }
+    if (viewState.appliedSelections && typeof viewState.appliedSelections === 'object') {
+        patch.appliedSelections = {
+            ...(current.appliedSelections || {}),
+            ...normalizeAppliedSelectionsPatch(viewState.appliedSelections, current.appliedSelections || {}),
+        };
+    }
     if (typeof viewState.showTrajectories === 'boolean') patch.showTrajectories = viewState.showTrajectories;
     if (typeof viewState.clusteringEnabled === 'boolean') patch.clusteringEnabled = viewState.clusteringEnabled;
     if (typeof viewState.activePreset === 'string' || viewState.activePreset === null) patch.activePreset = viewState.activePreset;
@@ -1222,17 +1423,38 @@ function buildLayerPatch(payload: Record<string, any>): Record<string, any> {
 
     const items = Array.isArray(payload.layers) ? payload.layers : [];
     for (const item of items) {
-        if (!item || typeof item !== 'object') continue;
+        if (!item) continue;
+        if (typeof item === 'string') {
+            const layerKey = normalizeLayerKey(item);
+            if (layerKey) patch.visibility = { ...(patch.visibility || {}), [layerKey]: true };
+            continue;
+        }
+        if (typeof item !== 'object') continue;
         const layerKey = normalizeLayerKey(item.layer || item.layer_id || item.id);
         if (!layerKey) continue;
         const target = item.target === 'sources' || item.source === true ? 'sources' : 'visibility';
-        patch[target] = { ...(patch[target] || {}), [layerKey]: toBoolean(item.enabled) };
+        const nextValue = explicitBoolean(item.enabled ?? item.visible ?? item.value) ?? true;
+        patch[target] = { ...(patch[target] || {}), [layerKey]: nextValue };
+    }
+
+    if (Array.isArray(payload.visible)) {
+        for (const item of payload.visible) {
+            const layerKey = normalizeLayerKey(item);
+            if (layerKey) patch.visibility = { ...(patch.visibility || {}), [layerKey]: true };
+        }
+    }
+    if (Array.isArray(payload.hidden)) {
+        for (const item of payload.hidden) {
+            const layerKey = normalizeLayerKey(item);
+            if (layerKey) patch.visibility = { ...(patch.visibility || {}), [layerKey]: false };
+        }
     }
 
     const singleLayer = normalizeLayerKey(payload.layer || payload.layer_id);
     if (singleLayer) {
         const target = payload.target === 'sources' || payload.source === true ? 'sources' : 'visibility';
-        patch[target] = { ...(patch[target] || {}), [singleLayer]: toBoolean(payload.enabled ?? true) };
+        const nextValue = explicitBoolean(payload.enabled ?? payload.visible ?? payload.value) ?? true;
+        patch[target] = { ...(patch[target] || {}), [singleLayer]: nextValue };
     }
 
     if (payload.subtypeVisibility && typeof payload.subtypeVisibility === 'object') {
@@ -1421,14 +1643,14 @@ async function resolveEntityPoint(payload: Record<string, any>, entityId: string
     const date = at ? new Date(at) : null;
     if (!date || Number.isNaN(date.getTime())) return null;
     const windowMinutes = Number(payload.lookup_window_minutes ?? payload.lookupWindowMinutes ?? 30);
-    const boundedWindowMinutes = Number.isFinite(windowMinutes) ? Math.max(1, Math.min(windowMinutes, 240)) : 30;
+    const boundedWindowMinutes = Number.isFinite(windowMinutes) ? Math.max(1, Math.trunc(windowMinutes)) : 30;
     const from = new Date(date.getTime() - boundedWindowMinutes * 60_000).toISOString();
     const to = new Date(date.getTime() + boundedWindowMinutes * 60_000).toISOString();
     const points = await fetchTrackPoints({
         entity_id: entityId,
         from,
         to,
-        limit: payload.lookup_limit || 120,
+        limit: payload.lookup_limit ?? payload.lookupLimit ?? 120,
         stepSeconds: payload.stepSeconds || payload.step_seconds,
     });
     return nearestTrackPoint(points, at);
@@ -1499,13 +1721,27 @@ function drawPointOrLabel(
     const lat = Number(payload.lat ?? payload.latitude);
     const lng = Number(payload.lng ?? payload.lon ?? payload.longitude);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) throw new Error('Point action requires lat and lng');
-    const id = String(payload.entity_id || payload.entityId || payload.id || `${AGENT_ENTITY_PREFIX}annotation-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    const id = String(
+        payload.entity_id
+        || payload.entityId
+        || payload.object_id
+        || payload.objectId
+        || payload.asset_id
+        || payload.assetId
+        || payload.event_id
+        || payload.eventId
+        || payload.id
+        || `${AGENT_ENTITY_PREFIX}annotation-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    );
     const height = Number(payload.height ?? payload.alt ?? payload.altitude ?? 0);
     const existing = viewer.entities.getById(id);
     if (existing) viewer.entities.remove(existing);
     viewer.entities.add({
         id,
         position: Cesium.Cartesian3.fromDegrees(lng, lat, Number.isFinite(height) ? height : 0),
+        properties: {
+            layer: typeForLayer(payload.layer || payload.layer_id),
+        },
         point: {
             pixelSize: Number(payload.pixelSize || 12),
             color: color.withAlpha(0.9),
@@ -1675,6 +1911,16 @@ function writeRunCursor(runId: string, sequence: number): void {
 let historicalPlaybackRequestId = 0;
 let pendingHistoricalPlaybackStart = false;
 let historicalPlaybackResumeTimer: number | null = null;
+let replayWindowEndGuardId = 0;
+let replayWindowEndGuardTimer: number | null = null;
+
+function cancelReplayWindowEndGuard(): void {
+    replayWindowEndGuardId += 1;
+    if (replayWindowEndGuardTimer) {
+        window.clearTimeout(replayWindowEndGuardTimer);
+        replayWindowEndGuardTimer = null;
+    }
+}
 
 function cancelPendingHistoricalPlayback(): void {
     historicalPlaybackRequestId += 1;
@@ -1737,10 +1983,56 @@ function startHistoricalPlaybackWhenReady(timeoutMs = 900_000, stableMs = 500): 
 }
 
 function pauseHistoricalPlayback(action: 'pause' | 'stop' = 'pause'): void {
+    cancelReplayWindowEndGuard();
     cancelPendingHistoricalPlayback();
     const state = useTimelineStore.getState();
     state.setIsPlaying(false);
     document.dispatchEvent(new CustomEvent('timeline-ctrl', { detail: { action } }));
+}
+
+function armReplayWindowEndGuard(to: Date, speed: number): void {
+    cancelReplayWindowEndGuard();
+    const endMs = to.getTime();
+    if (!Number.isFinite(endMs)) return;
+    const requestId = ++replayWindowEndGuardId;
+    const effectiveSpeed = Math.max(Math.abs(Number.isFinite(speed) ? speed : 1), 1);
+
+    const pauseAtWindowEnd = () => {
+        if (requestId !== replayWindowEndGuardId) return;
+        replayWindowEndGuardTimer = null;
+        const state = useTimelineStore.getState();
+        state.setCurrentTime(to, {
+            silent: true,
+            reason: 'playback-clamp',
+        });
+        state.setIsPlaying(false);
+        document.dispatchEvent(new CustomEvent('timeline-ctrl', {
+            detail: { action: 'pause', reason: 'replay-window-end', time: to.toISOString() },
+        }));
+    };
+
+    const tick = () => {
+        if (requestId !== replayWindowEndGuardId) return;
+        const state = useTimelineStore.getState();
+        if (state.mode !== 'playback' || state.playbackKind !== 'historical') {
+            cancelReplayWindowEndGuard();
+            return;
+        }
+        if (!state.isPlaying) {
+            replayWindowEndGuardTimer = window.setTimeout(tick, 250);
+            return;
+        }
+        const currentMs = state.currentTime.getTime();
+        if (Number.isFinite(currentMs) && currentMs >= endMs) {
+            pauseAtWindowEnd();
+            return;
+        }
+        const remainingReplayMs = Number.isFinite(currentMs) ? Math.max(endMs - currentMs, 0) : 1000;
+        const nextDelay = Math.max(250, Math.min(2000, Math.ceil(remainingReplayMs / effectiveSpeed / 4)));
+        replayWindowEndGuardTimer = window.setTimeout(tick, nextDelay);
+    };
+
+    replayWindowEndGuardTimer = window.setTimeout(tick, 250);
 }
 
 function publishPresentationState(detail: Record<string, any>): void {
@@ -1764,16 +2056,146 @@ function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+function fingerprintSelectionIds(ids: string[]): string {
+    let hash = 2166136261;
+    for (const id of ids) {
+        for (let i = 0; i < id.length; i += 1) {
+            hash ^= id.charCodeAt(i);
+            hash = Math.imul(hash, 16777619);
+        }
+        hash ^= 31;
+        hash = Math.imul(hash, 16777619);
+    }
+    return `${ids.length}:${(hash >>> 0).toString(36)}`;
+}
+
+function markHistoricalReplayHydrating(): void {
+    const state = useTimelineStore.getState();
+    if (state.mode === 'playback' && state.playbackKind === 'historical') {
+        state.setReplayHydrating(true);
+    }
+}
+
+function selectionCurrentlyAffectsReplay(selection: any): boolean {
+    if (!selection?.selectionId) return false;
+    const ids = Array.isArray(selection.itemIds) ? selection.itemIds : [];
+    const itemCount = Number(selection.itemCount ?? ids.length);
+    const status = String(selection.materializationStatus || '').toLowerCase();
+    return ids.length > 0
+        || selection.truncated === false
+        || itemCount === 0
+        || status === 'empty'
+        || status === 'materialized';
+}
+
 function presentationDelayForAction(action: AgentAction): number {
     const payload = normalizedActionPayload(action);
     const explicitDelay = Number(payload.presentation_ms ?? payload.presentationMs ?? payload.duration_ms ?? payload.durationMs);
-    if (Number.isFinite(explicitDelay) && explicitDelay >= 0) return Math.min(explicitDelay, 120_000);
+    if (Number.isFinite(explicitDelay) && explicitDelay >= 0) return explicitDelay;
     if (isActionBatch(action)) return 400;
     if (action.type === 'replay.play_window') return 3000;
     if (action.type === 'map.fly_to' || action.type === 'object.open' || action.type === 'object.focus' || action.type === 'entity.open' || action.type === 'asset.open' || action.type === 'event.open') return 1200;
     if (action.type === 'entity.animate_track' || action.type === 'track.animate') return Number(payload.duration_ms ?? payload.durationMs ?? 3500) + 500;
     if (action.type.startsWith('selection.')) return 700;
     return 500;
+}
+
+async function hydrateAppliedSelectionItems(layer: string, selectionId: string, mode: string): Promise<void> {
+    const normalizedLayer = normalizeCatalogLayerId(layer) || String(layer || '').trim();
+    const normalizedSelectionId = String(selectionId || '').trim();
+    if (!normalizedLayer || !normalizedSelectionId) return;
+    const normalizedMode = ['replace', 'append', 'exclude', 'only'].includes(mode) ? mode : 'only';
+    markHistoricalReplayHydrating();
+    useTimelineStore.setState((state: any) => ({
+        appliedSelections: {
+            ...(state.appliedSelections || {}),
+            [normalizedLayer]: {
+                ...((state.appliedSelections || {})[normalizedLayer] || {}),
+                selectionId: normalizedSelectionId,
+                mode: normalizedMode,
+                layer: normalizedLayer,
+                materializationStatus: 'loading',
+                updatedAt: new Date().toISOString(),
+            },
+        },
+    }));
+    const itemIds: string[] = [];
+    let hasMore = true;
+    let materializedCount = 0;
+    let materializationStatus = 'unknown';
+    let finalPageHasMore = false;
+    const pageLimit = 5000;
+    const fetchPage = async (pageOffset: number) => {
+        const params = new URLSearchParams({ limit: String(pageLimit), offset: String(pageOffset) });
+        const response = await fetch(`${API_URL}/api/selections/${encodeURIComponent(normalizedSelectionId)}/items?${params.toString()}`);
+        const json = await response.json().catch(() => null);
+        if (!response.ok || json?.status === 'error') {
+            throw new Error(json?.error?.message || `Failed to hydrate selection ${normalizedSelectionId}`);
+        }
+        return json.data || json;
+    };
+    try {
+        let pageOffset = 0;
+        while (hasMore) {
+            const data = await fetchPage(pageOffset);
+            materializedCount = Number(data.materialized_count || data.materializedCount || materializedCount || 0);
+            materializationStatus = String(data.materialization_status || data.materializationStatus || materializationStatus);
+            for (const item of Array.isArray(data.items) ? data.items : []) {
+                const id = String(item?.object_id || item?.objectId || item?.entity_id || item?.event_id || item?.asset_id || '').trim();
+                if (id) itemIds.push(id);
+            }
+            finalPageHasMore = Boolean(data.pagination?.has_more || data.has_more);
+            hasMore = finalPageHasMore;
+            if (!hasMore) break;
+            const nextOffset = Number(data.pagination?.next_offset ?? pageOffset + pageLimit);
+            if (!Number.isFinite(nextOffset) || nextOffset <= pageOffset) {
+                throw new Error(`Selection ${normalizedSelectionId} pagination did not advance`);
+            }
+            pageOffset = Math.trunc(nextOffset);
+        }
+        hasMore = finalPageHasMore;
+    } catch (err) {
+        console.warn('[AgentPanel] selection hydration failed', err);
+        useTimelineStore.getState().setReplayHydrating(false);
+        useTimelineStore.setState((state: any) => ({
+            appliedSelections: {
+                ...(state.appliedSelections || {}),
+                [normalizedLayer]: {
+                    ...((state.appliedSelections || {})[normalizedLayer] || {}),
+                    selectionId: normalizedSelectionId,
+                    mode: normalizedMode,
+                    layer: normalizedLayer,
+                    materializationStatus: 'error',
+                    updatedAt: new Date().toISOString(),
+                },
+            },
+        }));
+        return;
+    }
+    const uniqueIds = Array.from(new Set(itemIds));
+    const materializationStatusLower = materializationStatus.toLowerCase();
+    const truncated = materializationStatusLower === 'partial'
+        || materializationStatusLower === 'error'
+        || hasMore
+        || (materializedCount > 0 && uniqueIds.length < materializedCount);
+    useTimelineStore.setState((state: any) => ({
+        appliedSelections: {
+            ...(state.appliedSelections || {}),
+            [normalizedLayer]: {
+                ...((state.appliedSelections || {})[normalizedLayer] || {}),
+                selectionId: normalizedSelectionId,
+                mode: normalizedMode,
+                layer: normalizedLayer,
+                itemIds: uniqueIds,
+                itemCount: materializedCount || uniqueIds.length,
+                itemFingerprint: fingerprintSelectionIds(uniqueIds),
+                materializationStatus,
+                truncated,
+                updatedAt: new Date().toISOString(),
+            },
+        },
+    }));
+    useTimelineStore.getState().setReplayHydrating(false);
 }
 
 function normalizedActionPayload(action: AgentAction): Record<string, any> {
@@ -1822,6 +2244,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
     const [sessions, setSessions] = useState<AgentSession[]>([]);
     const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
     const [messagesBySession, setMessagesBySession] = useState<Record<string, AgentMessage[]>>({});
+    const [sessionPickerOpen, setSessionPickerOpen] = useState(false);
     const [draft, setDraft] = useState('');
     const [loading, setLoading] = useState(false);
     const [runningRunsBySession, setRunningRunsBySession] = useState<Record<string, string>>({});
@@ -1834,12 +2257,21 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
     const toolNamesByRunRef = useRef<Map<string, Map<string, { name?: string; providerToolName?: string; command?: string }>>>(new Map());
     const runningRunsRef = useRef<Record<string, string>>({});
     const activeSessionIdRef = useRef<string | null>(null);
+    const sessionPickerRef = useRef<HTMLDivElement | null>(null);
+    const sessionsLoadSeqRef = useRef(0);
+    const visibleSessions = useMemo(() => dedupeSessions(sessions), [sessions]);
 
     const activeSession = useMemo(
-        () => sessions.find((session) => session.agent_session_id === activeSessionId) || null,
-        [activeSessionId, sessions],
+        () => visibleSessions.find((session) => session.agent_session_id === activeSessionId) || null,
+        [activeSessionId, visibleSessions],
     );
-    const messages = activeSessionId ? (messagesBySession[activeSessionId] || []) : [];
+    const activeSessionTitle = activeSession
+        ? sessionPromptTitle(activeSession, messagesBySession[activeSession.agent_session_id] || [])
+        : 'No chat';
+    const messages = useMemo(
+        () => activeSessionId ? dedupeMessages(messagesBySession[activeSessionId] || []) : [],
+        [activeSessionId, messagesBySession],
+    );
     const latestActions = activeSessionId ? (actionsBySession[activeSessionId] || []) : [];
     const messageActionsVisible = messages.some((message) => actionsFromMessage(message).length > 0);
     const runningRunId = activeSessionId ? (runningRunsBySession[activeSessionId] || null) : null;
@@ -1854,6 +2286,30 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
     useEffect(() => {
         activeSessionIdRef.current = activeSessionId;
     }, [activeSessionId]);
+
+    useEffect(() => {
+        setSessionPickerOpen(false);
+    }, [activeSessionId]);
+
+    useEffect(() => {
+        if (!sessionPickerOpen) return;
+        const closeOnOutsideClick = (event: MouseEvent) => {
+            const target = event.target;
+            if (!(target instanceof Node)) return;
+            if (!sessionPickerRef.current?.contains(target)) {
+                setSessionPickerOpen(false);
+            }
+        };
+        const closeOnEscape = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') setSessionPickerOpen(false);
+        };
+        document.addEventListener('mousedown', closeOnOutsideClick);
+        document.addEventListener('keydown', closeOnEscape);
+        return () => {
+            document.removeEventListener('mousedown', closeOnOutsideClick);
+            document.removeEventListener('keydown', closeOnEscape);
+        };
+    }, [sessionPickerOpen]);
 
     useEffect(() => {
         (window as any).__agentPresentationRunningKey = runningPresentationKey;
@@ -1883,17 +2339,23 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
     }, []);
 
     const loadSessions = useCallback(async () => {
+        const requestSeq = ++sessionsLoadSeqRef.current;
         const response = await fetch(`${API_URL}/api/agents/sessions`);
         const json = await response.json();
-        const rows = Array.isArray(json.data) ? json.data : [];
+        const rows = dedupeSessions(Array.isArray(json.data) ? json.data : []);
+        if (requestSeq !== sessionsLoadSeqRef.current) return;
         setSessions(rows);
-        setActiveSessionId((current) => current || rows[0]?.agent_session_id || null);
+        setActiveSessionId((current) => (
+            current
+                ? current
+                : rows[0]?.agent_session_id || null
+        ));
     }, []);
 
     const loadMessages = useCallback(async (sessionId: string) => {
         const response = await fetch(`${API_URL}/api/agents/sessions/${encodeURIComponent(sessionId)}/messages`);
         const json = await response.json();
-        const persisted = normalizeMessages(json.data?.messages || []);
+        const persisted = dedupeMessages(normalizeMessages(json.data?.messages || []));
         const lastPersistedActions = [...persisted]
             .reverse()
             .map((message) => actionsFromMessage(message))
@@ -1907,7 +2369,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         const activeRunId = runningRunsRef.current[sessionId]
             || (typeof json.data?.session?.metadata?.activeRunId === 'string' ? json.data.session.metadata.activeRunId : '');
         setMessagesBySession((current) => {
-            const existing = current[sessionId] || [];
+            const existing = dedupeMessages(current[sessionId] || []);
             const existingById = new Map(existing.map((message) => [message.agent_message_id, message]));
             const activePlaceholder = activeRunId
                 ? existing.find((message) => message.agent_message_id === `run:${activeRunId}`) || {
@@ -1942,7 +2404,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
             }
             return {
                 ...current,
-                [sessionId]: next,
+                [sessionId]: dedupeMessages(next),
             };
         });
     }, []);
@@ -1977,6 +2439,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         setLoading(true);
         setError(null);
         try {
+            sessionsLoadSeqRef.current += 1;
             const response = await fetch(`${API_URL}/api/agents/sessions`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1987,7 +2450,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                 throw new Error(json.error?.message || 'Failed to create agent session');
             }
             const session = json.data as AgentSession;
-            setSessions((current) => [session, ...current]);
+            setSessions((current) => dedupeSessions([session, ...current]));
             setActiveSessionId(session.agent_session_id);
             setMessagesBySession((current) => ({
                 ...current,
@@ -2181,7 +2644,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
 
     useEffect(() => {
         if (!isOpen) return;
-        for (const session of sessions) {
+        for (const session of visibleSessions) {
             const runId = typeof session.metadata?.activeRunId === 'string' ? session.metadata.activeRunId : '';
             if (!runId || eventSourcesRef.current.has(runId)) continue;
             setRunningRunsBySession((current) => ({
@@ -2189,7 +2652,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                 [session.agent_session_id]: runId,
             }));
             setMessagesBySession((current) => {
-                const existing = current[session.agent_session_id] || [];
+                const existing = dedupeMessages(current[session.agent_session_id] || []);
                 if (existing.some((message) => message.agent_message_id === `run:${runId}`)) return current;
                 return {
                     ...current,
@@ -2206,7 +2669,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
             });
             attachRunStream(session.agent_session_id, runId);
         }
-    }, [attachRunStream, isOpen, sessions]);
+    }, [attachRunStream, isOpen, visibleSessions]);
 
     const sendMessage = useCallback(async () => {
         const content = draft.trim();
@@ -2222,14 +2685,14 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         setError(null);
         setMessagesBySession((current) => ({
             ...current,
-            [sessionId]: [
+            [sessionId]: dedupeMessages([
                 ...(current[sessionId] || []),
                 {
-                    agent_message_id: `local:${Date.now()}`,
+                    agent_message_id: `local:${Date.now()}:${Math.random().toString(16).slice(2)}`,
                     role: 'user',
                     content,
                 },
-            ],
+            ]),
         }));
 
         try {
@@ -2250,7 +2713,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
             }));
             setMessagesBySession((current) => ({
                 ...current,
-                [sessionId]: [
+                [sessionId]: dedupeMessages([
                     ...(current[sessionId] || []),
                     {
                         agent_message_id: `run:${runId}`,
@@ -2258,7 +2721,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                         content: '',
                         metadata: { run_id: runId },
                     },
-                ],
+                ]),
             }));
             attachRunStream(sessionId, runId);
         } catch (err) {
@@ -2295,8 +2758,12 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         if (isActionBatch(action)) {
             const nested = nestedActionsFor(action);
             if (nested.length === 0) throw new Error(`${action.type} requires a non-empty actions array`);
-            const maxActions = Number(payload.max_actions ?? payload.maxActions ?? 100);
-            const bounded = nested.slice(0, Number.isFinite(maxActions) && maxActions > 0 ? Math.min(maxActions, 250) : 100);
+            const hasMaxActions = payload.max_actions !== undefined || payload.maxActions !== undefined;
+            const maxActions = hasMaxActions ? Number(payload.max_actions ?? payload.maxActions) : null;
+            if (hasMaxActions && (!Number.isFinite(maxActions) || maxActions! <= 0)) {
+                throw new Error(`${action.type} max_actions must be a positive integer`);
+            }
+            const bounded = hasMaxActions ? nested.slice(0, Math.trunc(maxActions!)) : nested;
             for (const nestedAction of bounded) {
                 await applyAction(nestedAction, sessionId);
                 await sleep(presentationDelayForAction(nestedAction));
@@ -2330,6 +2797,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
             const at = String(payload.at || payload.time || '');
             const date = new Date(at);
             if (Number.isNaN(date.getTime())) throw new Error('replay.seek requires a valid at/time value');
+            cancelReplayWindowEndGuard();
             cancelPendingHistoricalPlayback();
             store.enterHistoricalReplay();
             store.setCurrentTime(date, { reason: 'external' });
@@ -2345,7 +2813,16 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
             const date = new Date(from);
             const speed = Number(payload.speed || 32);
             if (Number.isNaN(date.getTime())) throw new Error('replay.play_window requires a valid from/at value');
-            store.setSpeedMultiplier(Number.isFinite(speed) ? speed : 32);
+            const safeSpeed = Number.isFinite(speed) && speed > 0 ? speed : 32;
+            const toValue = payload.to || payload.until || payload.end;
+            const to = toValue ? new Date(String(toValue)) : null;
+            if (toValue && (!to || Number.isNaN(to.getTime()))) {
+                throw new Error('replay.play_window requires a valid to/until/end value');
+            }
+            if (to && to.getTime() <= date.getTime()) {
+                throw new Error('replay.play_window requires to/until/end to be after from/at');
+            }
+            store.setSpeedMultiplier(safeSpeed);
             const currentState = useTimelineStore.getState();
             const alreadyAtRequestedTime = currentState.mode === 'playback'
                 && currentState.playbackKind === 'historical'
@@ -2358,6 +2835,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                     detail: { action: 'seek', time: date.toISOString() },
                 }));
             }
+            if (to) armReplayWindowEndGuard(to, safeSpeed);
             startHistoricalPlaybackWhenReady();
             return;
         }
@@ -2382,7 +2860,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         }
 
         if (action.type === 'object.open' || action.type === 'object.focus' || action.type === 'entity.open' || action.type === 'asset.open' || action.type === 'event.open') {
-            const entityId = String(payload.entity_id || payload.entityId || payload.asset_id || payload.assetId || payload.event_id || payload.eventId || payload.id || '').trim();
+            const entityId = String(payload.entity_id || payload.entityId || payload.object_id || payload.objectId || payload.asset_id || payload.assetId || payload.event_id || payload.eventId || payload.id || '').trim();
             if (!entityId) throw new Error(`${action.type} requires an object, entity, asset or event id`);
             const at = String(payload.at || payload.time || '');
             const shouldResumePlayback = shouldResumeHistoricalPlaybackAfterViewChange(useTimelineStore.getState());
@@ -2568,6 +3046,8 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                 },
             });
             applyViewStateToStore(json.data?.state || json.state);
+            const selectionId = String(json.data?.selection_id || json.data?.selectionId || '').trim();
+            if (selectionId) await hydrateAppliedSelectionItems(layer, selectionId, String(json.data?.mode || payload.mode || 'only'));
             return;
         }
 
@@ -2595,6 +3075,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         }
 
         if (action.type === 'selection.apply' || action.type === 'selection.clear') {
+            const shouldResumePlayback = shouldResumeHistoricalPlaybackAfterViewChange(useTimelineStore.getState());
             if (action.type === 'selection.apply' && Array.isArray(payload.entities) && payload.entities.length > 0) {
                 const ids = payload.entities
                     .map((entity: any) => String(entity?.entity_id || entity?.entityId || entity?.id || '').trim())
@@ -2625,6 +3106,27 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
             const json = await response.json().catch(() => null);
             if (!response.ok || json?.status === 'error') {
                 throw new Error(json?.error?.message || `${action.type} failed`);
+            }
+            applyViewStateToStore(json?.data?.state || json?.state);
+            if (action.type === 'selection.apply') {
+                const layer = normalizeCatalogLayerId(json.data?.layer || payload.layer || payload.layer_id);
+                const selectionId = String(json.data?.selection_id || json.data?.selectionId || payload.selection_id || payload.selectionId || '').trim();
+                if (layer && selectionId) await hydrateAppliedSelectionItems(layer, selectionId, String(json.data?.mode || payload.mode || 'only'));
+                if (shouldResumePlayback) startHistoricalPlaybackWhenReady();
+            } else {
+                const layer = normalizeCatalogLayerId(json.data?.layer || payload.layer || payload.layer_id);
+                if (layer) {
+                    const current = useTimelineStore.getState() as any;
+                    if (selectionCurrentlyAffectsReplay(current.appliedSelections?.[layer])) {
+                        markHistoricalReplayHydrating();
+                    }
+                    useTimelineStore.setState((state: any) => {
+                        const next = { ...(state.appliedSelections || {}) };
+                        delete next[layer];
+                        return { appliedSelections: next };
+                    });
+                    if (shouldResumePlayback) startHistoricalPlaybackWhenReady();
+                }
             }
             return;
         }
@@ -2657,9 +3159,11 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         setRunningPresentationKey(key);
         publishPresentationState({ key, sessionId, messageId, status: 'running' });
         setError(null);
+        cancelReplayWindowEndGuard();
         cancelPendingHistoricalPlayback();
         const actionErrors: string[] = [];
         let replayWindowRequested = false;
+        let replayWindowPlaybackAllowed = false;
         try {
             for (const action of actions) {
                 if (activeSessionIdRef.current !== sessionId) {
@@ -2667,8 +3171,14 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                 }
                 try {
                     await applyAction(action, sessionId);
-                    if (action.type === 'replay.play_window') replayWindowRequested = true;
-                    if (replayWindowRequested && (action.type === 'replay.seek' || action.type === 'object.open' || action.type === 'object.focus' || action.type === 'entity.open' || action.type === 'asset.open' || action.type === 'event.open')) {
+                    if (action.type === 'replay.play_window') {
+                        replayWindowRequested = true;
+                        replayWindowPlaybackAllowed = true;
+                    }
+                    if (action.type === 'replay.pause' || action.type === 'replay.stop') {
+                        replayWindowPlaybackAllowed = false;
+                    }
+                    if (replayWindowRequested && replayWindowPlaybackAllowed && (action.type === 'replay.seek' || action.type === 'object.open' || action.type === 'object.focus' || action.type === 'entity.open' || action.type === 'asset.open' || action.type === 'event.open')) {
                         startHistoricalPlaybackWhenReady();
                     }
                 } catch (err) {
@@ -2676,7 +3186,9 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                 }
                 await sleep(presentationDelayForAction(action));
             }
-            if (replayWindowRequested) startHistoricalPlaybackWhenReady();
+            if (replayWindowRequested && replayWindowPlaybackAllowed) {
+                startHistoricalPlaybackWhenReady();
+            }
             if (actionErrors.length > 0) {
                 setError(`Presentation finished with ${actionErrors.length} skipped step(s)`);
             }
@@ -2687,6 +3199,8 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                 status: actionErrors.length > 0 ? 'partial' : 'completed',
                 skippedSteps: actionErrors.length,
                 skippedErrors: actionErrors,
+                replayWindowRequested,
+                replayPlaybackActive: replayWindowPlaybackAllowed,
             });
         } catch (err) {
             publishPresentationState({
@@ -2705,18 +3219,22 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
     if (!isOpen) return null;
 
     return (
-        <div className="absolute top-4 right-4 bottom-4 z-40 w-[min(456px,calc(100vw-24px))] rounded-lg border border-zinc-800 bg-black/85 backdrop-blur-xl shadow-2xl flex flex-col overflow-hidden">
+        <div
+            data-agent-panel="true"
+            className="absolute top-4 right-4 bottom-4 z-40 w-[min(456px,calc(100vw-24px))] rounded-lg border border-zinc-800 bg-black/85 backdrop-blur-xl shadow-2xl flex flex-col overflow-hidden"
+        >
             <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800">
                 <div className="flex items-center gap-2 min-w-0">
                     <Bot size={15} className="text-cyan-300 shrink-0" />
                     <div className="min-w-0">
                         <div className="text-xs font-mono text-zinc-100">Local Agents</div>
                         <div className="text-[10px] font-mono text-zinc-500 truncate">
-                            {activeSession ? providerLabel(activeSession.provider, providers) : 'No session'}
+                            {activeSessionTitle}
                         </div>
                     </div>
                 </div>
                 <button onClick={() => {
+                    cancelReplayWindowEndGuard();
                     cancelPendingHistoricalPlayback();
                     onClose();
                 }} className="p-1 text-zinc-500 hover:text-white rounded">
@@ -2724,28 +3242,30 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                 </button>
             </div>
 
-            <div className="flex gap-2 p-2 border-b border-zinc-800 overflow-x-auto">
-                {sessions.map((session) => (
-                    <button
-                        key={session.agent_session_id}
-                        data-agent-session-id={session.agent_session_id}
-                        data-agent-session-active={session.agent_session_id === activeSessionId ? 'true' : 'false'}
-                        onClick={() => setActiveSessionId(session.agent_session_id)}
-                        className={`shrink-0 px-2 py-1 rounded border text-[10px] font-mono ${
-                            session.agent_session_id === activeSessionId
-                                ? 'border-cyan-600 bg-cyan-950/50 text-cyan-200'
-                                : 'border-zinc-800 bg-zinc-950 text-zinc-500 hover:text-zinc-300'
-                        }`}
-                    >
-                        {providerLabel(session.provider, providers)}
-                        {runningRunsBySession[session.agent_session_id] ? ' *' : ''}
-                    </button>
-                ))}
+            <div ref={sessionPickerRef} className="relative flex gap-2 p-2 border-b border-zinc-800" data-agent-active-session-id={activeSessionId || ''}>
+                <button
+                    type="button"
+                    data-agent-session-picker="true"
+                    aria-label="Chat history"
+                    aria-expanded={sessionPickerOpen}
+                    aria-controls="agent-session-list"
+                    title={activeSessionTitle}
+                    onClick={() => setSessionPickerOpen((current) => !current)}
+                    className="min-w-0 flex-1 flex items-center justify-between gap-2 rounded border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] font-mono text-zinc-300 hover:text-white"
+                >
+                    <span className="flex min-w-0 items-center gap-1.5">
+                        <History size={12} className="shrink-0 text-zinc-500" />
+                        <span className="truncate">{activeSessionTitle}</span>
+                    </span>
+                    <span className="flex shrink-0 items-center gap-1 text-zinc-500">
+                        <ChevronDown size={12} className={sessionPickerOpen ? 'rotate-180 transition-transform' : 'transition-transform'} />
+                    </span>
+                </button>
                 <select
                     value={selectedProvider}
                     onChange={(event) => setSelectedProvider(event.target.value)}
                     disabled={availableProviders.length === 0}
-                    className="shrink-0 rounded border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] font-mono text-zinc-400 outline-none disabled:opacity-50"
+                    className="w-[118px] shrink-0 rounded border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] font-mono text-zinc-400 outline-none disabled:opacity-50"
                 >
                     {availableProviders.map((provider) => (
                         <option key={provider.provider} value={provider.provider}>
@@ -2754,6 +3274,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                     ))}
                 </select>
                 <button
+                    data-agent-new-session="true"
                     onClick={() => void createSession(selectedProvider || defaultProvider)}
                     disabled={loading || availableProviders.length === 0}
                     className="shrink-0 flex items-center gap-1 px-2 py-1 rounded border border-zinc-800 bg-zinc-950 text-[10px] font-mono text-zinc-400 hover:text-white disabled:opacity-50"
@@ -2761,6 +3282,49 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                     {loading ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
                     New
                 </button>
+                {sessionPickerOpen && (
+                    <div
+                        id="agent-session-list"
+                        role="listbox"
+                        className="absolute left-2 right-2 top-[calc(100%-4px)] z-50 max-h-72 overflow-y-auto rounded border border-zinc-800 bg-zinc-950 shadow-2xl"
+                    >
+                        {visibleSessions.length === 0 ? (
+                            <div className="px-3 py-2 text-[10px] font-mono text-zinc-500">No chats yet</div>
+                        ) : visibleSessions.map((session) => {
+                            const title = sessionPromptTitle(session, messagesBySession[session.agent_session_id] || []);
+                            const running = Boolean(runningRunsBySession[session.agent_session_id]);
+                            const active = session.agent_session_id === activeSessionId;
+                            return (
+                                <button
+                                    key={session.agent_session_id}
+                                    type="button"
+                                    data-agent-session-id={session.agent_session_id}
+                                    data-agent-session-active={active ? 'true' : 'false'}
+                                    role="option"
+                                    aria-selected={active}
+                                    title={title}
+                                    onClick={() => {
+                                        setActiveSessionId(session.agent_session_id);
+                                        setSessionPickerOpen(false);
+                                    }}
+                                    className={`w-full px-3 py-2 text-left border-b border-zinc-900 last:border-b-0 ${
+                                        active
+                                            ? 'bg-cyan-950/40 text-cyan-100'
+                                            : 'bg-zinc-950 text-zinc-300 hover:bg-zinc-900/80 hover:text-white'
+                                    }`}
+                                >
+                                    <div className="flex items-center justify-between gap-2">
+                                        <span className="min-w-0 truncate text-[11px] font-mono">{title}</span>
+                                        {running && <Loader2 size={12} className="shrink-0 animate-spin text-cyan-300" />}
+                                    </div>
+                                    <div className="mt-0.5 truncate text-[10px] font-mono text-zinc-500">
+                                        {sessionSecondaryLabel(session, providers)}
+                                    </div>
+                                </button>
+                            );
+                        })}
+                    </div>
+                )}
             </div>
 
             {error && (
@@ -2801,10 +3365,13 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                                             <ToolGroup key={`tools-${idx}-${group.parts[0]?.id || idx}`} parts={group.parts} />
                                         )
                                     ))}
+                                    {shouldRenderFinalContent(message, streamParts, runningRunId) && (
+                                        <MarkdownBlock text={message.content} onOpenSpyLinkClick={(href, label) => void openOpenSpyLink(href, label)} />
+                                    )}
                                 </div>
                             ) : (
                                 <div>
-                                    {message.content ? <MarkdownBlock text={message.content} onOpenSpyLinkClick={(href, label) => void openOpenSpyLink(href, label)} /> : (message.role === 'assistant' && runningRunId ? <Loader2 size={14} className="animate-spin text-cyan-300" /> : '')}
+                                    {shouldRenderFinalContent(message, streamParts, runningRunId) ? <MarkdownBlock text={message.content} onOpenSpyLinkClick={(href, label) => void openOpenSpyLink(href, label)} /> : (message.role === 'assistant' && runningRunId ? <Loader2 size={14} className="animate-spin text-cyan-300" /> : '')}
                                 </div>
                             )}
                             <ImageryEvidenceRows

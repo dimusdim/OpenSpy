@@ -1,4 +1,4 @@
-import { API_URL } from './config';
+import { API_URL, PERF_CONSOLE_ENABLED } from './config';
 import {
     recordFrameRender,
     recordSuspectBlock,
@@ -104,9 +104,10 @@ export function perfLog(event: string, data: Record<string, any> = {}): void {
         scheduleFlush();
     }
     exportToOtel(event, data);
-    if (typeof console !== 'undefined') {
+    const runtimeConsoleEnabled =
+        typeof window !== 'undefined' && (window as any).__OPENSPY_PERF_CONSOLE === true;
+    if ((PERF_CONSOLE_ENABLED || runtimeConsoleEnabled) && typeof console !== 'undefined') {
         const tag = `[perf:${event}]`;
-        // Keep console output as well so DevTools still shows the timeline
         console.log(tag, data);
     }
 }

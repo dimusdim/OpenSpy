@@ -761,10 +761,62 @@ export default function EntityHUD({ avoidRightPx = 0 }: EntityHUDProps) {
 
     if (!selectedEntityId || !selectedEntityData) return null;
 
-    const panelX = typeof window !== 'undefined'
-        ? Math.max(340, window.innerWidth - 340 - Math.max(0, avoidRightPx))
-        : 1000;
-    const panelY = 100;
+    const panelWidth = 320;
+    const panelMaxHeightPx = typeof window !== 'undefined' ? Math.round(window.innerHeight * 0.8) : 640;
+    const panelPlacement = (() => {
+        if (typeof window === 'undefined') {
+            return { x: 1000, y: 100, anchorX: 990, anchorY: 140 };
+        }
+        const margin = 16;
+        const gap = 32;
+        const legendSafeRight = window.innerWidth >= 900 ? 352 : margin;
+        const usableRight = Math.max(margin + panelWidth, window.innerWidth - Math.max(0, avoidRightPx) - margin);
+        const fallbackX = Math.max(legendSafeRight, usableRight - panelWidth);
+        const fallbackY = 100;
+        if (!screenPos) {
+            return { x: fallbackX, y: fallbackY, anchorX: fallbackX - 10, anchorY: fallbackY + 40 };
+        }
+
+        const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+        const rightX = screenPos.x + gap;
+        const leftX = screenPos.x - panelWidth - gap;
+        const rightFits = rightX + panelWidth <= usableRight;
+        const leftFits = leftX >= legendSafeRight;
+        const relaxedLeftFits = leftX >= margin;
+        const relaxedRightFits = rightX + panelWidth <= window.innerWidth - margin;
+        const preferLeft = avoidRightPx > 0 || screenPos.x > window.innerWidth * 0.56;
+        let x = fallbackX;
+        if (preferLeft && leftFits) x = leftX;
+        else if (!preferLeft && rightFits) x = rightX;
+        else if (leftFits) x = leftX;
+        else if (rightFits) x = rightX;
+        else if (preferLeft && relaxedLeftFits) x = leftX;
+        else if (!preferLeft && relaxedRightFits) x = rightX;
+        else if (relaxedLeftFits) x = leftX;
+        else if (relaxedRightFits) x = rightX;
+        else {
+            const minX = margin;
+            const maxX = Math.max(minX, usableRight - panelWidth);
+            const clampedLeft = clamp(leftX, minX, maxX);
+            const clampedRight = clamp(rightX, minX, maxX);
+            const leftOverlap = screenPos.x >= clampedLeft && screenPos.x <= clampedLeft + panelWidth ? 1 : 0;
+            const rightOverlap = screenPos.x >= clampedRight && screenPos.x <= clampedRight + panelWidth ? 1 : 0;
+            x = leftOverlap <= rightOverlap ? clampedLeft : clampedRight;
+        }
+
+        const minY = 76;
+        const maxY = Math.max(minY, window.innerHeight - panelMaxHeightPx - 112);
+        const horizontallyCoversTarget = screenPos.x >= x && screenPos.x <= x + panelWidth;
+        const desiredY = horizontallyCoversTarget ? screenPos.y + gap : screenPos.y - 110;
+        const y = Math.min(Math.max(desiredY, minY), maxY);
+        const panelIsLeftOfTarget = x + panelWidth <= screenPos.x;
+        return {
+            x,
+            y,
+            anchorX: panelIsLeftOfTarget ? x + panelWidth + 10 : x - 10,
+            anchorY: y + 40,
+        };
+    })();
 
     const flyTo = () => {
         if (!live) return;
@@ -794,16 +846,29 @@ export default function EntityHUD({ avoidRightPx = 0 }: EntityHUDProps) {
                 <svg className="absolute inset-0 w-full h-full opacity-60">
                     <line
                         x1={screenPos.x} y1={screenPos.y}
-                        x2={panelX - 10} y2={panelY + 40}
+                        x2={panelPlacement.anchorX} y2={panelPlacement.anchorY}
                         stroke="#06b6d4" strokeWidth="1" strokeDasharray="4 4"
                     />
-                    <circle cx={screenPos.x} cy={screenPos.y} r="6" fill="transparent" stroke="#06b6d4" strokeWidth="2" strokeDasharray="3 3" className="animate-spin" style={{ animationDuration: '3s' }} />
+                    <circle
+                        data-entity-hud-target="true"
+                        cx={screenPos.x}
+                        cy={screenPos.y}
+                        r="6"
+                        fill="transparent"
+                        stroke="#06b6d4"
+                        strokeWidth="2"
+                        strokeDasharray="3 3"
+                        className="animate-spin"
+                        style={{ animationDuration: '3s' }}
+                    />
                 </svg>
             )}
 
             <div
+                data-entity-hud-panel="true"
+                data-entity-id={selectedEntityId}
                 className="absolute w-80 max-h-[80vh] overflow-y-auto pointer-events-auto bg-black/85 backdrop-blur-xl border border-zinc-800 rounded-xl shadow-[0_0_30px_rgba(0,0,0,0.8)]"
-                style={{ top: panelY, left: panelX }}
+                style={{ top: panelPlacement.y, left: panelPlacement.x }}
             >
                 <div className="p-4 border-b border-zinc-800 flex justify-between items-center">
                     <div className="text-xs font-mono font-bold text-cyan-400 tracking-wider">TARGET ACQUIRED</div>

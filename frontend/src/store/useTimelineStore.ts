@@ -64,6 +64,18 @@ export interface ActiveFilter {
   label: string;
 }
 
+export interface AppliedSelectionState {
+  selectionId: string;
+  mode: 'replace' | 'append' | 'exclude' | 'only';
+  layer?: string;
+  updatedAt?: string;
+  itemIds?: string[];
+  itemCount?: number;
+  itemFingerprint?: string;
+  materializationStatus?: string;
+  truncated?: boolean;
+}
+
 export interface MissionPreset {
   name: string;
   description: string;
@@ -284,6 +296,7 @@ interface TimelineStore {
   // Per-layer source visibility for composite logical views
   // (e.g. "disasters:gdacs", "conflicts:gdelt").
   sourceVisibility: Record<string, boolean>;
+  appliedSelections: Record<string, AppliedSelectionState>;
   // Per-subtype counts. Layer hooks update these from the live datasource
   // entity counts; the Legend reads them.
   subtypeCounts: Record<string, number>;
@@ -450,6 +463,7 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
   selectedEntityData: null,
   subtypeVisibility: {},
   sourceVisibility: {},
+  appliedSelections: {},
   subtypeCounts: {},
   sourceCounts: {},
   infraViewportPct: -1,

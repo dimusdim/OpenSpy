@@ -15,6 +15,8 @@ export type AgentSessionRow = {
     provider_session_id: string | null;
     status: AgentSessionStatus;
     metadata: Record<string, any>;
+    first_user_prompt?: string | null;
+    last_user_prompt?: string | null;
     created_at: string;
     updated_at: string;
 };
@@ -66,10 +68,35 @@ export class AgentRepository {
         this.assertReady();
         const result = await this.database.query<AgentSessionRow>(
             `
-                SELECT agent_session_id, workspace_id, chat_id, provider, provider_session_id, status, metadata, created_at, updated_at
-                FROM app.agent_sessions
-                WHERE workspace_id = $1
-                ORDER BY updated_at DESC, created_at DESC
+                SELECT
+                    s.agent_session_id,
+                    s.workspace_id,
+                    s.chat_id,
+                    s.provider,
+                    s.provider_session_id,
+                    s.status,
+                    s.metadata,
+                    first_user.content AS first_user_prompt,
+                    last_user.content AS last_user_prompt,
+                    s.created_at,
+                    s.updated_at
+                FROM app.agent_sessions s
+                LEFT JOIN LATERAL (
+                    SELECT content
+                    FROM app.agent_messages
+                    WHERE agent_session_id = s.agent_session_id AND role = 'user'
+                    ORDER BY sequence_no::bigint ASC
+                    LIMIT 1
+                ) first_user ON true
+                LEFT JOIN LATERAL (
+                    SELECT content
+                    FROM app.agent_messages
+                    WHERE agent_session_id = s.agent_session_id AND role = 'user'
+                    ORDER BY sequence_no::bigint DESC
+                    LIMIT 1
+                ) last_user ON true
+                WHERE s.workspace_id = $1
+                ORDER BY s.updated_at DESC, s.created_at DESC
             `,
             [workspaceId],
         );
