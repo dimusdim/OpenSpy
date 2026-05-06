@@ -210,6 +210,16 @@ function stringField(value: unknown): string | undefined {
     return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
+function stringArrayField(value: unknown): string[] {
+    if (!Array.isArray(value)) return [];
+    return Array.from(new Set(value.map((item) => String(item || '').trim()).filter(Boolean)));
+}
+
+function layerLooksEntityBacked(layer: string | undefined): boolean {
+    const value = String(layer || '').trim().toLowerCase().replace(/-/g, '_');
+    return ['aircraft', 'aviation', 'vessel', 'vessels', 'maritime', 'satellite', 'satellites', 'dark_vessel', 'dark_vessels'].includes(value);
+}
+
 function selectionPredicateFromRequestBody(body: Record<string, any>, fallback: Record<string, any> = {}): Record<string, any> {
     const predicate = { ...(fallback || {}) };
     const assignIfPresent = (targetKey: string, ...sourceKeys: string[]) => {
@@ -231,6 +241,14 @@ function selectionPredicateFromRequestBody(body: Record<string, any>, fallback: 
     assignIfPresent('entity_ids', 'entity_ids', 'entityIds');
     assignIfPresent('event_ids', 'event_ids', 'eventIds');
     assignIfPresent('asset_ids', 'asset_ids', 'assetIds');
+    const explicitIds = stringArrayField(body.explicit || body.ids || body.objectIds || body.object_ids);
+    if (explicitIds.length > 0 && predicate.ids === undefined && predicate.entity_ids === undefined && predicate.event_ids === undefined && predicate.asset_ids === undefined) {
+        const layer = stringField(body.layerId) || stringField(body.layer_id) || stringField(body.layer);
+        const entityLike = layerLooksEntityBacked(layer)
+            || explicitIds.some((id) => /^(vessel|aircraft|satellite|dark-vessel|dark_vessel):/i.test(id));
+        if (entityLike) predicate.entity_ids = explicitIds;
+        else predicate.ids = explicitIds;
+    }
     assignIfPresent('subtype', 'subtype');
     assignIfPresent('subtypes', 'subtypes');
     assignIfPresent('source_id', 'source_id', 'sourceId');
@@ -241,13 +259,22 @@ function selectionPredicateFromRequestBody(body: Record<string, any>, fallback: 
         ? predicate.time_window
         : predicate.timeWindow && typeof predicate.timeWindow === 'object'
             ? predicate.timeWindow
-            : null;
+            : predicate.timeRange && typeof predicate.timeRange === 'object'
+                ? predicate.timeRange
+                : null;
     if (timeWindow) {
         if (predicate.from === undefined) predicate.from = timeWindow.from ?? timeWindow.start ?? timeWindow.observed_from;
         if (predicate.to === undefined) predicate.to = timeWindow.to ?? timeWindow.end ?? timeWindow.observed_to;
         delete predicate.time_window;
         delete predicate.timeWindow;
+        delete predicate.timeRange;
     }
+    if (predicate.from === undefined) predicate.from = predicate.timeFrom ?? predicate.time_from;
+    if (predicate.to === undefined) predicate.to = predicate.timeTo ?? predicate.time_to;
+    delete predicate.timeFrom;
+    delete predicate.time_from;
+    delete predicate.timeTo;
+    delete predicate.time_to;
 
     const layer = stringField(body.layerId) || stringField(body.layer_id) || stringField(body.layer);
     if (layer && predicate.layer === undefined && predicate.layer_id === undefined && predicate.layerId === undefined) {
@@ -2418,14 +2445,20 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
                 fetched = await gpsJamService.fetchDate(date, { persist });
             } catch (err: any) {
                 if (axios.isAxiosError(err) && err.response?.status === 404) {
-                    res.status(404).json({
+                    res.json({
                         status: 'unsupported',
                         error: {
                             code: 'DATE_NOT_AVAILABLE',
                             message: `GPSJam has no published daily CSV for ${date}.`,
                         },
                         data: { operation, source: capability.source, date },
-                        meta: { executed: false, persisted: false },
+                        meta: {
+                            executed: true,
+                            provider_checked: true,
+                            persisted: false,
+                            granularity: 'daily',
+                        },
+                        warnings: ['GPSJam provider request was sent, but the daily CSV is not published for this date.'],
                     });
                     return;
                 }
@@ -3062,11 +3095,7 @@ app.post('/api/agent-tools/map-command', async (req, res) => {
             const status = String(selection.materialization_status || 'none');
             const materializedMs = Date.parse(String(selection.materialized_at || ''));
             const updatedMs = Date.parse(String(selection.updated_at || ''));
-            const allowPartialMaterialization = payload.allow_partial_materialization === true
-                || payload.allowPartialMaterialization === true;
-            const reusableStatuses = allowPartialMaterialization
-                ? ['materialized', 'partial', 'empty']
-                : ['materialized', 'empty'];
+            const reusableStatuses = ['materialized', 'partial', 'empty'];
             const hasReusableMaterialization = reusableStatuses.includes(status)
                 && Number.isFinite(materializedMs)
                 && (!Number.isFinite(updatedMs) || materializedMs + 1000 >= updatedMs)
@@ -3085,19 +3114,21 @@ app.post('/api/agent-tools/map-command', async (req, res) => {
                     limit: payload.materialize_limit || payload.max_items || payload.limit,
                     timeout_ms: payload.materialize_timeout_ms || payload.materialization_timeout_ms || payload.timeout_ms || payload.timeoutMs,
                 });
-            if (materialization.materialization_status === 'partial' && !allowPartialMaterialization) {
-                res.status(409).json({
-                    status: 'partial',
-                    error: {
-                        code: 'SELECTION_PARTIAL_MATERIALIZATION',
-                        message: 'Selection materialized only partially; pass allow_partial_materialization=true to apply that subset explicitly.',
-                    },
-                    data: { command, layer, selection_id: selectionId, mode, materialization },
-                });
-                return;
-            }
             const result = await viewControlService.applySelectionWithExplanation(layer, selectionId, mode);
-            res.json({ status: 'ok', data: { command, layer, selection_id: selectionId, mode, materialization, ...result } });
+            res.json({
+                status: 'ok',
+                data: {
+                    command,
+                    layer,
+                    selection_id: selectionId,
+                    mode,
+                    materialization,
+                    warnings: materialization.materialization_status === 'partial'
+                        ? ['Selection materialization is partial; materialization metadata describes the applied subset.']
+                        : [],
+                    ...result,
+                },
+            });
             return;
         }
 
@@ -3204,28 +3235,6 @@ app.post('/api/agent-tools/map-command', async (req, res) => {
                 limit: payload.materialize_limit || payload.max_items || payload.limit,
                 timeout_ms: payload.materialize_timeout_ms || payload.materialization_timeout_ms || payload.timeout_ms || payload.timeoutMs,
             });
-            const allowPartialMaterialization = payload.allow_partial_materialization === true
-                || payload.allowPartialMaterialization === true;
-            if (materialization.materialization_status === 'partial' && !allowPartialMaterialization) {
-                res.status(409).json({
-                    status: 'partial',
-                    error: {
-                        code: 'SELECTION_PARTIAL_MATERIALIZATION',
-                        message: 'Layer filter materialized only partially; pass allow_partial_materialization=true to apply that subset explicitly.',
-                    },
-                    data: {
-                        command,
-                        layer,
-                        selection_id: selection.selection_id,
-                        mode,
-                        predicate,
-                        geometry: selection.geometry_json,
-                        expires_at: selection.expires_at || null,
-                        materialization,
-                    },
-                });
-                return;
-            }
             const result = await viewControlService.applySelectionWithExplanation(layer, selection.selection_id, mode);
             res.json({
                 status: 'ok',
@@ -3238,6 +3247,9 @@ app.post('/api/agent-tools/map-command', async (req, res) => {
                     geometry: selection.geometry_json,
                     expires_at: selection.expires_at || null,
                     materialization,
+                    warnings: materialization.materialization_status === 'partial'
+                        ? ['Layer filter materialization is partial; materialization metadata describes the applied subset.']
+                        : [],
                     ...result,
                 },
             });

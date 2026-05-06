@@ -150,6 +150,13 @@ function pointDistanceMetersToDegrees(radiusM: number): number {
     return Math.max(0.00001, radiusM / 111_320);
 }
 
+function conservativeDistanceMetersToDegrees(radiusM: number, bbox: Bbox | null): number {
+    if (!bbox) return Math.max(0.00001, radiusM / 111_320 / 0.1);
+    const maxAbsLat = Math.min(89.9, Math.max(Math.abs(bbox[1]), Math.abs(bbox[3])));
+    const cosLat = Math.cos(maxAbsLat * Math.PI / 180);
+    return Math.max(0.00001, radiusM / 111_320 / Math.max(0.1, cosLat));
+}
+
 function haversineMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
     const r = 6_371_000;
     const phi1 = a.lat * Math.PI / 180;
@@ -164,6 +171,10 @@ function haversineMeters(a: { lat: number; lng: number }, b: { lat: number; lng:
 
 function bboxCenter([west, south, east, north]: Bbox): { lat: number; lng: number } {
     return { lat: (south + north) / 2, lng: (west + east) / 2 };
+}
+
+function bboxAreaDegrees2([west, south, east, north]: Bbox): number {
+    return Math.max(0, east - west) * Math.max(0, north - south);
 }
 
 function sampledTimes(
@@ -374,6 +385,11 @@ function validateSelectionPredicateKeys(predicate: Record<string, any>) {
         'subtypeIn',
         'subtypes',
         'time',
+        'time_from',
+        'time_to',
+        'timeFrom',
+        'timeTo',
+        'timeRange',
         'to',
         'ttl_seconds',
         'ttlSeconds',
@@ -641,20 +657,51 @@ export class AgentToolService {
 
         let sql = '';
         if (kind === 'entities') {
-            if (layer) add('pf.layer_id = ?', layer);
-            if (from) add('pf.observed_at >= ?::timestamptz', from);
-            if (to) add('pf.observed_at <= ?::timestamptz', to);
-            if (bbox) addBbox('pf.geom', bbox);
             const bucket = timeBucketSql(groupBy, 'pf.observed_at');
+            const needsEntityJoin = !bucket && (groupBy === 'source' || groupBy === 'subtype');
             const groupExpr = bucket || (groupBy === 'source' ? 'COALESCE(pf.source_id, e.source_id)' : groupBy === 'subtype' ? 'COALESCE(e.subtype, pf.layer_id)' : 'pf.layer_id');
-            sql = `SELECT ${groupExpr} AS bucket, COUNT(*)::bigint AS fixes, COUNT(DISTINCT pf.entity_id)::bigint AS entities,
-                          MIN(pf.observed_at) AS min_time, MAX(pf.observed_at) AS max_time
-                   FROM core.position_fixes pf
-                   JOIN core.entities e ON e.entity_id = pf.entity_id
-                   ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
-                   GROUP BY bucket
-                   ORDER BY fixes DESC
-                   LIMIT ${queryLimit}`;
+            const baseClauses: string[] = [];
+            const addBase = (sqlText: string, value: unknown) => {
+                params.push(value);
+                baseClauses.push(sqlText.replace('?', `$${params.length}`));
+            };
+            const buildBboxClause = (geomExpr: string, box: Bbox) => {
+                const [west, south, east, north] = box;
+                params.push(west, south, east, north);
+                const idx = params.length - 3;
+                return `${geomExpr} IS NOT NULL AND ST_Intersects(${geomExpr}, ST_MakeEnvelope($${idx}, $${idx + 1}, $${idx + 2}, $${idx + 3}, 4326))`;
+            };
+            if (layer) addBase('pf.layer_id = ?', layer);
+            if (from) addBase('pf.observed_at >= ?::timestamptz', from);
+            if (to) addBase('pf.observed_at <= ?::timestamptz', to);
+            const useTimeFirstPlan = Boolean(bbox && from && to && bboxAreaDegrees2(bbox) >= 100);
+            if (useTimeFirstPlan) {
+                const bboxClause = buildBboxClause('pf.geom', bbox!);
+                sql = `WITH pf_scope AS MATERIALIZED (
+                            SELECT pf.entity_id, pf.layer_id, pf.source_id, pf.observed_at, pf.geom
+                            FROM core.position_fixes pf
+                            ${baseClauses.length ? `WHERE ${baseClauses.join(' AND ')}` : ''}
+                       )
+                       SELECT ${groupExpr} AS bucket, COUNT(*)::bigint AS fixes, COUNT(DISTINCT pf.entity_id)::bigint AS entities,
+                              MIN(pf.observed_at) AS min_time, MAX(pf.observed_at) AS max_time
+                       FROM pf_scope pf
+                       ${needsEntityJoin ? 'JOIN core.entities e ON e.entity_id = pf.entity_id' : ''}
+                       WHERE ${bboxClause}
+                       GROUP BY bucket
+                       ORDER BY fixes DESC
+                       LIMIT ${queryLimit}`;
+            } else {
+                const whereClauses = [...baseClauses];
+                if (bbox) whereClauses.push(buildBboxClause('pf.geom', bbox));
+                sql = `SELECT ${groupExpr} AS bucket, COUNT(*)::bigint AS fixes, COUNT(DISTINCT pf.entity_id)::bigint AS entities,
+                              MIN(pf.observed_at) AS min_time, MAX(pf.observed_at) AS max_time
+                       FROM core.position_fixes pf
+                       ${needsEntityJoin ? 'JOIN core.entities e ON e.entity_id = pf.entity_id' : ''}
+                       ${whereClauses.length ? `WHERE ${whereClauses.join(' AND ')}` : ''}
+                       GROUP BY bucket
+                       ORDER BY fixes DESC
+                       LIMIT ${queryLimit}`;
+            }
         } else if (kind === 'events') {
             if (layer) add('e.layer_id = ?', layer);
             if (from) add('COALESCE(e.observed_at, e.valid_from, e.created_at) >= ?::timestamptz', from);
@@ -1151,49 +1198,84 @@ export class AgentToolService {
 
     async spatialJoin(input: Record<string, any>) {
         if (!this.database.isReady()) throw new Error('Database is not ready');
-        const leftKind = normalizeKind(input.left_kind || input.leftKind || input.kind || 'events');
-        const rightKind = normalizeKind(input.right_kind || input.rightKind || 'assets');
-        const leftLayer = String(input.left_layer || input.leftLayer || '').trim();
-        const rightLayer = String(input.right_layer || input.rightLayer || '').trim();
+        const movingLayer = input.moving_layer || input.movingLayer;
+        const staticLayer = input.static_layer || input.staticLayer;
+        const leftKind = normalizeKind(input.left_kind || input.leftKind || input.kind || (movingLayer ? 'entities' : 'events'));
+        const rightKind = normalizeKind(input.right_kind || input.rightKind || input.against_kind || input.againstKind || input.against || (staticLayer ? 'assets' : 'assets'));
+        const leftLayer = String(input.left_layer || input.leftLayer || input.left_layer_id || input.leftLayerId || input.layer || movingLayer || '').trim();
+        const rightLayer = String(input.right_layer || input.rightLayer || input.right_layer_id || input.rightLayerId || input.against_layer || input.againstLayer || staticLayer || '').trim();
         const radiusM = Number(input.radius_m ?? input.radiusM ?? 10_000);
         if (!Number.isFinite(radiusM) || radiusM < 0) throw new Error('geo.spatial_join requires radius_m >= 0');
         const limitInput = parsePositiveIntOrDefault(input.limit, 100, 'geo.spatial_join limit');
         const limit = limitInput.value;
         const queryLimit = limit + 1;
         const bbox = parseBboxLike(input.bbox);
-        const left = this.spatialJoinSourceSql(leftKind, 'l', leftLayer, bbox);
-        const right = this.spatialJoinSourceSql(rightKind, 'r', rightLayer, bbox);
+        const from = parseIso(input.from);
+        const to = parseIso(input.to);
+        const left = this.spatialJoinSourceSql(leftKind, 'l', leftLayer, bbox, from, to);
+        const right = this.spatialJoinSourceSql(rightKind, 'r', rightLayer, bbox, from, to);
         const rightSql = offsetSqlPlaceholders(right.sql, left.params.length);
-        const params = [...left.params, ...right.params, radiusM, queryLimit];
+        const radiusDeg = conservativeDistanceMetersToDegrees(radiusM, bbox);
+        const params = [...left.params, ...right.params, radiusDeg, radiusM, queryLimit];
+        const radiusDegParam = params.length - 2;
         const radiusParam = params.length - 1;
         const limitParam = params.length;
         const result = await this.database.query(
             `WITH left_rows AS (${left.sql}),
-                  right_rows AS (${rightSql})
+                  right_rows AS (${rightSql}),
+                  matched_rows AS (
+                    SELECT
+                        l.id AS left_id,
+                        l.layer_id AS left_layer_id,
+                        l.source_id AS left_source_id,
+                        l.kind AS left_kind,
+                        l.label AS left_label,
+                        l.observed_at AS left_observed_at,
+                        r.id AS right_id,
+                        r.layer_id AS right_layer_id,
+                        r.source_id AS right_source_id,
+                        r.kind AS right_kind,
+                        r.label AS right_label,
+                        r.observed_at AS right_observed_at,
+                        ST_Distance(l.geom::geography, r.geom::geography) AS distance_m,
+                        ST_Y(ST_PointOnSurface(l.geom)) AS left_lat,
+                        ST_X(ST_PointOnSurface(l.geom)) AS left_lng,
+                        ST_Y(ST_PointOnSurface(r.geom)) AS right_lat,
+                        ST_X(ST_PointOnSurface(r.geom)) AS right_lng
+                     FROM left_rows l
+                     JOIN right_rows r
+                       ON CASE
+                            WHEN $${radiusParam}::float8 = 0 THEN ST_Intersects(l.geom, r.geom)
+                            ELSE ST_DWithin(l.geom, r.geom, $${radiusDegParam}::float8)
+                                 AND ST_DWithin(l.geom::geography, r.geom::geography, $${radiusParam}::float8)
+                          END
+                     ORDER BY distance_m ASC NULLS LAST
+                     LIMIT $${limitParam}
+                  )
              SELECT
-                l.id AS left_id,
-                l.layer_id AS left_layer_id,
-                l.source_id AS left_source_id,
-                l.kind AS left_kind,
-                l.label AS left_label,
-                r.id AS right_id,
-                r.layer_id AS right_layer_id,
-                r.source_id AS right_source_id,
-                r.kind AS right_kind,
-                r.label AS right_label,
-                ST_Distance(l.geom::geography, r.geom::geography) AS distance_m,
-                ST_Y(ST_PointOnSurface(l.geom)) AS left_lat,
-                ST_X(ST_PointOnSurface(l.geom)) AS left_lng,
-                ST_Y(ST_PointOnSurface(r.geom)) AS right_lat,
-                ST_X(ST_PointOnSurface(r.geom)) AS right_lng
-             FROM left_rows l
-             JOIN right_rows r
-               ON CASE
-                    WHEN $${radiusParam}::float8 = 0 THEN ST_Intersects(l.geom, r.geom)
-                    ELSE ST_DWithin(l.geom::geography, r.geom::geography, $${radiusParam}::float8)
-                  END
-             ORDER BY distance_m ASC NULLS LAST
-             LIMIT $${limitParam}`,
+                m.left_id,
+                m.left_layer_id,
+                m.left_source_id,
+                m.left_kind,
+                COALESCE(left_entity.display_name, m.left_label) AS left_label,
+                m.left_observed_at,
+                m.right_id,
+                m.right_layer_id,
+                m.right_source_id,
+                m.right_kind,
+                COALESCE(right_entity.display_name, m.right_label) AS right_label,
+                m.right_observed_at,
+                m.distance_m,
+                m.left_lat,
+                m.left_lng,
+                m.right_lat,
+                m.right_lng
+             FROM matched_rows m
+             LEFT JOIN core.entities left_entity
+               ON m.left_kind = 'entity' AND left_entity.entity_id = m.left_id
+             LEFT JOIN core.entities right_entity
+               ON m.right_kind = 'entity' AND right_entity.entity_id = m.right_id
+             ORDER BY m.distance_m ASC NULLS LAST`,
             params,
         );
         const allItems = result?.rows || [];
@@ -1204,7 +1286,10 @@ export class AgentToolService {
             left: { kind: leftKind, layer: leftLayer || null },
             right: { kind: rightKind, layer: rightLayer || null },
             radius_m: radiusM,
+            radius_prefilter_degrees: radiusM > 0 ? radiusDeg : 0,
             bbox: bbox || null,
+            from,
+            to,
             count: items.length,
             items,
             pagination: {
@@ -1326,38 +1411,91 @@ export class AgentToolService {
         return result?.rows[0] || null;
     }
 
-    private spatialJoinSourceSql(kind: 'entities' | 'events' | 'assets', aliasPrefix: string, layer: string, bbox: Bbox | null) {
+    private spatialJoinSourceSql(kind: 'entities' | 'events' | 'assets', aliasPrefix: string, layer: string, bbox: Bbox | null, from: string | null, to: string | null) {
         const params: unknown[] = [];
-        const clauses = ['geom IS NOT NULL'];
+        if (kind === 'entities') {
+            if (from || to) {
+                const clauses = ['pf.geom IS NOT NULL'];
+                if (layer) {
+                    params.push(layer);
+                    clauses.push(`pf.layer_id = $${params.length}`);
+                }
+                if (from) {
+                    params.push(from);
+                    clauses.push(`pf.observed_at >= $${params.length}::timestamptz`);
+                }
+                if (to) {
+                    params.push(to);
+                    clauses.push(`pf.observed_at <= $${params.length}::timestamptz`);
+                }
+                if (bbox) {
+                    const [west, south, east, north] = bbox;
+                    params.push(west, south, east, north);
+                    const start = params.length - 3;
+                    clauses.push(`ST_Intersects(pf.geom, ST_MakeEnvelope($${start}, $${start + 1}, $${start + 2}, $${start + 3}, 4326))`);
+                }
+                return {
+                    params,
+                    sql: `SELECT pf.entity_id AS id, pf.layer_id, pf.source_id, 'entity' AS kind,
+                                 NULL::text AS label, pf.observed_at, pf.geom
+                          FROM core.position_fixes pf
+                          WHERE ${clauses.join(' AND ')}`,
+                };
+            }
+            const clauses = ['ls.geom IS NOT NULL'];
+            if (layer) {
+                params.push(layer);
+                clauses.push(`ls.layer_id = $${params.length}`);
+            }
+            if (bbox) {
+                const [west, south, east, north] = bbox;
+                params.push(west, south, east, north);
+                const start = params.length - 3;
+                clauses.push(`ST_Intersects(ls.geom, ST_MakeEnvelope($${start}, $${start + 1}, $${start + 2}, $${start + 3}, 4326))`);
+            }
+            return {
+                params,
+                sql: `SELECT ls.entity_id AS id, ls.layer_id, ls.source_id, 'entity' AS kind,
+                             NULL::text AS label, ls.observed_at, ls.geom
+                      FROM app.entity_live_states ls
+                      WHERE ${clauses.join(' AND ')}`,
+            };
+        }
+        const geomExpr = kind === 'events' ? 'geom' : 'geom';
+        const clauses = [`${geomExpr} IS NOT NULL`];
         if (layer) {
             params.push(layer);
             clauses.push(`layer_id = $${params.length}`);
+        }
+        if (kind === 'events') {
+            if (from) {
+                params.push(from);
+                clauses.push(`COALESCE(observed_at, valid_from, created_at) >= $${params.length}::timestamptz`);
+            }
+            if (to) {
+                params.push(to);
+                clauses.push(`COALESCE(observed_at, valid_from, created_at) <= $${params.length}::timestamptz`);
+            }
         }
         if (bbox) {
             const [west, south, east, north] = bbox;
             params.push(west, south, east, north);
             const start = params.length - 3;
-            clauses.push(`ST_Intersects(geom, ST_MakeEnvelope($${start}, $${start + 1}, $${start + 2}, $${start + 3}, 4326))`);
-        }
-        if (kind === 'entities') {
-            return {
-                params,
-                sql: `SELECT entity_id AS id, layer_id, source_id, 'entity' AS kind, NULL::text AS label, geom
-                      FROM app.entity_live_states
-                      WHERE ${clauses.join(' AND ')}`,
-            };
+            clauses.push(`ST_Intersects(${geomExpr}, ST_MakeEnvelope($${start}, $${start + 1}, $${start + 2}, $${start + 3}, 4326))`);
         }
         if (kind === 'events') {
             return {
                 params,
-                sql: `SELECT event_id AS id, layer_id, source_id, event_kind AS kind, NULL::text AS label, geom
+                sql: `SELECT event_id AS id, layer_id, source_id, event_kind AS kind,
+                             NULL::text AS label, COALESCE(observed_at, valid_from, created_at) AS observed_at, geom
                       FROM core.events
                       WHERE ${clauses.join(' AND ')}`,
             };
         }
         return {
             params,
-            sql: `SELECT asset_id AS id, layer_id, source_id, asset_kind AS kind, display_name AS label, geom
+            sql: `SELECT asset_id AS id, layer_id, source_id, asset_kind AS kind,
+                         display_name AS label, COALESCE(last_observed_at, updated_at, created_at) AS observed_at, geom
                   FROM core.assets
                   WHERE ${clauses.join(' AND ')}`,
         };
@@ -1489,9 +1627,11 @@ export class AgentToolService {
             ? predicate.time_window
             : predicate.timeWindow && typeof predicate.timeWindow === 'object'
                 ? predicate.timeWindow
-                : {};
-        const from = parseIso(predicate.from || predicate.observed_from || predicate.observedFrom || predicate.start || (timeWindow as any).from || (timeWindow as any).start);
-        const to = parseIso(predicate.to || predicate.observed_to || predicate.observedTo || predicate.end || (timeWindow as any).to || (timeWindow as any).end);
+                : predicate.timeRange && typeof predicate.timeRange === 'object'
+                    ? predicate.timeRange
+                    : {};
+        const from = parseIso(predicate.from || predicate.timeFrom || predicate.time_from || predicate.observed_from || predicate.observedFrom || predicate.start || (timeWindow as any).from || (timeWindow as any).start);
+        const to = parseIso(predicate.to || predicate.timeTo || predicate.time_to || predicate.observed_to || predicate.observedTo || predicate.end || (timeWindow as any).to || (timeWindow as any).end);
         const useHistoricalPositions = kind === 'entity' && Boolean(
             from
             || to
@@ -1715,9 +1855,11 @@ export class AgentToolService {
             ? predicate.time_window
             : predicate.timeWindow && typeof predicate.timeWindow === 'object'
                 ? predicate.timeWindow
-                : {};
-        const from = parseIso(predicate.from || predicate.observed_from || predicate.observedFrom || predicate.start || (timeWindow as any).from || (timeWindow as any).start);
-        const to = parseIso(predicate.to || predicate.observed_to || predicate.observedTo || predicate.end || (timeWindow as any).to || (timeWindow as any).end);
+                : predicate.timeRange && typeof predicate.timeRange === 'object'
+                    ? predicate.timeRange
+                    : {};
+        const from = parseIso(predicate.from || predicate.timeFrom || predicate.time_from || predicate.observed_from || predicate.observedFrom || predicate.start || (timeWindow as any).from || (timeWindow as any).start);
+        const to = parseIso(predicate.to || predicate.timeTo || predicate.time_to || predicate.observed_to || predicate.observedTo || predicate.end || (timeWindow as any).to || (timeWindow as any).end);
         const at = !from && !to ? parseIso(predicate.at || predicate.time || predicate.observed_at || predicate.observedAt) : null;
         const ids = Array.isArray(predicate.ids) ? predicate.ids.map(String) : [];
         const geometryJson = selection.geometry_json ? JSON.stringify(selection.geometry_json) : null;

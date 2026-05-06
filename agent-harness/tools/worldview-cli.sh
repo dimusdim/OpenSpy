@@ -404,12 +404,68 @@ process.stdout.write(JSON.stringify(out));
 ' -- "$@"
 }
 
+emit_help() {
+  local topic="${1:-root}"
+  node -e '
+const topic = process.argv[1] || "root";
+const docs = {
+  root: {
+    usage: "worldview-cli.sh <command> ...",
+    commands: ["catalog", "layers", "sources", "diagnostics", "coverage", "resolver", "geometry", "query", "geo", "selection", "legend", "view", "sql", "map", "replay", "source"],
+    examples: [
+      "worldview-cli.sh source capabilities",
+      "worldview-cli.sh query aggregate --kind entities --layer vessel --bbox <west,south,east,north> --from <iso> --to <iso> --group_by hour",
+      "worldview-cli.sh geo corridor --kind entities --layer vessel --coordinates \"[[lng,lat],[lng,lat]]\" --radius_m 50000 --from <iso> --to <iso>",
+      "worldview-cli.sh selection create --json \"{...}\""
+    ]
+  },
+  query: {
+    usage: "worldview-cli.sh query <search|track|live-status|aggregate|timeline|related|satellite-overpasses> ...",
+    examples: [
+      "worldview-cli.sh query search --kind entities --layer vessel --bbox <west,south,east,north> --from <iso> --to <iso> --limit 20",
+      "worldview-cli.sh query aggregate --kind entities --layer vessel --bbox <west,south,east,north> --from <iso> --to <iso> --group_by hour",
+      "worldview-cli.sh query timeline --kind events --layer outage --bbox <west,south,east,north> --from <iso> --to <iso> --group_by hour"
+    ]
+  },
+  replay: {
+    usage: "worldview-cli.sh replay <state|track|evidence> ...",
+    examples: [
+      "worldview-cli.sh replay state --from <iso> --to <iso>",
+      "worldview-cli.sh replay track --entity vessel:123 --from <iso> --to <iso>",
+      "worldview-cli.sh replay evidence --entity vessel:123 --layer vessel --from <iso> --to <iso>"
+    ]
+  },
+  geo: {
+    usage: "worldview-cli.sh geo <nearest|corridor|spatial_join|simplify> ...",
+    examples: [
+      "worldview-cli.sh geo nearest --kind assets --layer cable --lat <lat> --lng <lng> --limit 20",
+      "worldview-cli.sh geo corridor --kind entities --layer vessel --coordinates \"[[lng,lat],[lng,lat]]\" --radius_m 50000 --from <iso> --to <iso> --limit 20",
+      "worldview-cli.sh geo spatial_join --moving_layer vessel --static_layer cable --bbox <west,south,east,north> --from <iso> --to <iso> --radius_m 2000 --limit 20",
+      "worldview-cli.sh geo spatial_join --left_kind events --left_layer outage --right_kind assets --right_layer cable --radius_m 100000 --limit 20",
+      "worldview-cli.sh geo simplify --kind assets --layer cable --tolerance_m 500 --limit 20"
+    ]
+  },
+  "geo.corridor": {
+    usage: "worldview-cli.sh geo corridor --kind <entities|events|assets> --coordinates \"[[lng,lat],[lng,lat]]\" [--layer <layer>] [--from <iso>] [--to <iso>] [--radius_m <meters>] [--limit <n>]",
+    examples: [
+      "worldview-cli.sh geo corridor --kind entities --layer vessel --coordinates \"[[24.0,59.4],[25.4,60.1]]\" --radius_m 50000 --from 2026-05-01T08:30:00Z --to 2026-05-02T08:30:00Z --limit 25"
+    ]
+  }
+};
+const doc = docs[topic] || docs.root;
+console.log(JSON.stringify({ status: "ok", data: { topic, ...doc }, meta: { command: "help" }, warnings: [] }));
+' "$topic"
+}
+
 if [[ -z "$cmd" ]]; then
-  emit_error "USAGE" "Usage: worldview-cli.sh <catalog|layers|sources|diagnostics|coverage|resolver|geometry|query|geo|selection|legend|view|sql|map|replay|source> ..."
-  exit 1
+  emit_help root
+  exit 0
 fi
 
 case "$cmd" in
+  help|--help|-h)
+    emit_help "${1:-root}"
+    ;;
   catalog)
     sub="${1:-describe}"
     shift || true
@@ -582,6 +638,9 @@ SQL
     sub="${1:-}"
     shift || true
     case "$sub" in
+      ""|help|--help|-h)
+        emit_help query
+        ;;
       search)
         kind="$(get_arg --kind "$@")"
         query_string="$(build_query_string "$@")"
@@ -604,6 +663,8 @@ SQL
         ;;
       track)
         entity="$(get_arg --entity "$@")"
+        if [[ -z "$entity" ]]; then entity="$(get_arg --entity_id "$@")"; fi
+        if [[ -z "$entity" ]]; then entity="$(get_arg --entity-id "$@")"; fi
         if [[ -z "$entity" ]]; then emit_error "MISSING_ENTITY" "query track requires --entity"; exit 1; fi
         query_string="$(build_query_string "$@")"
         "$TOOLS_DIR/backend-api.sh" GET "/api/query/entities/$(urlencode "$entity")/track${query_string}" | wrap_data "query.track"
@@ -830,6 +891,60 @@ SQL
         query_string="$(build_query_string "$@")"
         "$TOOLS_DIR/backend-api.sh" GET "/api/replay/track/$(urlencode "$entity")${query_string}" | wrap_data "replay.track"
         ;;
+      evidence|moving-evidence|moving_evidence|validate-moving|validate_moving)
+        entity="$(get_arg --entity "$@")"
+        if [[ -z "$entity" ]]; then entity="$(get_arg --entity_id "$@")"; fi
+        if [[ -z "$entity" ]]; then entity="$(get_arg --entity-id "$@")"; fi
+        layer="$(get_arg --layer "$@")"
+        if [[ -z "$layer" ]]; then layer="$(get_arg --layer_id "$@")"; fi
+        if [[ -z "$layer" ]]; then layer="$(get_arg --layer-id "$@")"; fi
+        from_ts="$(get_arg --from "$@")"
+        to_ts="$(get_arg --to "$@")"
+        if [[ -z "$entity" ]]; then emit_error "MISSING_ENTITY" "replay evidence requires --entity"; exit 1; fi
+        if [[ -z "$layer" ]]; then layer="${entity%%:*}"; fi
+        if [[ "$layer" == "maritime" || "$layer" == "vessels" ]]; then layer="vessel"; fi
+        if [[ "$layer" == "aviation" || "$layer" == "air" || "$layer" == "aircrafts" ]]; then layer="aircraft"; fi
+        if [[ "$layer" == "satellites" || "$layer" == "space" ]]; then layer="satellite"; fi
+        if [[ -z "$from_ts" || -z "$to_ts" ]]; then emit_error "MISSING_WINDOW" "replay evidence requires --from and --to"; exit 1; fi
+        if [[ ! "$entity" =~ ^[A-Za-z0-9:_./-]+$ ]]; then emit_error "BAD_ENTITY" "replay evidence entity contains unsupported characters"; exit 1; fi
+        if [[ ! "$layer" =~ ^[A-Za-z0-9_-]+$ ]]; then emit_error "BAD_LAYER" "replay evidence layer contains unsupported characters"; exit 1; fi
+        evidence_sql="$(node - "$entity" "$layer" "$from_ts" "$to_ts" <<'NODE'
+const [entityId, layerId, fromTs, toTs] = process.argv.slice(2);
+function lit(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+process.stdout.write(`WITH fixes AS (
+  SELECT pf.entity_id,
+         pf.layer_id,
+         pf.observed_at,
+         pf.geom
+  FROM core.position_fixes pf
+  WHERE pf.entity_id = ${lit(entityId)}
+    AND pf.layer_id = ${lit(layerId)}
+    AND pf.observed_at >= ${lit(fromTs)}::timestamptz
+    AND pf.observed_at <= ${lit(toTs)}::timestamptz
+)
+SELECT ${lit(entityId)} AS entity_id,
+       ${lit(layerId)} AS layer_id,
+       ${lit(fromTs)}::timestamptz AS window_from,
+       ${lit(toTs)}::timestamptz AS window_to,
+       COUNT(*)::int AS fix_count,
+       (COUNT(*) >= 2) AS has_motion,
+       MIN(observed_at) AS first_fix_at,
+       MAX(observed_at) AS last_fix_at,
+       ST_Y((ARRAY_AGG(geom ORDER BY observed_at ASC))[1]) AS first_lat,
+       ST_X((ARRAY_AGG(geom ORDER BY observed_at ASC))[1]) AS first_lng,
+       ST_Y((ARRAY_AGG(geom ORDER BY observed_at DESC))[1]) AS last_lat,
+       ST_X((ARRAY_AGG(geom ORDER BY observed_at DESC))[1]) AS last_lng
+FROM fixes;
+`);
+NODE
+)"
+        "$TOOLS_DIR/sql-readonly.sh" \
+          --reason "validate moving entity replay evidence for exact final replay window" \
+          --timeout-ms 30000 \
+          --sql "$evidence_sql" | wrap_data "replay.evidence"
+        ;;
       *)
         emit_error "UNKNOWN_SUBCOMMAND" "Unknown replay subcommand: $sub"
         exit 1
@@ -843,6 +958,9 @@ SQL
     sub="${1:-}"
     shift || true
     case "$sub" in
+      ""|help|--help|-h)
+        emit_help geo
+        ;;
       nearest)
         kind="$(get_arg --kind "$@")"
         lat="$(get_arg --lat "$@")"
@@ -895,6 +1013,10 @@ SQL
         "$TOOLS_DIR/sql-readonly.sh" --reason "geo nearest ${kind} from ${lat},${lng}" "${limit_args[@]}" --sql "$nearest_sql" | enrich_geo_nearest_meta "$limit"
         ;;
       corridor)
+        if [[ $# -eq 0 ]]; then
+          emit_help "geo.corridor"
+          exit 0
+        fi
         body="$(args_to_json "$@")"
         "$TOOLS_DIR/backend-api.sh" POST /api/agent-tools/geo/corridor "$body" | wrap_data "geo.corridor"
         ;;
