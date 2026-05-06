@@ -26,6 +26,7 @@
     "test:agents:full-product-browser": "node tests/agent-full-product-browser-smoke.mjs",
     "test:agents:osint-scenarios": "node tests/agent-osint-scenarios-smoke.mjs",
     "test:agents:osint-demo-scenarios": "node tests/agent-osint-demo-scenarios.mjs",
+    "test:agents:demo-motion-preflight": "node tests/demo-scenario-motion-preflight.mjs",
     "test:agents:real-osint-scenarios": "node tests/agent-real-osint-scenarios.mjs",
     "test:agents:real-analytic-osint": "node tests/agent-real-analytic-osint-scenarios.mjs",
     "test:agents:real-claude": "node tests/agent-real-claude-smoke.mjs",
