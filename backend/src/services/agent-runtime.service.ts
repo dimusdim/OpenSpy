@@ -2,6 +2,7 @@ import { ChildProcess, execFileSync, spawn } from 'child_process';
 import { EventEmitter } from 'events';
 import crypto from 'crypto';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { StringDecoder } from 'string_decoder';
 import { AgentMessageRow, AgentProvider, AgentRepository, AgentRunEventRow, AgentSessionRow } from '../repositories/agent.repository';
@@ -49,6 +50,7 @@ type AgentStreamPart = {
 type LaunchConfig = {
     command: string;
     args: string[];
+    cwd: string;
     providerSessionId?: string | null;
     expectsProviderSessionId?: boolean;
     resumeMode: 'native' | 'new' | 'unsupported';
@@ -56,7 +58,6 @@ type LaunchConfig = {
 
 type StartRunOptions = {
     requestContext?: Record<string, any> | null;
-    sourceCapabilityContext?: Record<string, any> | null;
 };
 
 type ParsedActionContract = {
@@ -82,11 +83,11 @@ type ProviderLineState = {
 };
 
 const DEFAULT_CLAUDE_ALLOWED_TOOLS = [
-    'Bash(./.agents/tools/worldview-cli.sh *)',
-    'Bash(./.agents/tools/backend-api.sh *)',
-    'Bash(./.agents/tools/sql-readonly.sh *)',
-    'Bash(./.agents/tools/source-fetch.sh *)',
-    'Bash(./.agents/tools/map-command.sh *)',
+    'Bash(./tools/worldview-cli.sh *)',
+    'Bash(./tools/backend-api.sh *)',
+    'Bash(./tools/sql-readonly.sh *)',
+    'Bash(./tools/source-fetch.sh *)',
+    'Bash(./tools/map-command.sh *)',
 ].join(',');
 const DEFAULT_CLAUDE_TOOLS = 'Bash';
 const DEFAULT_CLAUDE_DISALLOWED_TOOLS = [
@@ -128,10 +129,6 @@ const DEFAULT_CLAUDE_DISALLOWED_TOOLS = [
 ].join(',');
 const EMPTY_MCP_CONFIG = '{"mcpServers":{}}';
 const DEFAULT_CODEX_SANDBOX = 'read-only';
-const CLAUDE_BARE_AUTH_ENV_KEYS = [
-    'ANTHROPIC_API_KEY',
-    'CLAUDE_CODE_API_KEY_HELPER_TTL_MS',
-];
 function isCodexProviderEnabled(): boolean {
     return process.env.AGENT_ENABLE_CODEX_PROVIDER === 'true';
 }
@@ -397,16 +394,6 @@ function sanitizeJsonForPrompt(value: any, maxChars = 6000): Record<string, any>
     }
 }
 
-function formatJsonForPrompt(value: any, maxChars = 6000): string {
-    const context = sanitizeJsonForPrompt(value, maxChars);
-    if (!context) return '';
-    return JSON.stringify(context, null, 2);
-}
-
-function formatRequestContextForPrompt(value: any): string {
-    return formatJsonForPrompt(value, 6000);
-}
-
 function trimTrailingText(parts: AgentStreamPart[]): AgentStreamPart[] {
     const next = [...parts];
     for (let idx = next.length - 1; idx >= 0; idx -= 1) {
@@ -488,6 +475,58 @@ function compactToolPayload(value: any, maxChars = 8000): any {
     }
 }
 
+function summarizeToolOutputForTrace(value: any): Record<string, any> | undefined {
+    if (value === undefined || value === null || value === '') return undefined;
+    let parsed = value;
+    if (typeof value === 'string') {
+        try {
+            parsed = JSON.parse(value);
+        } catch {
+            return undefined;
+        }
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+    const data = parsed.data && typeof parsed.data === 'object' && !Array.isArray(parsed.data)
+        ? parsed.data
+        : {};
+    const operations = Array.isArray((data as any).operations)
+        ? (data as any).operations
+            .filter((row: any) => row && typeof row === 'object')
+            .map((row: any) => ({
+                operation: typeof row.operation === 'string' ? row.operation : undefined,
+                source: typeof row.source === 'string' ? row.source : undefined,
+                status: typeof row.status === 'string' ? row.status : undefined,
+                meaning: typeof row.meaning === 'string' ? row.meaning : undefined,
+            }))
+            .filter((row: any) => row.operation || row.status)
+        : undefined;
+    const summary: Record<string, any> = {
+        json: true,
+        status: typeof parsed.status === 'string' ? parsed.status : undefined,
+        operation: typeof (data as any).operation === 'string'
+            ? (data as any).operation
+            : typeof parsed.operation === 'string'
+                ? parsed.operation
+                : undefined,
+        error: parsed.error && typeof parsed.error === 'object'
+            ? {
+                code: typeof parsed.error.code === 'string' ? parsed.error.code : undefined,
+                message: typeof parsed.error.message === 'string' ? parsed.error.message : undefined,
+            }
+            : undefined,
+        meta: parsed.meta && typeof parsed.meta === 'object'
+            ? {
+                executed: typeof parsed.meta.executed === 'boolean' ? parsed.meta.executed : undefined,
+                dry_run: typeof parsed.meta.dry_run === 'boolean' ? parsed.meta.dry_run : undefined,
+                persisted: typeof parsed.meta.persisted === 'boolean' ? parsed.meta.persisted : undefined,
+                command: typeof parsed.meta.command === 'string' ? parsed.meta.command : undefined,
+            }
+            : undefined,
+        operations,
+    };
+    return Object.fromEntries(Object.entries(summary).filter(([, item]) => item !== undefined));
+}
+
 function toolResultOutput(result: any): any {
     if (!result || typeof result !== 'object') return undefined;
     const content = result.content ?? result.result ?? result.output ?? result.text;
@@ -509,17 +548,9 @@ function truthyEnv(value: string | undefined): boolean {
     return /^(1|true|yes|on)$/i.test(String(value || '').trim());
 }
 
-function hasClaudeBareAuth(): boolean {
-    if (process.env.AGENT_CLAUDE_SETTINGS && /apiKeyHelper/i.test(process.env.AGENT_CLAUDE_SETTINGS)) {
-        return true;
-    }
-    return CLAUDE_BARE_AUTH_ENV_KEYS.some((key) => Boolean(process.env[key]));
-}
-
 export class AgentRuntimeService {
     private readonly liveRuns = new Map<string, LiveRun>();
     private providerCache: ProviderInfo[] | null = null;
-    private instructionDocsCache: string | null = null;
 
     constructor(
         private readonly repository: AgentRepository,
@@ -640,8 +671,7 @@ export class AgentRuntimeService {
         }
 
         const requestContext = sanitizeJsonForPrompt(options.requestContext);
-        const sourceCapabilityContext = sanitizeJsonForPrompt(options.sourceCapabilityContext, 12000);
-        const launch = this.buildLaunch(session, userPrompt, { requestContext, sourceCapabilityContext });
+        const launch = this.buildLaunch(session, userPrompt, { requestContext });
         if (launch.resumeMode === 'unsupported') {
             throw new Error(`Agent provider ${session.provider} cannot resume sessions with the current OpenSpy configuration`);
         }
@@ -652,14 +682,12 @@ export class AgentRuntimeService {
             messageMetadata: {
                 source: 'frontend',
                 requestContext,
-                sourceCapabilityContext,
             },
             runMetadata: {
                 provider: session.provider,
                 startedBy: 'frontend',
                 resumeMode: launch.resumeMode,
                 requestContext,
-                sourceCapabilityContext,
             },
         });
         const emitter = new EventEmitter();
@@ -680,7 +708,7 @@ export class AgentRuntimeService {
         });
 
         const child = spawn(launch.command, launch.args, {
-            cwd: this.repoRoot,
+            cwd: launch.cwd,
             env: this.buildChildEnv(session, run.agent_run_id),
             stdio: ['ignore', 'pipe', 'pipe'],
             detached: true,
@@ -794,11 +822,10 @@ export class AgentRuntimeService {
 
     buildLaunch(session: AgentSessionRow, userPrompt: string, options: StartRunOptions = {}): LaunchConfig {
         const prompt = this.composePrompt(session, userPrompt, options);
+        const cwd = this.ensureProviderWorkdir(session.provider);
         if (session.provider === 'claude_code') {
             const providerSessionId = ensureUuid(session.provider_session_id);
-            const useBare = process.env.AGENT_CLAUDE_BARE
-                ? truthyEnv(process.env.AGENT_CLAUDE_BARE)
-                : hasClaudeBareAuth();
+            const useBare = truthyEnv(process.env.AGENT_CLAUDE_BARE);
             const args = [
                 '-p',
                 prompt,
@@ -807,7 +834,6 @@ export class AgentRuntimeService {
                 '--verbose',
                 '--include-partial-messages',
                 '--no-chrome',
-                '--disable-slash-commands',
                 '--mcp-config',
                 process.env.AGENT_CLAUDE_MCP_CONFIG || EMPTY_MCP_CONFIG,
                 '--strict-mcp-config',
@@ -825,7 +851,7 @@ export class AgentRuntimeService {
             } else {
                 args.push(
                     '--setting-sources',
-                    process.env.AGENT_CLAUDE_SETTING_SOURCES || 'user',
+                    process.env.AGENT_CLAUDE_SETTING_SOURCES || 'project',
                 );
             }
             if (process.env.AGENT_CLAUDE_SETTINGS) {
@@ -839,6 +865,7 @@ export class AgentRuntimeService {
             return {
                 command: process.env.AGENT_CLAUDE_COMMAND || 'claude',
                 args,
+                cwd,
                 providerSessionId,
                 expectsProviderSessionId: true,
                 resumeMode: session.provider_session_id ? 'native' : 'new',
@@ -859,10 +886,11 @@ export class AgentRuntimeService {
                         '--ask-for-approval',
                         process.env.AGENT_CODEX_APPROVAL || 'never',
                         '-C',
-                        this.repoRoot,
+                        cwd,
                         session.provider_session_id,
                         prompt,
                     ],
+                    cwd,
                     providerSessionId: session.provider_session_id,
                     expectsProviderSessionId: true,
                     resumeMode: 'native',
@@ -875,19 +903,77 @@ export class AgentRuntimeService {
                     '--json',
                     '--ignore-user-config',
                     '-C',
-                    this.repoRoot,
+                    cwd,
                     '--sandbox',
                     process.env.AGENT_CODEX_SANDBOX || DEFAULT_CODEX_SANDBOX,
                     '--ask-for-approval',
                     process.env.AGENT_CODEX_APPROVAL || 'never',
                     prompt,
                 ],
+                cwd,
                 expectsProviderSessionId: true,
                 resumeMode: 'new',
             };
         }
 
         throw new Error(`Unknown agent provider: ${session.provider}`);
+    }
+
+    private ensureProviderWorkdir(provider: AgentProvider): string {
+        const harnessRoot = this.productHarnessRoot();
+        const baseDir = process.env.OPENSPY_AGENT_RUNTIME_DIR
+            ? path.resolve(process.env.OPENSPY_AGENT_RUNTIME_DIR)
+            : path.join(os.tmpdir(), 'openspy-agent-runtime');
+        this.assertRuntimeDirOutsideRepo(baseDir);
+        const repoHash = crypto.createHash('sha1').update(this.repoRoot).digest('hex').slice(0, 12);
+        const providerDirName = provider === 'claude_code' ? 'claude' : 'codex';
+        const workdir = path.join(baseDir, repoHash, providerDirName);
+        fs.mkdirSync(workdir, { recursive: true });
+        this.ensureSymlink(path.join(harnessRoot, 'tools'), path.join(workdir, 'tools'), 'dir');
+        if (provider === 'claude_code') {
+            this.ensureSymlink(path.join(harnessRoot, 'claude', 'CLAUDE.md'), path.join(workdir, 'CLAUDE.md'), 'file');
+            this.ensureSymlink(path.join(harnessRoot, 'claude', '.claude'), path.join(workdir, '.claude'), 'dir');
+        } else if (provider === 'codex_cli') {
+            this.ensureSymlink(path.join(harnessRoot, 'codex', 'AGENTS.md'), path.join(workdir, 'AGENTS.md'), 'file');
+            this.ensureSymlink(path.join(harnessRoot, 'codex', 'skills'), path.join(workdir, 'skills'), 'dir');
+        }
+        return workdir;
+    }
+
+    private productHarnessRoot(): string {
+        const override = process.env.OPENSPY_AGENT_HARNESS_ROOT
+            ? path.resolve(process.env.OPENSPY_AGENT_HARNESS_ROOT)
+            : path.join(this.repoRoot, 'agent-harness');
+        const toolsDir = path.join(override, 'tools');
+        if (!fs.existsSync(toolsDir)) {
+            throw new Error(`OpenSpy product agent harness is missing tools directory: ${toolsDir}`);
+        }
+        return override;
+    }
+
+    private assertRuntimeDirOutsideRepo(baseDir: string): void {
+        const relative = path.relative(this.repoRoot, baseDir);
+        if (!relative || (!relative.startsWith('..') && !path.isAbsolute(relative))) {
+            throw new Error(`OPENSPY_AGENT_RUNTIME_DIR must be outside the repository: ${baseDir}`);
+        }
+    }
+
+    private ensureSymlink(target: string, linkPath: string, kind: 'file' | 'dir'): void {
+        if (!fs.existsSync(target)) {
+            throw new Error(`OpenSpy product agent harness target is missing: ${target}`);
+        }
+        try {
+            const stat = fs.lstatSync(linkPath);
+            if (stat.isSymbolicLink()) {
+                const current = fs.readlinkSync(linkPath);
+                const resolved = path.resolve(path.dirname(linkPath), current);
+                if (resolved === target) return;
+            }
+            fs.rmSync(linkPath, { recursive: true, force: true });
+        } catch (err: any) {
+            if (err?.code !== 'ENOENT') throw err;
+        }
+        fs.symlinkSync(target, linkPath, kind === 'dir' && process.platform === 'win32' ? 'junction' : kind);
     }
 
     private buildStreamParts(runId: string, events: AgentRunEventRow[], finalContent: string): AgentStreamPart[] {
@@ -956,57 +1042,9 @@ export class AgentRuntimeService {
     }
 
     private composePrompt(session: AgentSessionRow, userPrompt: string, options: StartRunOptions = {}): string {
-        const providerInstruction = session.provider === 'claude_code'
-            ? 'This is a non-interactive Claude Code subprocess launched by OpenSpy.'
-            : 'This is a non-interactive Codex CLI subprocess launched by OpenSpy.';
-        const productInstructions = this.loadProductInstructionDocs();
-        const requestContext = formatRequestContextForPrompt(options.requestContext);
-        const sourceCapabilityContext = formatJsonForPrompt(options.sourceCapabilityContext, 12000);
-        return [
-            'You are an OpenSpy OSINT agent.',
-            '',
-            providerInstruction,
-            'The product contract below is loaded from OpenSpy Markdown instructions and skills. Use it as the source of truth for data access, source capability checks, map actions and replay presentation.',
-            '',
-            '<AI_WORLDVIEW_MARKDOWN_INSTRUCTIONS>',
-            productInstructions,
-            '</AI_WORLDVIEW_MARKDOWN_INSTRUCTIONS>',
-            '',
-            ...(sourceCapabilityContext ? [
-                '<OPENSPY_SOURCE_CAPABILITY_CONTEXT>',
-                sourceCapabilityContext,
-                '</OPENSPY_SOURCE_CAPABILITY_CONTEXT>',
-                '',
-            ] : []),
-            ...(requestContext ? [
-                '<AI_WORLDVIEW_REQUEST_CONTEXT>',
-                requestContext,
-                '</AI_WORLDVIEW_REQUEST_CONTEXT>',
-                '',
-            ] : []),
-            'User request:',
-            userPrompt,
-        ].join('\n');
-    }
-
-    private loadProductInstructionDocs(): string {
-        if (this.instructionDocsCache !== null) return this.instructionDocsCache;
-        const files = [
-            '.agents/instructions/product-osint.md',
-            '.agents/skills/worldview-data/SKILL.md',
-            '.agents/skills/worldview-sources/SKILL.md',
-            '.agents/skills/worldview-map-control/SKILL.md',
-        ];
-        const docs = files.map((relativePath) => {
-            const filePath = path.join(this.repoRoot, relativePath);
-            try {
-                return `# ${relativePath}\n\n${fs.readFileSync(filePath, 'utf8').trim()}`;
-            } catch (err: any) {
-                return `# ${relativePath}\n\nInstruction file unavailable: ${err?.message || 'read failed'}`;
-            }
-        });
-        this.instructionDocsCache = docs.join('\n\n---\n\n');
-        return this.instructionDocsCache;
+        void session;
+        void options;
+        return userPrompt;
     }
 
     private buildChildEnv(session: AgentSessionRow, runId: string): NodeJS.ProcessEnv {
@@ -1019,7 +1057,6 @@ export class AgentRuntimeService {
             'LANG',
             'LC_ALL',
             'TERM',
-            'CODEX_HOME',
         ];
         for (const key of passThrough) {
             if (process.env[key]) env[key] = process.env[key];
@@ -1033,18 +1070,30 @@ export class AgentRuntimeService {
             const value = process.env[key];
             if (value !== undefined) env[key] = value;
         }
-        const isolatedHome = path.join(this.repoRoot, '.agents', 'home');
+        const harnessRoot = this.productHarnessRoot();
+        const repoHash = crypto.createHash('sha1').update(this.repoRoot).digest('hex').slice(0, 12);
+        const isolatedHome = path.join(os.tmpdir(), 'openspy-agent-runtime-home', repoHash);
         const claudeHome = process.env.AGENT_CLAUDE_HOME || process.env.HOME || isolatedHome;
         const runtimeHome = session.provider === 'claude_code'
             ? claudeHome
             : (process.env.AGENT_HOME || isolatedHome);
         fs.mkdirSync(runtimeHome, { recursive: true });
         env.HOME = runtimeHome;
-        const useClaudeBashGuard = session.provider === 'claude_code' && truthyEnv(process.env.AGENT_CLAUDE_USE_BASH_GUARD);
+        if (session.provider === 'codex_cli') {
+            const codexHome = process.env.AGENT_CODEX_HOME || path.join(isolatedHome, 'codex');
+            fs.mkdirSync(codexHome, { recursive: true });
+            env.CODEX_HOME = codexHome;
+        }
+        const useClaudeBashGuard = session.provider === 'claude_code'
+            && process.env.AGENT_CLAUDE_USE_BASH_GUARD !== 'false';
         env.SHELL = useClaudeBashGuard
-            ? path.join(this.repoRoot, '.agents', 'tools', 'claude-bash-guard.sh')
+            ? path.join(harnessRoot, 'tools', 'claude-bash-guard.sh')
             : (process.env.SHELL || '/bin/bash');
         env.AI_WORLDVIEW_API_URL = process.env.AI_WORLDVIEW_API_URL || `http://127.0.0.1:${process.env.PORT || 3055}`;
+        env.OPENSPY_REPO_ROOT = this.repoRoot;
+        env.OPENSPY_HARNESS_ROOT = harnessRoot;
+        env.OPENSPY_AGENT_TOOLS_DIR = path.join(harnessRoot, 'tools');
+        env.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS = process.env.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS || '1';
         env.AGENT_SESSION_ID = session.agent_session_id;
         env.AGENT_RUN_ID = runId;
         env.AGENT_PROVIDER = session.provider;
@@ -1283,6 +1332,7 @@ export class AgentRuntimeService {
         ];
         if (toolResults.length > 0) {
             for (const result of toolResults) {
+                const output = toolResultOutput(result);
                 events.push({
                     eventType: 'tool.completed',
                     payload: {
@@ -1292,7 +1342,8 @@ export class AgentRuntimeService {
                         tool_name: firstString(result?.name, result?.tool_name),
                         tool_use_id: firstString(result?.tool_use_id, result?.id),
                         is_error: Boolean(result?.is_error),
-                        output: compactToolPayload(toolResultOutput(result)),
+                        output: compactToolPayload(output),
+                        output_summary: summarizeToolOutputForTrace(output),
                     },
                 });
             }

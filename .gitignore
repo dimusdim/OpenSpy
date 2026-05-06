@@ -51,8 +51,10 @@ frontend/src/icons/test-*.svg
 docs/
 
 # Agent config files
-CLAUDE.md
-.claude/
+/AGENTS.md
+/CLAUDE.md
+/.agents/
+/.claude/
 .gstack/
 .context/
 

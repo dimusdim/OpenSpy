@@ -1775,113 +1775,6 @@ async function buildSourceCapabilityMatrix() {
     };
 }
 
-function compactProviderPolicyForPrompt(policy: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
-    if (!policy) return null;
-    return {
-        account_tier: policy.account_tier || null,
-        replay_rule: policy.replay_rule || null,
-        storage_rule: policy.storage_rule || null,
-    };
-}
-
-function compactOperationPolicyForPrompt(policy: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
-    if (!policy) return null;
-    return {
-        free_tier: policy.free_tier || null,
-        max_window_hours: policy.max_window_hours || null,
-        max_search_window_days: policy.max_search_window_days || null,
-        max_bbox_area_degrees2: policy.max_bbox_area_degrees2 || null,
-        max_results: policy.max_results || null,
-        min_provider_request_interval_ms: policy.min_provider_request_interval_ms || null,
-        selected_date_rule: policy.selected_date_rule || null,
-        resolution: policy.resolution || null,
-        product_status: policy.product_status || null,
-    };
-}
-
-async function buildAgentSourceCapabilityPromptContext() {
-    try {
-        const matrix = await buildSourceCapabilityMatrix();
-        return {
-            generated_at: new Date().toISOString(),
-            contract: {
-                purpose: 'Run-start source capability snapshot for the OpenSpy agent.',
-                statuses: ['available', 'auth_required', 'planned', 'unsupported'],
-                usage: [
-                    'Use this context before deciding which source tools, imagery paths, storage claims or replay claims are possible.',
-                    'Do not write conditional phrases such as "if credentials are configured" for operations listed here; use the actual status and auth.configured values in this snapshot.',
-                    'Use source-fetch capabilities only when a full matrix or fresh detail is needed beyond this compact snapshot.',
-                    'Provider source-fetch calls are user/action driven and must respect provider_policy/local cadence; replay speed never increases upstream fetch frequency.',
-                ],
-            },
-            summary: matrix.summary,
-            operations: matrix.operations.map((operation: any) => ({
-                operation: operation.operation,
-                source: operation.source,
-                status: operation.status,
-                history: operation.history,
-                notes: operation.notes,
-                policy: compactOperationPolicyForPrompt(operation.policy),
-                provider_policy: compactProviderPolicyForPrompt(operation.provider_policy),
-            })),
-            sources: matrix.sources
-                .filter((source: any) => (
-                    !source.notes?.inactive_catalog_entry
-                    || (source.source_fetch_operations || []).length > 0
-                    || source.auth?.required
-                ))
-                .map((source: any) => ({
-                    source_id: source.source_id,
-                    display_name: source.display_name,
-                    provider: source.provider,
-                    category: source.category,
-                    auth: {
-                        required: source.auth?.required,
-                        configured: source.auth?.configured,
-                        method: source.auth?.method,
-                        env_keys: source.auth?.env_keys || [],
-                        limits: source.auth?.limits || null,
-                    },
-                    local_storage: {
-                        has_local_history: source.local_storage?.has_local_history,
-                        replay_supported: source.local_storage?.replay_supported,
-                        live_only: source.local_storage?.live_only,
-                        layers: (source.local_storage?.layers || []).slice(0, 4).map((layer: any) => ({
-                            layer_id: layer.layer_id,
-                            replay: layer.replay,
-                            live_only_context: layer.live_only_context,
-                            raw_capture_mode: layer.raw_capture_mode,
-                            storage_policy_id: layer.storage_policy_id,
-                        })),
-                    },
-                    provider_policy: compactProviderPolicyForPrompt(source.provider_policy),
-                    source_fetch_operations: (source.source_fetch_operations || []).map((operation: any) => ({
-                        operation: operation.operation,
-                        status: operation.status,
-                    })),
-                    latest_ingest: (source.latest_ingest || []).slice(0, 5).map((ingest: any) => ({
-                        layer_id: ingest.layer_id,
-                        status: ingest.status,
-                        completeness: ingest.completeness,
-                        latest_completed_at: ingest.latest_completed_at,
-                        normalized_count: ingest.normalized_count,
-                        error_message: ingest.error_message,
-                    })),
-                })),
-        };
-    } catch (err: any) {
-        return {
-            generated_at: new Date().toISOString(),
-            status: 'error',
-            error: {
-                code: 'SOURCE_CAPABILITY_CONTEXT_UNAVAILABLE',
-                message: err?.message || String(err),
-            },
-            instruction: 'If source capability context is unavailable, call source-fetch capabilities before making source or imagery recommendations.',
-        };
-    }
-}
-
 const agentRateLimitMap = new Map<string, { count: number; resetAt: number }>();
 const AGENT_RATE_LIMIT_WINDOW_MS = 60_000;
 const AGENT_RATE_LIMIT_MAX = 240;
@@ -3070,10 +2963,8 @@ app.post('/api/agents/sessions/:sessionId/messages', async (req, res) => {
         const requestContext = req.body?.context && typeof req.body.context === 'object' && !Array.isArray(req.body.context)
             ? req.body.context
             : null;
-        const sourceCapabilityContext = await buildAgentSourceCapabilityPromptContext();
         const result = await agentRuntimeService.startRun(req.params.sessionId, prompt, {
             requestContext,
-            sourceCapabilityContext,
         });
         res.json({ status: 'ok', data: result });
     } catch (err: any) {
