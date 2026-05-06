@@ -92,6 +92,19 @@
       "notes": "Logical TLE provider chain persisted as orbital elements and satellite entities."
     },
     {
+      "sourceId": "space_track",
+      "layerId": "satellite",
+      "canonicalTarget": "orbital_elements",
+      "recordKind": "satellite",
+      "transformerId": "tle-catalog",
+      "writerId": "orbital-elements-entity",
+      "storagePolicyId": "orbital-elements-history",
+      "rawCaptureMode": "none",
+      "rawFormat": "json",
+      "coverageScope": "global",
+      "notes": "Space-Track GP_HISTORY targeted orbital-element imports persisted separately from the public CelesTrak current catalog fallback."
+    },
+    {
       "sourceId": "cloudflare_radar",
       "layerId": "outage",
       "canonicalTarget": "events",

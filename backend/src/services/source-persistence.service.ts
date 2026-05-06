@@ -2879,6 +2879,231 @@ export class SourcePersistenceService {
         );
     }
 
+    private async upsertSatelliteHistoryEntities(rows: EntityUpsertRow[]): Promise<void> {
+        if (!this.database.isReady() || rows.length === 0) return;
+        validateLayerRows(rows, 'satellite history entity batch', (row) => row.entity_id);
+
+        const deduped = new Map<string, EntityUpsertRow>();
+        for (const row of rows) {
+            const existing = deduped.get(row.entity_id);
+            if (!existing) {
+                deduped.set(row.entity_id, row);
+                continue;
+            }
+            const existingFirst = existing.first_observed_at ? Date.parse(existing.first_observed_at) : Number.POSITIVE_INFINITY;
+            const rowFirst = row.first_observed_at ? Date.parse(row.first_observed_at) : Number.POSITIVE_INFINITY;
+            const existingLast = existing.last_observed_at ? Date.parse(existing.last_observed_at) : Number.NEGATIVE_INFINITY;
+            const rowLast = row.last_observed_at ? Date.parse(row.last_observed_at) : Number.NEGATIVE_INFINITY;
+            deduped.set(row.entity_id, {
+                ...existing,
+                first_observed_at: rowFirst < existingFirst ? row.first_observed_at : existing.first_observed_at,
+                last_observed_at: rowLast > existingLast ? row.last_observed_at : existing.last_observed_at,
+            });
+        }
+
+        await this.database.query(
+            `
+                WITH incoming AS (
+                    SELECT *
+                    FROM jsonb_to_recordset($1::jsonb) AS rowset(
+                        entity_id text,
+                        latest_snapshot_id text,
+                        layer_id text,
+                        source_id text,
+                        entity_kind text,
+                        subtype text,
+                        display_name text,
+                        first_observed_at timestamptz,
+                        last_observed_at timestamptz,
+                        properties jsonb
+                    )
+                )
+                INSERT INTO core.entities (
+                    entity_id,
+                    latest_snapshot_id,
+                    layer_id,
+                    source_id,
+                    entity_kind,
+                    subtype,
+                    display_name,
+                    first_observed_at,
+                    last_observed_at,
+                    properties,
+                    created_at,
+                    updated_at
+                )
+                SELECT
+                    entity_id,
+                    latest_snapshot_id,
+                    layer_id,
+                    source_id,
+                    entity_kind,
+                    subtype,
+                    display_name,
+                    first_observed_at,
+                    last_observed_at,
+                    properties,
+                    now(),
+                    now()
+                FROM incoming
+                ON CONFLICT (entity_id)
+                DO UPDATE SET
+                    first_observed_at = CASE
+                        WHEN core.entities.first_observed_at IS NULL THEN EXCLUDED.first_observed_at
+                        WHEN EXCLUDED.first_observed_at IS NULL THEN core.entities.first_observed_at
+                        ELSE LEAST(core.entities.first_observed_at, EXCLUDED.first_observed_at)
+                    END,
+                    last_observed_at = CASE
+                        WHEN core.entities.last_observed_at IS NULL THEN EXCLUDED.last_observed_at
+                        WHEN EXCLUDED.last_observed_at IS NULL THEN core.entities.last_observed_at
+                        ELSE GREATEST(core.entities.last_observed_at, EXCLUDED.last_observed_at)
+                    END,
+                    display_name = COALESCE(core.entities.display_name, EXCLUDED.display_name),
+                    updated_at = now()
+            `,
+            [JSON.stringify([...deduped.values()])],
+        );
+    }
+
+    async persistSatelliteOrbitalHistory(records: SatelliteRecord[], options?: {
+        sourceId?: string | null;
+        provider?: string | null;
+        fetchedAt?: string | null;
+        sourcePublicationAt?: string | null;
+        query?: Record<string, any>;
+    }): Promise<void> {
+        if (!this.database.isReady() || records.length === 0) return;
+
+        const binding = requireSourceBinding(options?.sourceId || (options?.provider === 'space-track' ? 'space_track' : 'celestrak'));
+        const fetchedAt = options?.fetchedAt || new Date().toISOString();
+        const provider = options?.provider || null;
+        const entities: EntityUpsertRow[] = [];
+        const entitySnapshotsSeed: Array<EntitySnapshotUpsertRow & { state_hash: string }> = [];
+        const aliases: EntityAliasUpsertRow[] = [];
+        const orbitalRows: OrbitalElementUpsertRow[] = [];
+
+        for (const record of records) {
+            if (!record.tleLine1 || !record.tleLine2) continue;
+            const noradId = Number.isFinite(record.noradId) && record.noradId > 0 ? String(record.noradId) : null;
+            const entityId = noradId
+                ? `satellite:${noradId}`
+                : `satellite:${stableHash({ name: record.name, tleLine1: record.tleLine1, tleLine2: record.tleLine2 })}`;
+            const stateHash = tleStateHash(record.tleLine1, record.tleLine2);
+            const tleEpochAt = record.tleEpochAt || null;
+            const observedAt = tleEpochAt || fetchedAt;
+            const sourcePublicationAt = record.sourcePublicationAt || options?.sourcePublicationAt || null;
+
+            entities.push({
+                entity_id: entityId,
+                latest_snapshot_id: null,
+                layer_id: binding.layerId,
+                source_id: binding.sourceId,
+                entity_kind: binding.recordKind,
+                subtype: record.type || null,
+                display_name: escapeIdentifier(record.name || noradId || entityId),
+                first_observed_at: observedAt,
+                last_observed_at: observedAt,
+                properties: {
+                    noradId: record.noradId,
+                    type: record.type,
+                    classificationSource: record.classificationSource || 'derived_name_heuristic',
+                    provider,
+                    fetchedAt,
+                    tleEpochAt,
+                    sourcePublicationAt,
+                    historicalOrbitalImport: true,
+                },
+            });
+
+            entitySnapshotsSeed.push({
+                entity_snapshot_id: `entity-snap:${entityId}:history:${stateHash}`,
+                entity_id: entityId,
+                layer_id: binding.layerId,
+                source_id: binding.sourceId,
+                entity_kind: binding.recordKind,
+                subtype: record.type || null,
+                display_name: escapeIdentifier(record.name || noradId || entityId),
+                observed_at: observedAt,
+                properties: {
+                    noradId: record.noradId,
+                    type: record.type,
+                    classificationSource: record.classificationSource || 'derived_name_heuristic',
+                    provider,
+                    fetchedAt,
+                    tleEpochAt,
+                    sourcePublicationAt,
+                    historicalOrbitalImport: true,
+                    _state_hash: stateHash,
+                },
+                state_hash: stateHash,
+            });
+
+            if (noradId) {
+                aliases.push({
+                    entity_alias_id: `alias:${entityId}:norad:${noradId}`,
+                    entity_id: entityId,
+                    alias_type: 'norad_id',
+                    alias_value: noradId,
+                });
+            }
+
+            orbitalRows.push({
+                orbital_element_id: `orb:${entityId}:${stateHash}`,
+                entity_id: entityId,
+                layer_id: binding.layerId,
+                source_id: binding.sourceId,
+                observed_at: observedAt,
+                tle_epoch_at: tleEpochAt,
+                fetched_at: fetchedAt,
+                provider,
+                source_publication_at: sourcePublicationAt,
+                norad_id: noradId,
+                tle_line1: record.tleLine1,
+                tle_line2: record.tleLine2,
+                state_hash: stateHash,
+                properties: {
+                    name: record.name,
+                    type: record.type,
+                    classificationSource: record.classificationSource || 'derived_name_heuristic',
+                    provider,
+                    fetchedAt,
+                    tleEpochAt,
+                    sourcePublicationAt,
+                    historicalOrbitalImport: true,
+                    _state_hash: stateHash,
+                },
+            });
+        }
+
+        const latestEntityHashes = await this.loadLatestEntityHashes(entitySnapshotsSeed.map((row) => row.entity_id));
+        const entitySnapshots = entitySnapshotsSeed
+            .filter((row) => latestEntityHashes.get(row.entity_id) !== row.state_hash)
+            .map(({ state_hash: _stateHash, ...row }) => row);
+
+        await this.runTrackedIngest(
+            {
+                source_id: binding.sourceId,
+                layer_id: binding.layerId,
+                record_count: records.length,
+                metadata: {
+                    canonicalTarget: binding.canonicalTarget,
+                    changedEntityCount: entitySnapshots.length,
+                    provider,
+                    fetchedAt,
+                    sourcePublicationAt: options?.sourcePublicationAt || null,
+                    historicalOrbitalImport: true,
+                    query: options?.query || null,
+                },
+            },
+            async () => {
+                await this.upsertSatelliteHistoryEntities(entities);
+                await this.upsertEntityAliases(aliases);
+                await this.insertEntitySnapshots(entitySnapshots);
+                await this.insertOrbitalElements(orbitalRows);
+            },
+        );
+    }
+
     async persistAirspaceZones(zones: AirspaceZone[]): Promise<void> {
         if (!this.database.isReady() || zones.length === 0) return;
 

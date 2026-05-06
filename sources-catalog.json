@@ -304,6 +304,39 @@
       }
     },
     {
+      "id": "space_track",
+      "name": "Space-Track GP_HISTORY — Targeted Historical Orbital Elements",
+      "provider": "Space-Track.org",
+      "category": "space",
+      "layer": "Satellite",
+      "status": "SOURCE_FETCH",
+      "type": "targeted-history",
+      "refresh": "user/action-driven source-fetch",
+      "endpoints": [
+        "https://www.space-track.org/basicspacedata/query/class/gp_history/..."
+      ],
+      "auth": {
+        "required": true,
+        "method": "Login + session cookie",
+        "env_keys": ["SPACETRACK_EMAIL", "SPACETRACK_PASSWORD"],
+        "limits": "Account terms and request limits apply; use targeted NORAD/time windows."
+      },
+      "fields_displayed": {
+        "map_visual": {
+          "tleLine1/2": "Imported into core.orbital_elements; replay computes positions locally from stored epochs."
+        },
+        "hud": {
+          "noradId": "satellite identifier",
+          "tleEpoch": "orbital element epoch"
+        }
+      },
+      "fields_loaded_not_displayed": {},
+      "fields_available_not_loaded": {
+        "OMM": "raw OMM/Alpha-5 parsing is a separate roadmap item"
+      },
+      "api_capabilities_not_used": {}
+    },
+    {
       "id": "gdacs",
       "name": "GDACS — Global Disaster Alert",
       "provider": "European Commission / United Nations",
@@ -1839,8 +1872,8 @@
       "name": "USGS Landsat STAC — Historical Imagery",
       "provider": "USGS / Landsat",
       "category": "imagery",
-      "layer": "Not integrated",
-      "status": "PLANNED",
+      "layer": "Imagery overlay",
+      "status": "SOURCE_FETCH",
       "type": "historical archive",
       "refresh": "Landsat archive cadence",
       "endpoints": [
@@ -1854,7 +1887,31 @@
       },
       "fields_available_not_loaded": {
         "landsat_scene_search": "historical AOI/time scene search",
-        "before_after_context": "lower-cadence archive imagery for older incident reconstruction"
+        "before_after_context": "lower-cadence archive imagery for older incident reconstruction",
+        "raw_multiband_cog_rendering": "not implemented; current product renders browse/thumbnail overlays"
+      }
+    },
+    {
+      "id": "imagery_artifact",
+      "name": "OpenSpy Imagery Evidence Artifact Store",
+      "provider": "OpenSpy local backend",
+      "category": "imagery",
+      "layer": "Imagery overlay",
+      "status": "SOURCE_FETCH",
+      "type": "local evidence artifact",
+      "refresh": "user/action driven",
+      "endpoints": [
+        "/api/agent-tools/source-fetch operation=imagery-evidence-artifact",
+        "/api/imagery/artifacts/:filename"
+      ],
+      "auth": {
+        "required": false,
+        "method": "uses the selected imagery provider credentials already configured in backend",
+        "env_keys": [],
+        "limits": "one bounded provider image request or preview download per artifact"
+      },
+      "fields_available_not_loaded": {
+        "pixel_level_analysis": "not executed by this source; use returned artifact_url with a vision-capable model/tool"
       }
     },
     {
@@ -2708,7 +2765,7 @@
     "categories": {
       "aviation": ["opensky", "openaip", "nasa_dip_notams"],
       "maritime": ["aisstream", "aisstream_dark", "gfw"],
-      "space": ["celestrak", "spectator_earth"],
+      "space": ["celestrak", "space_track", "spectator_earth"],
       "disasters": ["gdacs", "usgs", "eonet", "firms"],
       "conflicts": ["acled"],
       "infrastructure": ["telegeography", "osm_overpass", "overture_pipelines", "overture", "gem"],
@@ -2718,7 +2775,7 @@
       "commodities": ["oilprices"],
       "energy": ["owid_energy"],
       "environmental": ["openaq"],
-      "imagery": ["nasa_gibs", "copernicus"],
+      "imagery": ["nasa_gibs", "copernicus", "usgs_landsat", "imagery_artifact"],
       "reference": ["naturalearth"],
       "ai": ["ai_image"]
     },

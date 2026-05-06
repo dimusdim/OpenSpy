@@ -923,6 +923,15 @@ process.stdout.write(`WITH fixes AS (
     AND pf.layer_id = ${lit(layerId)}
     AND pf.observed_at >= ${lit(fromTs)}::timestamptz
     AND pf.observed_at <= ${lit(toTs)}::timestamptz
+),
+ordered AS (
+  SELECT entity_id,
+         layer_id,
+         observed_at,
+         geom,
+         FIRST_VALUE(geom) OVER (PARTITION BY entity_id, layer_id ORDER BY observed_at ASC) AS first_geom,
+         FIRST_VALUE(geom) OVER (PARTITION BY entity_id, layer_id ORDER BY observed_at DESC) AS last_geom
+  FROM fixes
 )
 SELECT ${lit(entityId)} AS entity_id,
        ${lit(layerId)} AS layer_id,
@@ -932,11 +941,17 @@ SELECT ${lit(entityId)} AS entity_id,
        (COUNT(*) >= 2) AS has_motion,
        MIN(observed_at) AS first_fix_at,
        MAX(observed_at) AS last_fix_at,
+       EXTRACT(EPOCH FROM (MAX(observed_at) - MIN(observed_at)))::int AS duration_sec,
+       COALESCE(MAX(ST_DistanceSphere(geom, first_geom)), 0)::double precision AS max_displacement_m,
+       COALESCE(ST_DistanceSphere(
+         (ARRAY_AGG(first_geom ORDER BY observed_at ASC))[1],
+         (ARRAY_AGG(last_geom ORDER BY observed_at ASC))[1]
+       ), 0)::double precision AS endpoint_displacement_m,
        ST_Y((ARRAY_AGG(geom ORDER BY observed_at ASC))[1]) AS first_lat,
        ST_X((ARRAY_AGG(geom ORDER BY observed_at ASC))[1]) AS first_lng,
        ST_Y((ARRAY_AGG(geom ORDER BY observed_at DESC))[1]) AS last_lat,
        ST_X((ARRAY_AGG(geom ORDER BY observed_at DESC))[1]) AS last_lng
-FROM fixes;
+FROM ordered;
 `);
 NODE
 )"

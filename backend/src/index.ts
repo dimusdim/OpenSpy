@@ -1219,24 +1219,25 @@ const SOURCE_FETCH_CAPABILITIES: Record<string, SourceFetchCapability> = {
     },
     'opensky-tracks': {
         source: 'opensky',
-        status: process.env.OPENSKY_USERNAME && process.env.OPENSKY_PASSWORD ? 'planned' : 'auth_required',
-        history: 'OpenSky track/history availability is account and credit dependent.',
-        notes: 'Use local position_fixes for replay; provider history should fill gaps, not replace canonical replay.',
+        status: process.env.OPENSKY_USERNAME && process.env.OPENSKY_PASSWORD ? 'available' : 'auth_required',
+        history: 'OpenSky REST exposes an experimental per-aircraft track endpoint for a known ICAO24 and timestamp; deeper bulk history requires OpenSky data infrastructure/licensing.',
+        notes: 'Fetches one aircraft trajectory around a requested timestamp and persists returned waypoints into aircraft position fixes.',
         policy: {
             free_tier: 'Authenticated OpenSky REST credits are limited; use local DB first and do not poll provider history during replay.',
             current_state_poll_seconds: 90,
             authenticated_state_history_limit: 'up to 1 hour in the past on the REST state endpoint',
+            tracks_endpoint: 'experimental per-aircraft trajectory endpoint; not a bulk AOI history API',
         },
     },
     'spacetrack-gp-history': {
-        source: 'celestrak',
-        status: process.env.SPACETRACK_EMAIL && process.env.SPACETRACK_PASSWORD ? 'planned' : 'auth_required',
-        history: 'Space-Track GP history can provide historical orbital elements for satellites.',
-        notes: 'Replay positions should be computed from the best historical TLE for the target time.',
+        source: 'space_track',
+        status: process.env.SPACETRACK_EMAIL && process.env.SPACETRACK_PASSWORD ? 'available' : 'auth_required',
+        history: 'Space-Track GP_HISTORY can provide historical orbital elements for targeted NORAD IDs and epoch windows.',
+        notes: 'Fetches historical TLE/3LE records for targeted NORAD IDs and stores orbital epochs for satellite replay.',
         policy: {
             free_tier: 'Account-based public access; cache aggressively and respect Space-Track request limits.',
             current_tle_cache_hours: 24,
-            provider_history_import: 'planned',
+            provider_history_import: 'available for targeted NORAD/time windows when credentials are configured',
         },
     },
     'firms-fires': {
@@ -1249,6 +1250,7 @@ const SOURCE_FETCH_CAPABILITIES: Record<string, SourceFetchCapability> = {
             max_day_range: 10,
             default_poll_minutes: 30,
             upstream_granularity: 'VIIRS/MODIS active-fire products, not raw satellite imagery',
+            visual_overlay: 'FIRMS WMS/WMS-Time overlay is proxied by the backend so the MAP_KEY is not exposed to browser or agent.',
         },
     },
     'usgs-earthquakes': {
@@ -1265,9 +1267,9 @@ const SOURCE_FETCH_CAPABILITIES: Record<string, SourceFetchCapability> = {
     },
     'gdacs-disasters': {
         source: 'gdacs',
-        status: 'planned',
-        history: 'The product ingests GDACS current/recent alerts, but a pinned arbitrary historical GDACS import contract is not implemented yet.',
-        notes: 'Use local disaster snapshots for replay. Do not claim GDACS historical import is executable until the connector pins query parameters and lifecycle semantics.',
+        status: 'available',
+        history: 'GDACS exposes a public current/recent disaster MAP feed. OpenSpy can fetch it on demand and apply bbox/time filters to the returned feed.',
+        notes: 'Fetches and persists GDACS current/recent disaster alerts. This is not a deep arbitrary historical archive contract.',
     },
     'ioda-outages': {
         source: 'ioda',
@@ -1319,12 +1321,22 @@ const SOURCE_FETCH_CAPABILITIES: Record<string, SourceFetchCapability> = {
     },
     'landsat-stac-imagery': {
         source: 'usgs_landsat',
-        status: 'planned',
-        history: 'USGS Landsat STAC supports historical AOI/time scene search.',
-        notes: 'Not executable yet. Useful for historical corroboration and before/after analysis, not freshest global imagery.',
+        status: 'available',
+        history: 'USGS Landsat STAC supports public historical AOI/time scene search.',
+        notes: 'Searches Landsat STAC scene metadata and returns browse/thumbnail overlay actions when available. It does not render raw multiband COG products.',
         policy: {
-            free_tier: 'USGS/Landsat archive access is free, but the OpenSpy connector is not implemented yet.',
-            product_status: 'planned',
+            free_tier: 'USGS/Landsat public STAC archive access is free for metadata and browse assets.',
+            visual_overlay: 'rough browse/thumbnail georeferenced to the STAC bbox; raw COG rendering is not implemented',
+        },
+    },
+    'imagery-evidence-artifact': {
+        source: 'imagery_artifact',
+        status: 'available',
+        history: 'Creates a bounded evidence image artifact from an already selected imagery source or preview payload.',
+        notes: 'Downloads or renders one image artifact for human/vision review. It does not fabricate pixel analysis and does not import raw imagery into replay storage.',
+        policy: {
+            product_status: 'download/render artifact path; backend vision analysis is not executed by this operation',
+            supported_sources: ['copernicus', 'landsat', 'firms'],
         },
     },
 };
@@ -1333,8 +1345,8 @@ function currentSourceFetchStatus(operation: string, base: SourceFetchCapability
     if (operation === 'cloudflare-outages') return process.env.CLOUDFLARE_API_TOKEN ? 'available' : 'auth_required';
     if (operation === 'gfw-events') return process.env.GFW_TOKEN ? 'available' : 'auth_required';
     if (operation === 'acled-conflicts') return acledIngestCredentialsConfigured() ? 'planned' : 'auth_required';
-    if (operation === 'opensky-tracks') return process.env.OPENSKY_USERNAME && process.env.OPENSKY_PASSWORD ? 'planned' : 'auth_required';
-    if (operation === 'spacetrack-gp-history') return process.env.SPACETRACK_EMAIL && process.env.SPACETRACK_PASSWORD ? 'planned' : 'auth_required';
+    if (operation === 'opensky-tracks') return process.env.OPENSKY_USERNAME && process.env.OPENSKY_PASSWORD ? 'available' : 'auth_required';
+    if (operation === 'spacetrack-gp-history') return process.env.SPACETRACK_EMAIL && process.env.SPACETRACK_PASSWORD ? 'available' : 'auth_required';
     if (operation === 'firms-fires') return process.env.FIRMS_MAP_KEY || process.env.NASA_FIRMS_MAP_KEY ? 'available' : 'auth_required';
     if (operation === 'copernicus-sentinel-imagery') return process.env.COPERNICUS_CLIENT_ID && process.env.COPERNICUS_CLIENT_SECRET ? 'available' : 'auth_required';
     return base.status;
@@ -1432,7 +1444,7 @@ const SOURCE_PROVIDER_POLICIES: Record<string, Record<string, unknown>> = {
         upstream_rate_limit_reference: 'Respect Space-Track request limits; cache aggressively and do not repeatedly query GP_HISTORY.',
         local_cadence: {
             current_tle_cache_hours: 24,
-            historical_gp_import: 'planned/auth-required until executable connector is completed',
+            historical_gp_import: 'available for targeted NORAD/time windows when credentials are configured',
         },
         replay_rule: 'Deep satellite replay requires stored historical GP/TLE epochs selected at or before the replay timestamp.',
         storage_rule: 'Historical orbital elements must be stored in core.orbital_elements before being advertised as available replay evidence.',
@@ -1457,6 +1469,26 @@ const SOURCE_PROVIDER_POLICIES: Record<string, Record<string, unknown>> = {
         replay_rule: 'GIBS is date-addressable context imagery and must not block replay hydration.',
         storage_rule: 'No raw pixel storage by default.',
     },
+    usgs_landsat: {
+        account_tier: 'Public USGS Landsat STAC archive; no OpenSpy key required for metadata and browse assets.',
+        upstream_rate_limit_reference: 'Use targeted AOI/time searches. OpenSpy does not bulk-download Landsat COG assets.',
+        local_cadence: {
+            search_mode: 'user/action-driven source-fetch',
+            visual_overlay: 'browse/thumbnail overlay georeferenced by STAC bbox',
+        },
+        replay_rule: 'Landsat browse imagery is date-addressed context imagery and must not block replay hydration.',
+        storage_rule: 'No raw pixel or COG storage by default.',
+    },
+    imagery_artifact: {
+        account_tier: 'OpenSpy-local artifact store using already configured imagery providers.',
+        upstream_rate_limit_reference: 'Artifact creation performs one bounded provider image request or one preview download per operation.',
+        local_cadence: {
+            storage_dir: '.local/imagery-artifacts',
+            product_status: 'download/render artifact only; no backend visual inference is executed here',
+        },
+        replay_rule: 'Imagery artifacts are evidence attachments. They do not retime vector replay and do not hydrate canonical replay state.',
+        storage_rule: 'Stores image file plus redacted metadata in local artifact storage.',
+    },
 };
 
 function providerPolicyForSource(sourceId: string): Record<string, unknown> | null {
@@ -1464,6 +1496,11 @@ function providerPolicyForSource(sourceId: string): Record<string, unknown> | nu
     if (sourceId === 'space-track' || sourceId === 'spacetrack') return SOURCE_PROVIDER_POLICIES.space_track;
     if (sourceId === 'space_track') return SOURCE_PROVIDER_POLICIES.space_track;
     return null;
+}
+
+function providerPolicyForSourceFetchOperation(operation: string, sourceId: string): Record<string, unknown> | null {
+    if (operation === 'spacetrack-gp-history') return SOURCE_PROVIDER_POLICIES.space_track;
+    return providerPolicyForSource(sourceId);
 }
 
 function authConfigured(manifest: any): boolean | null {
@@ -1499,6 +1536,156 @@ function stableHash(value: unknown): string {
 type OpenSpyBbox = [number, number, number, number]; // west, south, east, north
 type ProviderBboxSwne = [number, number, number, number]; // south, west, north, east
 
+const SPACETRACK_LOGIN_URL = 'https://www.space-track.org/ajaxauth/login';
+const SPACETRACK_GP_HISTORY_BASE_URL = 'https://www.space-track.org/basicspacedata/query/class/gp_history';
+const OPENSKY_TOKEN_URL = 'https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token';
+const OPENSPY_LOCAL_ARTIFACT_DIR = path.resolve(__dirname, '../..', '.local/imagery-artifacts');
+
+function classifyAircraftForSourceFetch(callsign: string, altMeters: number | null, speedMps: number | null): 'military' | 'airliner' | 'light' | 'general' {
+    const cs = String(callsign || '').toUpperCase();
+    if (/^(RCH|CMB|HKY|VV|VV|NATO|ASY|FORTE|JAKE|DUKE|QID|LAGR|BART|CNV|IAM|MMF|BAF|FNF|CTM)/.test(cs)) return 'military';
+    if ((altMeters ?? 0) > 8000 || (speedMps ?? 0) > 180) return 'airliner';
+    if ((altMeters ?? 0) < 3000 && (speedMps ?? 0) < 90) return 'light';
+    return 'general';
+}
+
+function extractNoradIdFromTle(tleLine1: string): number {
+    const match = String(tleLine1 || '').match(/^1\s+(\d+)/);
+    return match ? Number.parseInt(match[1], 10) : -1;
+}
+
+function parseTleEpochAtFromLine1(tleLine1: string): string | null {
+    if (!tleLine1 || tleLine1.length < 32) return null;
+    const epochYear = Number.parseInt(tleLine1.slice(18, 20).trim(), 10);
+    const dayOfYear = Number.parseFloat(tleLine1.slice(20, 32).trim());
+    if (!Number.isFinite(epochYear) || !Number.isFinite(dayOfYear) || dayOfYear < 1) return null;
+    const fullYear = epochYear >= 57 ? 1900 + epochYear : 2000 + epochYear;
+    const epochMs = Date.UTC(fullYear, 0, 1, 0, 0, 0, 0) + (dayOfYear - 1) * 86_400_000;
+    const date = new Date(epochMs);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function classifySatelliteTypeByName(name: string): 'military' | 'civilian' | 'commercial' {
+    const nameUpper = String(name || '').toUpperCase();
+    if (nameUpper.includes('USA') || nameUpper.includes('COSMOS') || nameUpper.includes('YAOGAN')) return 'military';
+    if (nameUpper.includes('STARLINK') || nameUpper.includes('ONEWEB') || nameUpper.includes('WORLDVIEW') || nameUpper.includes('CAPELLA')) return 'commercial';
+    return 'civilian';
+}
+
+function parseTleTextRecords(tleText: string): any[] {
+    const lines = String(tleText || '')
+        .split(/\r?\n/)
+        .map((line) => line.trim().replace(/^0\s+/, ''))
+        .filter(Boolean);
+    const records: any[] = [];
+    for (let index = 0; index < lines.length;) {
+        let name = '';
+        let tleLine1 = '';
+        let tleLine2 = '';
+        if (lines[index]?.startsWith('1 ') && lines[index + 1]?.startsWith('2 ')) {
+            tleLine1 = lines[index];
+            tleLine2 = lines[index + 1];
+            const noradId = extractNoradIdFromTle(tleLine1);
+            name = Number.isFinite(noradId) && noradId > 0 ? `NORAD ${noradId}` : `Satellite ${records.length + 1}`;
+            index += 2;
+        } else if (lines[index + 1]?.startsWith('1 ') && lines[index + 2]?.startsWith('2 ')) {
+            name = lines[index];
+            tleLine1 = lines[index + 1];
+            tleLine2 = lines[index + 2];
+            index += 3;
+        } else {
+            index += 1;
+            continue;
+        }
+        const noradId = extractNoradIdFromTle(tleLine1);
+        const nameUpper = name.toUpperCase();
+        if (nameUpper.includes(' DEB') || nameUpper.includes(' R/B') || nameUpper.includes('COOLANT')) continue;
+        records.push({
+            name,
+            tleLine1,
+            tleLine2,
+            tleEpochAt: parseTleEpochAtFromLine1(tleLine1),
+            fetchedAt: new Date().toISOString(),
+            provider: 'space-track',
+            sourcePublicationAt: null,
+            type: classifySatelliteTypeByName(name),
+            classificationSource: 'derived_name_heuristic',
+            noradId,
+        });
+    }
+    return records;
+}
+
+async function getOpenSkySourceFetchAuthHeader(): Promise<Record<string, any>> {
+    const clientId = process.env.OPENSKY_USERNAME;
+    const clientSecret = process.env.OPENSKY_PASSWORD;
+    if (!clientId || !clientSecret) {
+        throw new Error('OpenSky credentials are not configured');
+    }
+    const params = new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: clientId,
+        client_secret: clientSecret,
+    });
+    const response = await axios.post(OPENSKY_TOKEN_URL, params.toString(), {
+        timeout: 15_000,
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    });
+    const token = response.data?.access_token;
+    if (!token) throw new Error('OpenSky OAuth response did not include an access token');
+    return { headers: { Authorization: `Bearer ${token}` } };
+}
+
+async function getSpaceTrackCookie(): Promise<string> {
+    const identity = process.env.SPACETRACK_EMAIL;
+    const password = process.env.SPACETRACK_PASSWORD;
+    if (!identity || !password) {
+        throw new Error('Space-Track credentials are not configured');
+    }
+    const body = `identity=${encodeURIComponent(identity)}&password=${encodeURIComponent(password)}`;
+    const login = await axios.post(SPACETRACK_LOGIN_URL, body, {
+        timeout: 15_000,
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    });
+    const cookies = login.headers['set-cookie'];
+    if (!cookies?.length) throw new Error('Space-Track login did not return a session cookie');
+    return cookies.map((cookie: string) => cookie.split(';')[0]).join('; ');
+}
+
+function parseProviderImageContentType(value: unknown): { contentType: string; extension: string } {
+    const contentType = String(value || 'image/png').split(';')[0].trim().toLowerCase();
+    if (contentType.includes('jpeg') || contentType.includes('jpg')) return { contentType: 'image/jpeg', extension: 'jpg' };
+    if (contentType.includes('webp')) return { contentType: 'image/webp', extension: 'webp' };
+    return { contentType: 'image/png', extension: 'png' };
+}
+
+async function saveImageryArtifact(buffer: Buffer, contentTypeRaw: unknown, metadata: Record<string, any>) {
+    await fs.promises.mkdir(OPENSPY_LOCAL_ARTIFACT_DIR, { recursive: true });
+    const { contentType, extension } = parseProviderImageContentType(contentTypeRaw);
+    const artifactId = `img-${new Date().toISOString().replace(/[:.]/g, '-')}-${stableHash({ metadata, bytes: buffer.length })}`;
+    const filename = `${artifactId}.${extension}`;
+    const metadataFilename = `${artifactId}.json`;
+    const imagePath = path.join(OPENSPY_LOCAL_ARTIFACT_DIR, filename);
+    const metadataPath = path.join(OPENSPY_LOCAL_ARTIFACT_DIR, metadataFilename);
+    await fs.promises.writeFile(imagePath, buffer);
+    await fs.promises.writeFile(metadataPath, JSON.stringify({
+        artifact_id: artifactId,
+        filename,
+        content_type: contentType,
+        bytes: buffer.length,
+        created_at: new Date().toISOString(),
+        ...metadata,
+    }, null, 2));
+    return {
+        artifact_id: artifactId,
+        filename,
+        content_type: contentType,
+        bytes: buffer.length,
+        artifact_url: `/api/imagery/artifacts/${encodeURIComponent(filename)}`,
+        metadata_url: `/api/imagery/artifacts/${encodeURIComponent(metadataFilename)}`,
+    };
+}
+
 function parseOpenSpyBbox(value: unknown): OpenSpyBbox | null {
     if (!value) return null;
     const parts = Array.isArray(value)
@@ -1524,7 +1711,7 @@ function dayRangeFromWindow(from: string, to: string | null, fallback = 1): numb
     const fromMs = new Date(from).getTime();
     const toMs = new Date(to).getTime();
     if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs < fromMs) return fallback;
-    return Math.max(1, Math.min(10, Math.ceil((toMs - fromMs) / 86_400_000) + 1));
+    return Math.max(1, Math.ceil((toMs - fromMs) / 86_400_000) + 1);
 }
 
 function splitCsvLine(line: string): string[] {
@@ -1661,6 +1848,42 @@ function mapEonetEvent(event: any): DisasterEvent | null {
     };
 }
 
+function mapGdacsFeature(feature: any): DisasterEvent | null {
+    const coords = extractPointLikeCoordinates(feature?.geometry);
+    if (!coords) return null;
+    const props = feature.properties || {};
+    const eventType = String(props.eventtype || 'XX').toUpperCase();
+    const defaultRadii: Record<string, number> = {
+        EQ: 100,
+        TC: 300,
+        FL: 150,
+        VO: 50,
+        WF: 80,
+        DR: 200,
+    };
+    const [lng, lat] = coords;
+    const fromDate = props.fromdate ? new Date(props.fromdate) : null;
+    const toDate = props.todate ? new Date(props.todate) : null;
+    const startTime = fromDate && Number.isFinite(fromDate.getTime()) ? fromDate.toISOString() : null;
+    const endTime = toDate && Number.isFinite(toDate.getTime())
+        ? toDate.toISOString()
+        : new Date(Date.now() + 86_400_000).toISOString();
+    return {
+        id: `gdacs-${props.eventid || stableHash(feature)}`,
+        type: 'strike',
+        source: 'GDACS',
+        eventType,
+        alertLevel: props.alertlevel || 'Green',
+        radiusKm: defaultRadii[eventType] || 100,
+        lat,
+        lng,
+        startTime,
+        endTime,
+        description: props.name || props.description || `GDACS ${eventType} event`,
+        geometry: feature.geometry || null,
+    };
+}
+
 function iodaSeverityRank(level: string): number {
     if (level === 'critical') return 2;
     if (level === 'warning') return 1;
@@ -1709,6 +1932,88 @@ function resolveGibsLayerAlias(layer: unknown): string {
         viirs_noaa21_true_color: 'VIIRS_NOAA21_CorrectedReflectance_TrueColor',
     };
     return aliases[key] || String(layer || aliases.viirs_true_color);
+}
+
+function resolveFirmsWmsLayerAlias(layer: unknown): string {
+    const key = String(layer || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+    const aliases: Record<string, string> = {
+        viirs: 'fires_viirs_24',
+        viirs_24: 'fires_viirs_24',
+        fires_viirs_24: 'fires_viirs_24',
+        fires_viirs_48: 'fires_viirs_48',
+        fires_viirs_72: 'fires_viirs_72',
+        fires_viirs_7: 'fires_viirs_7',
+        modis: 'fires_modis_24',
+        modis_24: 'fires_modis_24',
+        fires_modis_24: 'fires_modis_24',
+        fires_modis_48: 'fires_modis_48',
+        fires_modis_72: 'fires_modis_72',
+        fires_modis_7: 'fires_modis_7',
+        landsat: 'fires_landsat_24',
+        fires_landsat_24: 'fires_landsat_24',
+        tsd_viirs: 'tsd_4_viirs_all',
+        tsd_4_viirs_all: 'tsd_4_viirs_all',
+        tsd_modis: 'tsd_4_modis_all',
+        tsd_4_modis_all: 'tsd_4_modis_all',
+    };
+    if (aliases[key]) return aliases[key];
+    if (/^(fires|tsd)_/.test(key)) return key;
+    return 'fires_viirs_24';
+}
+
+function buildFirmsWmsOverlayDescriptor(input: {
+    date?: string | null;
+    from?: string | null;
+    to?: string | null;
+    bbox?: OpenSpyBbox | null;
+    layer?: unknown;
+    opacity?: unknown;
+}) {
+    const layer = resolveFirmsWmsLayerAlias(input.layer);
+    const time = input.from && input.to
+        ? `${input.from}/${input.to}`
+        : input.from || input.to || input.date || null;
+    const opacity = Number(input.opacity ?? 0.72);
+    const payload = {
+        source: 'firms',
+        layer,
+        wmsLayer: layer,
+        time,
+        opacity: Number.isFinite(opacity) ? Math.max(0, Math.min(opacity, 1)) : 0.72,
+        switchBase: false,
+        ...(input.bbox ? { bbox: input.bbox, bbox_order: 'west,south,east,north' } : {}),
+    };
+    return {
+        scene_id: `scene:firms:${layer}:${stableHash({ time, bbox: input.bbox || null })}`,
+        source: 'firms',
+        provider: 'NASA FIRMS WMS',
+        imagery_kind: 'wms_time_active_fire_overlay',
+        layer,
+        time,
+        coverage: input.bbox
+            ? { scope: 'aoi_overlay', bbox: input.bbox, bbox_order: 'west,south,east,north' }
+            : { scope: 'global_overlay' },
+        visual_use: 'Thermal active-fire/hotspot WMS overlay for corroboration. This is not raw optical satellite imagery.',
+        ui_actions: ['imagery.show_layer', 'imagery.show_scene', 'imagery.clear'],
+        action_payloads: {
+            show_layer: { type: 'imagery.show_layer', label: `Show FIRMS ${layer}`, payload },
+            show_scene: { type: 'imagery.show_scene', label: `Show FIRMS ${layer}`, payload },
+            clear: { type: 'imagery.clear', label: 'Clear FIRMS overlay', payload: {} },
+        },
+    };
+}
+
+function imageryRenderSizeForBbox([west, south, east, north]: OpenSpyBbox, maxPixels = 768): { width: number; height: number } {
+    const latSpan = Math.max(0.0001, Math.abs(north - south));
+    const lngSpan = Math.max(0.0001, Math.abs(east - west));
+    const midLatRad = ((north + south) / 2) * Math.PI / 180;
+    const widthAtLat = Math.max(0.0001, lngSpan * Math.max(0.2, Math.cos(midLatRad)));
+    const aspect = Math.max(0.25, Math.min(4, widthAtLat / latSpan));
+    const longSide = Math.max(128, Math.min(maxPixels, 1024));
+    if (aspect >= 1) {
+        return { width: longSide, height: Math.max(128, Math.round(longSide / aspect)) };
+    }
+    return { width: Math.max(128, Math.round(longSide * aspect)), height: longSide };
 }
 
 function buildGibsSceneDescriptor(input: {
@@ -1774,6 +2079,68 @@ function buildGibsSceneDescriptor(input: {
     };
 }
 
+function mapLandsatStacFeature(feature: any, requestedLayer: string, opacity: number) {
+    const bbox = Array.isArray(feature?.bbox) && feature.bbox.length === 4
+        ? feature.bbox.map((value: unknown) => Number(value))
+        : null;
+    const assets = feature?.assets && typeof feature.assets === 'object' ? feature.assets : {};
+    const thumbnailUrl = assets.reduced_resolution_browse?.href || assets.thumbnail?.href || null;
+    const datetime = feature?.properties?.datetime || feature?.properties?.['start_datetime'] || null;
+    const cloudCover = feature?.properties?.['eo:cloud_cover'] ?? feature?.properties?.cloud_cover ?? null;
+    const sceneId = `scene:landsat:${feature?.id || stableHash(feature)}`;
+    const renderSupported = Boolean(thumbnailUrl && bbox && bbox.every(Number.isFinite));
+    const showPayload = renderSupported ? {
+        source: 'landsat',
+        scene_id: sceneId,
+        scene: {
+            scene_id: sceneId,
+            source: 'landsat',
+            provider: 'USGS Landsat STAC',
+            id: feature.id || sceneId,
+            collection: feature.collection || null,
+            datetime,
+            cloud_cover: cloudCover,
+            bbox,
+            bbox_order: 'west,south,east,north',
+            thumbnail_url: thumbnailUrl,
+        },
+        bbox,
+        bbox_order: 'west,south,east,north',
+        thumbnail_url: thumbnailUrl,
+        collection: feature.collection || null,
+        layer: requestedLayer,
+        opacity,
+        switchBase: true,
+    } : null;
+    return {
+        scene_id: sceneId,
+        source: 'landsat',
+        provider: 'USGS Landsat STAC',
+        id: feature.id || sceneId,
+        collection: feature.collection || null,
+        datetime,
+        cloud_cover: cloudCover,
+        bbox,
+        bbox_order: bbox ? 'west,south,east,north' : null,
+        render_supported: renderSupported,
+        visual_use: 'Historical browse imagery overlay for corroboration. Raw multiband COG rendering is not implemented.',
+        assets: {
+            thumbnail: assets.thumbnail?.href || null,
+            reduced_resolution_browse: assets.reduced_resolution_browse?.href || null,
+            red: assets.red?.href || null,
+            green: assets.green?.href || null,
+            blue: assets.blue?.href || null,
+        },
+        action_payloads: showPayload ? {
+            show_scene: {
+                type: 'imagery.show_scene',
+                label: `Show Landsat ${datetime ? String(datetime).slice(0, 10) : 'scene'}`,
+                payload: showPayload,
+            },
+        } : {},
+    };
+}
+
 async function buildSourceCapabilityMatrix() {
     const currentCapabilities = currentSourceFetchCapabilities();
     const [sources, layers, ingestRows] = await Promise.all([
@@ -1798,7 +2165,7 @@ async function buildSourceCapabilityMatrix() {
         operationsBySource.get(capability.source)!.push({
             operation,
             ...capability,
-            provider_policy: providerPolicyForSource(capability.source),
+            provider_policy: providerPolicyForSourceFetchOperation(operation, capability.source),
         });
     }
 
@@ -1889,7 +2256,7 @@ async function buildSourceCapabilityMatrix() {
             .map(([operationId, capability]) => ({
                 operation: operationId,
                 ...capability,
-                provider_policy: providerPolicyForSource(capability.source),
+                provider_policy: providerPolicyForSourceFetchOperation(operationId, capability.source),
             }))
             .sort((a, b) => a.operation.localeCompare(b.operation)),
         summary: {
@@ -1928,6 +2295,11 @@ function compactOperationPolicyForCapabilityResponse(policy: Record<string, unkn
         'provider_fetch_status',
         'local_incremental_ingest_status',
         'product_status',
+        'supported_sources',
+        'tracks_endpoint',
+        'provider_history_import',
+        'current_tle_cache_hours',
+        'visual_overlay',
         'selected_date_rule',
         'resolution',
         'upstream_granularity',
@@ -2210,7 +2582,7 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
         }
         const capabilityWithPolicy = {
             ...capability,
-            provider_policy: providerPolicyForSource(capability.source),
+            provider_policy: providerPolicyForSourceFetchOperation(operation, capability.source),
         };
         if (capability.status === 'auth_required' || capability.status === 'unsupported' || capability.status === 'planned') {
             res.json({
@@ -2254,6 +2626,197 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
             return false;
         };
 
+        if (operation === 'opensky-tracks') {
+            const icao24 = String(args.icao24 || args.icao || args.entity || '').trim().toLowerCase().replace(/^aircraft:/, '');
+            if (!/^[0-9a-f]{6}$/.test(icao24)) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_ICAO24', message: 'opensky-tracks requires --icao24 with a 6-character lowercase hex transponder address' } });
+                return;
+            }
+            const explicitTime = args.time || args.at;
+            const trackTimeSeconds = explicitTime
+                ? Math.floor(new Date(String(explicitTime)).getTime() / 1000)
+                : from && to
+                    ? Math.floor((new Date(from).getTime() + new Date(to).getTime()) / 2000)
+                    : from
+                        ? Math.floor(new Date(from).getTime() / 1000)
+                        : 0;
+            if (!Number.isFinite(trackTimeSeconds) || trackTimeSeconds < 0) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_TIME', message: 'opensky-tracks requires a valid --time/--at ISO timestamp, or a valid --from/--to window' } });
+                return;
+            }
+            if (dryRun) {
+                res.json({
+                    status: 'ok',
+                    data: {
+                        operation,
+                        source: capability.source,
+                        icao24,
+                        time: trackTimeSeconds,
+                        requested_window: { from: from || null, to: to || null },
+                        capability: capabilityWithPolicy,
+                    },
+                    meta: { executed: false, persisted: false, dry_run: true },
+                    warnings: ['Dry run only. No OpenSky provider request was sent and no local data was written.'],
+                });
+                return;
+            }
+            const authConfig = await getOpenSkySourceFetchAuthHeader();
+            const params = new URLSearchParams({ icao24, time: String(trackTimeSeconds) });
+            const response = await axios.get(`https://opensky-network.org/api/tracks/all?${params.toString()}`, {
+                ...authConfig,
+                timeout: 30_000,
+            });
+            const pathRows = Array.isArray(response.data?.path) ? response.data.path : [];
+            const callsign = String(response.data?.callsign || icao24).trim() || icao24;
+            const records = pathRows
+                .map((point: any[]) => {
+                    const pointTime = Number(point?.[0]);
+                    const lat = Number(point?.[1]);
+                    const lng = Number(point?.[2]);
+                    const altMeters = point?.[3] == null ? null : Number(point[3]);
+                    const heading = point?.[4] == null ? null : Number(point[4]);
+                    if (!Number.isFinite(pointTime) || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+                    return {
+                        id: icao24,
+                        icao24,
+                        callsign,
+                        origin: null,
+                        lat,
+                        lng,
+                        altMeters: Number.isFinite(altMeters) ? altMeters : null,
+                        heading: Number.isFinite(heading) ? heading : null,
+                        type: classifyAircraftForSourceFetch(callsign, Number.isFinite(altMeters) ? altMeters : null, null),
+                        speedMps: null,
+                        onGround: Boolean(point?.[5]),
+                        verticalRate: null,
+                        squawk: null,
+                        lastContact: pointTime,
+                    };
+                })
+                .filter(Boolean);
+            if (persist) await sourcePersistenceService.persistAircraftPositions(records as any[]);
+            const fromMs = from ? new Date(from).getTime() : Number.NEGATIVE_INFINITY;
+            const toMs = to ? new Date(to).getTime() : Number.POSITIVE_INFINITY;
+            const requestedWindowCount = records.filter((record: any) => {
+                const observedMs = Number(record.lastContact || 0) * 1000;
+                return observedMs >= fromMs && observedMs <= toMs;
+            }).length;
+            res.json({
+                status: 'ok',
+                data: {
+                    operation,
+                    source: capability.source,
+                    icao24,
+                    callsign,
+                    count: records.length,
+                    rawCount: pathRows.length,
+                    requestedWindowCount,
+                    track: {
+                        startTime: response.data?.startTime || null,
+                        endTime: response.data?.endTime || null,
+                        time: trackTimeSeconds,
+                    },
+                },
+                meta: { executed: true, persisted: persist, provider_checked: true },
+                warnings: [
+                    'OpenSky /tracks/all is experimental and returns a generalized flight trajectory for one aircraft around the requested time, not a bulk AOI history export.',
+                    ...(from || to ? ['requestedWindowCount is reported separately; returned track points can cover the wider flight containing the requested time.'] : []),
+                ],
+            });
+            return;
+        }
+
+        if (operation === 'spacetrack-gp-history') {
+            const noradRaw = String(args.norad || args.norad_id || args.noradId || '').trim();
+            const noradIds = noradRaw
+                .split(',')
+                .map((item) => item.trim())
+                .filter(Boolean);
+            if (noradIds.length === 0 || noradIds.some((item) => !/^\d+$/.test(item))) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_NORAD', message: 'spacetrack-gp-history requires --norad with one or more comma-separated numeric NORAD IDs' } });
+                return;
+            }
+            if (!from || !to) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_WINDOW', message: 'spacetrack-gp-history requires --from and --to ISO timestamps' } });
+                return;
+            }
+            const epochRange = `${from.replace(/\.\d{3}Z$/, 'Z').replace('T', ' ').replace(/Z$/, '')}--${to.replace(/\.\d{3}Z$/, 'Z').replace('T', ' ').replace(/Z$/, '')}`;
+            const limitRaw = args.limit == null ? null : Number(args.limit);
+            const limitValue = Number.isFinite(limitRaw) && Number(limitRaw) > 0 ? Math.floor(Number(limitRaw)) : null;
+            const queryUrl = [
+                SPACETRACK_GP_HISTORY_BASE_URL,
+                'NORAD_CAT_ID',
+                encodeURIComponent(noradIds.join(',')),
+                'EPOCH',
+                encodeURIComponent(epochRange),
+                'orderby',
+                encodeURIComponent('NORAD_CAT_ID,EPOCH asc'),
+                ...(limitValue != null ? ['limit', String(limitValue)] : []),
+                'format',
+                '3le',
+            ].join('/');
+            if (dryRun) {
+                res.json({
+                    status: 'ok',
+                    data: {
+                        operation,
+                        source: capability.source,
+                        upstream_provider: 'space-track',
+                        noradIds,
+                        epochRange,
+                        limit: limitValue,
+                        capability: capabilityWithPolicy,
+                    },
+                    meta: { executed: false, persisted: false, dry_run: true },
+                    warnings: ['Dry run only. No Space-Track provider request was sent and no local data was written.'],
+                });
+                return;
+            }
+            const cookie = await getSpaceTrackCookie();
+            const response = await axios.get<string>(queryUrl, {
+                timeout: 60_000,
+                responseType: 'text',
+                headers: { Cookie: cookie },
+            });
+            const records = parseTleTextRecords(response.data);
+            if (persist) {
+                await sourcePersistenceService.persistSatelliteOrbitalHistory(records as any[], {
+                    sourceId: capability.source,
+                    provider: 'space-track',
+                    fetchedAt: new Date().toISOString(),
+                    query: {
+                        operation,
+                        noradIds,
+                        epochRange,
+                        limit: limitValue,
+                    },
+                });
+            }
+            res.json({
+                status: 'ok',
+                data: {
+                    operation,
+                    source: capability.source,
+                    upstream_provider: 'space-track',
+                    count: records.length,
+                    rawBytes: Buffer.byteLength(response.data || '', 'utf8'),
+                    noradIds,
+                    epochRange,
+                    epochs: records.map((record: any) => ({
+                        norad_id: record.noradId,
+                        name: record.name,
+                        tle_epoch_at: record.tleEpochAt,
+                    })),
+                },
+                meta: { executed: true, persisted: persist, provider_checked: true },
+                warnings: [
+                    'Space-Track GP_HISTORY import stores historical orbital elements. Replay still computes positions locally from stored TLE epochs.',
+                    'The current importer uses TLE/3LE records; objects requiring OMM-only Alpha-5 handling need a separate OMM parser.',
+                ],
+            });
+            return;
+        }
+
         if (operation === 'firms-fires') {
             if (!from && !args.date) {
                 res.status(400).json({ status: 'error', error: { code: 'BAD_WINDOW', message: 'firms-fires requires --from ISO timestamp or --date YYYY-MM-DD' } });
@@ -2261,13 +2824,52 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
             }
             const date = String(args.date || isoDateOnly(from) || '').slice(0, 10);
             const bbox = parseOpenSpyBbox(args.bbox);
-            const dayRange = Math.max(1, Math.min(10, Number.parseInt(String(args.day_range || args.dayRange || dayRangeFromWindow(from || `${date}T00:00:00.000Z`, to)), 10) || 1));
+            const requestedDayRange = Number.parseInt(String(args.day_range || args.dayRange || dayRangeFromWindow(from || `${date}T00:00:00.000Z`, to)), 10) || 1;
+            if (!Number.isFinite(requestedDayRange) || requestedDayRange < 1) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_DAY_RANGE', message: 'firms-fires day_range must be a positive integer' } });
+                return;
+            }
+            if (requestedDayRange > 10) {
+                res.status(400).json({
+                    status: 'error',
+                    error: {
+                        code: 'DAY_RANGE_TOO_LARGE',
+                        message: 'firms-fires day_range is limited by NASA FIRMS provider policy to 10 days.',
+                    },
+                    data: {
+                        operation,
+                        requested_day_range: requestedDayRange,
+                        max_day_range: 10,
+                    },
+                });
+                return;
+            }
+            const dayRange = Math.trunc(requestedDayRange);
             const source = String(args.source || 'VIIRS_SNPP_NRT').trim();
             const area = String(args.area || (bbox ? bbox.join(',') : 'world')).trim();
+            const wmsOverlay = buildFirmsWmsOverlayDescriptor({
+                date,
+                from,
+                to,
+                bbox,
+                layer: args.wms_layer || args.wmsLayer || args.layer || 'fires_viirs_24',
+                opacity: args.opacity,
+            });
             if (dryRun) {
                 res.json({
                     status: 'ok',
-                    data: { operation, source: capability.source, date, dayRange, firmsSource: source, area, capability: capabilityWithPolicy },
+                    data: {
+                        operation,
+                        source: capability.source,
+                        date,
+                        dayRange,
+                        firmsSource: source,
+                        area,
+                        wms_overlay: wmsOverlay,
+                        ui_actions: wmsOverlay.ui_actions,
+                        action_payload_example: wmsOverlay.action_payloads.show_layer,
+                        capability: capabilityWithPolicy,
+                    },
                     meta: { executed: false, persisted: false, dry_run: true },
                     warnings: ['Dry run only. No provider request was sent and no local data was written.'],
                 });
@@ -2285,9 +2887,24 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
             if (persist) await sourcePersistenceService.persistFires(records, { rawCsv: response.data });
             res.json({
                 status: 'ok',
-                data: { operation, source: capability.source, date, dayRange, firmsSource: source, area, count: records.length, rawBytes: Buffer.byteLength(response.data, 'utf8') },
+                data: {
+                    operation,
+                    source: capability.source,
+                    date,
+                    dayRange,
+                    firmsSource: source,
+                    area,
+                    count: records.length,
+                    rawBytes: Buffer.byteLength(response.data, 'utf8'),
+                    wms_overlay: wmsOverlay,
+                    ui_actions: wmsOverlay.ui_actions,
+                    action_payload_example: wmsOverlay.action_payloads.show_layer,
+                },
                 meta: { executed: true, persisted: persist },
-                warnings: dayRange > 1 ? ['FIRMS date window is inclusive from date through date + dayRange - 1.'] : [],
+                warnings: [
+                    ...(dayRange > 1 ? ['FIRMS date window is inclusive from date through date + dayRange - 1.'] : []),
+                    'FIRMS WMS overlay is proxied through OpenSpy so the MAP_KEY is not exposed to browser or agent.',
+                ],
             });
             return;
         }
@@ -2385,6 +3002,81 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
                 data: { operation, source: capability.source, count: events.length, rawCount: rawEvents.length },
                 meta: { executed: true, persisted: persist },
                 warnings: [],
+            });
+            return;
+        }
+
+        if (operation === 'gdacs-disasters') {
+            const bbox = parseOpenSpyBbox(args.bbox);
+            if (dryRun) {
+                res.json({
+                    status: 'ok',
+                    data: {
+                        operation,
+                        source: capability.source,
+                        bbox: bbox || null,
+                        from: from || null,
+                        to: to || null,
+                        capability: capabilityWithPolicy,
+                    },
+                    meta: {
+                        executed: false,
+                        persisted: false,
+                        dry_run: true,
+                        provider_feed: 'current_recent_map',
+                    },
+                    warnings: ['Dry run only. No GDACS provider request was sent and no local data was written.'],
+                });
+                return;
+            }
+            const response = await axios.get('https://www.gdacs.org/gdacsapi/api/events/geteventlist/MAP', { timeout: 30_000 });
+            const features = Array.isArray(response.data?.features) ? response.data.features : [];
+            const allEvents = features.map(mapGdacsFeature).filter((event: DisasterEvent | null): event is DisasterEvent => Boolean(event));
+            const fromMs = from ? new Date(from).getTime() : Number.NEGATIVE_INFINITY;
+            const toMs = to ? new Date(to).getTime() : Number.POSITIVE_INFINITY;
+            const events = allEvents.filter((event: DisasterEvent) => {
+                if (bbox && (event.lng < bbox[0] || event.lng > bbox[2] || event.lat < bbox[1] || event.lat > bbox[3])) {
+                    return false;
+                }
+                const startMs = event.startTime ? new Date(event.startTime).getTime() : Number.NEGATIVE_INFINITY;
+                const endMs = event.endTime ? new Date(event.endTime).getTime() : startMs;
+                return endMs >= fromMs && startMs <= toMs;
+            });
+            if (persist) {
+                await sourcePersistenceService.persistDisasterEvents(events, {
+                    rawPayloads: [{
+                        source_id: 'gdacs',
+                        payload: response.data,
+                        observed_at: from || new Date().toISOString(),
+                        upstream_id: `gdacs-map:${from || 'open'}:${to || 'open'}:${bbox ? bbox.join(',') : 'world'}`,
+                        metadata: {
+                            format: 'geojson',
+                            payloadKind: 'current_recent_map_feed',
+                            filters: { from, to, bbox },
+                        },
+                    }],
+                });
+            }
+            res.json({
+                status: 'ok',
+                data: {
+                    operation,
+                    source: capability.source,
+                    count: events.length,
+                    rawCount: features.length,
+                    provider_feed: 'current_recent_map',
+                    bbox: bbox || null,
+                    from: from || null,
+                    to: to || null,
+                },
+                meta: {
+                    executed: true,
+                    persisted: persist,
+                    provider_checked: true,
+                },
+                warnings: [
+                    'GDACS MAP feed is current/recent event context. It is not a guaranteed complete arbitrary historical archive; bbox/time filters are applied to returned feed rows.',
+                ],
             });
             return;
         }
@@ -2698,6 +3390,264 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
             return;
         }
 
+        if (operation === 'landsat-stac-imagery') {
+            const bbox = parseOpenSpyBbox(args.bbox);
+            if (!bbox) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_BBOX', message: 'landsat-stac-imagery requires --bbox west,south,east,north' } });
+                return;
+            }
+            const defaultTo = to || new Date().toISOString();
+            const defaultFrom = from || new Date(new Date(defaultTo).getTime() - 90 * 86_400_000).toISOString();
+            const collection = String(args.collection || args.dataset || 'landsat-c2l2-sr');
+            const layer = String(args.layer || 'browse');
+            const limit = Number(args.limit || 5);
+            const maxCloudCover = args.max_cloud_cover ?? args.maxCloudCover;
+            const query: Record<string, any> = {
+                bbox,
+                datetime: `${defaultFrom}/${defaultTo}`,
+                collections: [collection],
+                limit: Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 5,
+            };
+            if (maxCloudCover !== undefined && maxCloudCover !== null && String(maxCloudCover).trim() !== '') {
+                query.query = {
+                    'eo:cloud_cover': {
+                        lte: Number(maxCloudCover),
+                    },
+                };
+            }
+            if (dryRun) {
+                res.json({
+                    status: 'ok',
+                    data: {
+                        operation,
+                        source: capability.source,
+                        query,
+                        capability: capabilityWithPolicy,
+                    },
+                    meta: { executed: false, persisted: false, dry_run: true },
+                    warnings: ['Dry run only. No Landsat STAC provider request was sent.'],
+                });
+                return;
+            }
+            const response = await axios.post('https://landsatlook.usgs.gov/stac-server/search', query, {
+                timeout: 30_000,
+                headers: { 'content-type': 'application/json' },
+            });
+            const features = Array.isArray(response.data?.features) ? response.data.features : [];
+            const opacity = Number(args.opacity ?? 0.72);
+            const scenes = features.map((feature: any) => mapLandsatStacFeature(
+                feature,
+                layer,
+                Number.isFinite(opacity) ? Math.max(0, Math.min(opacity, 1)) : 0.72,
+            ));
+            res.json({
+                status: 'ok',
+                data: {
+                    operation,
+                    source: capability.source,
+                    scenes,
+                    scene: scenes[0] || null,
+                    rawCount: features.length,
+                    numberMatched: response.data?.numberMatched ?? null,
+                    query,
+                    ui_actions: ['imagery.show_scene', 'imagery.compare', 'imagery.clear'],
+                    action_payload_example: scenes[0]?.action_payloads?.show_scene || null,
+                },
+                meta: {
+                    executed: true,
+                    persisted: false,
+                    raw_pixels_downloaded: false,
+                },
+                warnings: [
+                    'Landsat STAC search returns scene metadata and browse/thumbnail overlay actions. OpenSpy does not render raw multiband Landsat COG products yet.',
+                    ...(scenes.some((scene: any) => !scene.render_supported)
+                        ? ['Some returned Landsat scenes are metadata-only because no browse/thumbnail asset was present.']
+                        : []),
+                ],
+            });
+            return;
+        }
+
+        if (operation === 'imagery-evidence-artifact') {
+            const payload = (() => {
+                if (args.payload_json) {
+                    try {
+                        return JSON.parse(String(args.payload_json));
+                    } catch {
+                        return null;
+                    }
+                }
+                if (args.payload && typeof args.payload === 'object') return args.payload;
+                return null;
+            })();
+            if (args.payload_json && !payload) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_PAYLOAD_JSON', message: 'imagery-evidence-artifact received invalid --payload-json' } });
+                return;
+            }
+            const source = String(args.source || payload?.source || payload?.provider || payload?.scene?.source || '').trim().toLowerCase();
+            if (!source) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_SOURCE', message: 'imagery-evidence-artifact requires --source or payload_json.source' } });
+                return;
+            }
+            if (dryRun) {
+                res.json({
+                    status: 'ok',
+                    data: {
+                        operation,
+                        source: capability.source,
+                        requested_source: source,
+                        capability: capabilityWithPolicy,
+                    },
+                    meta: { executed: false, persisted: false, dry_run: true, raw_pixels_downloaded: false },
+                    warnings: ['Dry run only. No imagery artifact was rendered or downloaded.'],
+                });
+                return;
+            }
+
+            let artifactBuffer: Buffer | null = null;
+            let artifactContentType = 'image/png';
+            let artifactMetadata: Record<string, any> = {
+                operation,
+                requested_source: source,
+                pixel_analysis_executed: false,
+            };
+
+            if (/copernicus|sentinel/.test(source)) {
+                const bbox = parseOpenSpyBbox(args.bbox || payload?.bbox || payload?.scene?.bbox || payload?.scene?.render?.bbox);
+                if (!bbox) {
+                    res.status(400).json({ status: 'error', error: { code: 'BAD_BBOX', message: 'Copernicus imagery artifact requires bbox=west,south,east,north' } });
+                    return;
+                }
+                const renderSize = imageryRenderSizeForBbox(bbox, Number(args.max_pixels || args.maxPixels || payload?.maxPixels || payload?.max_pixels || 768));
+                const rendered = await copernicusService.renderScene({
+                    bbox,
+                    from: parseIsoDateOrNull(args.from ? String(args.from) : undefined)
+                        || parseIsoDateOrNull(payload?.from ? String(payload.from) : undefined)
+                        || parseIsoDateOrNull(payload?.scene?.render?.from ? String(payload.scene.render.from) : undefined)
+                        || new Date(Date.now() - 86_400_000).toISOString(),
+                    to: parseIsoDateOrNull(args.to ? String(args.to) : undefined)
+                        || parseIsoDateOrNull(payload?.to ? String(payload.to) : undefined)
+                        || parseIsoDateOrNull(payload?.scene?.render?.to ? String(payload.scene.render.to) : undefined)
+                        || new Date().toISOString(),
+                    collection: String(args.collection || payload?.collection || payload?.scene?.render?.collection || payload?.scene?.collection || 'sentinel-2-l2a'),
+                    layer: String(args.layer || payload?.layer || payload?.scene?.render?.layer || 'true_color'),
+                    maxCloudCover: Number(args.maxCloudCover || args.max_cloud_cover || payload?.maxCloudCover || payload?.scene?.render?.maxCloudCover || 40),
+                    width: Number(args.width || payload?.width || renderSize.width),
+                    height: Number(args.height || payload?.height || renderSize.height),
+                });
+                artifactBuffer = rendered.buffer;
+                artifactContentType = rendered.contentType;
+                artifactMetadata = {
+                    ...artifactMetadata,
+                    provider: 'Copernicus Sentinel',
+                    bbox,
+                    bbox_order: 'west,south,east,north',
+                    collection: String(args.collection || payload?.collection || payload?.scene?.render?.collection || payload?.scene?.collection || 'sentinel-2-l2a'),
+                    layer: String(args.layer || payload?.layer || payload?.scene?.render?.layer || 'true_color'),
+                };
+            } else if (/landsat|usgs/.test(source)) {
+                const scene = payload?.scene && typeof payload.scene === 'object' ? payload.scene : null;
+                const imageUrl = args.thumbnail_url
+                    || args.thumbnailUrl
+                    || payload?.thumbnail_url
+                    || payload?.thumbnailUrl
+                    || scene?.thumbnail_url
+                    || scene?.assets?.reduced_resolution_browse
+                    || scene?.assets?.thumbnail;
+                if (!imageUrl) {
+                    res.status(400).json({ status: 'error', error: { code: 'BAD_IMAGE_URL', message: 'Landsat imagery artifact requires a thumbnail_url or a Landsat show_scene payload with a browse asset' } });
+                    return;
+                }
+                const response = await axios.get<ArrayBuffer>(String(imageUrl), { timeout: 30_000, responseType: 'arraybuffer' });
+                artifactBuffer = Buffer.from(response.data);
+                artifactContentType = String(response.headers['content-type'] || 'image/jpeg');
+                artifactMetadata = {
+                    ...artifactMetadata,
+                    provider: 'USGS Landsat STAC',
+                    scene_id: payload?.scene_id || scene?.scene_id || null,
+                    bbox: payload?.bbox || scene?.bbox || null,
+                    bbox_order: payload?.bbox_order || scene?.bbox_order || null,
+                    source_url_host: (() => {
+                        try { return new URL(String(imageUrl)).host; } catch { return null; }
+                    })(),
+                };
+            } else if (/firms/.test(source)) {
+                const mapKey = process.env.FIRMS_MAP_KEY || process.env.NASA_FIRMS_MAP_KEY;
+                if (!mapKey) {
+                    res.status(401).json({ status: 'auth_required', error: { code: 'AUTH_REQUIRED', message: 'FIRMS MAP_KEY is required to render a FIRMS WMS artifact' } });
+                    return;
+                }
+                const bbox = parseOpenSpyBbox(args.bbox || payload?.bbox);
+                if (!bbox) {
+                    res.status(400).json({ status: 'error', error: { code: 'BAD_BBOX', message: 'FIRMS imagery artifact requires bbox=west,south,east,north' } });
+                    return;
+                }
+                const width = Number(args.width || payload?.width || 1024);
+                const height = Number(args.height || payload?.height || 1024);
+                const layer = resolveFirmsWmsLayerAlias(args.layer || payload?.layer || payload?.wmsLayer);
+                const params = new URLSearchParams({
+                    SERVICE: 'WMS',
+                    REQUEST: 'GetMap',
+                    VERSION: '1.1.1',
+                    FORMAT: 'image/png',
+                    TRANSPARENT: 'true',
+                    SRS: 'EPSG:4326',
+                    BBOX: bbox.join(','),
+                    WIDTH: String(Number.isFinite(width) && width > 0 ? Math.floor(width) : 1024),
+                    HEIGHT: String(Number.isFinite(height) && height > 0 ? Math.floor(height) : 1024),
+                    LAYERS: layer,
+                    STYLES: '',
+                });
+                const time = args.time || payload?.time;
+                if (time) params.set('TIME', String(time));
+                const response = await axios.get<ArrayBuffer>(`https://firms.modaps.eosdis.nasa.gov/mapserver/wms/fires/${encodeURIComponent(mapKey)}/?${params.toString()}`, {
+                    timeout: 30_000,
+                    responseType: 'arraybuffer',
+                });
+                artifactBuffer = Buffer.from(response.data);
+                artifactContentType = String(response.headers['content-type'] || 'image/png');
+                artifactMetadata = {
+                    ...artifactMetadata,
+                    provider: 'NASA FIRMS WMS',
+                    layer,
+                    time: time || null,
+                    bbox,
+                    bbox_order: 'west,south,east,north',
+                };
+            } else {
+                res.status(400).json({
+                    status: 'error',
+                    error: { code: 'UNSUPPORTED_IMAGERY_ARTIFACT_SOURCE', message: `imagery-evidence-artifact does not support source: ${source}` },
+                    data: { supported_sources: ['copernicus', 'landsat', 'firms'] },
+                });
+                return;
+            }
+
+            const artifact = await saveImageryArtifact(artifactBuffer, artifactContentType, artifactMetadata);
+            res.json({
+                status: 'ok',
+                data: {
+                    operation,
+                    source: capability.source,
+                    artifact,
+                    vision_path: {
+                        status: 'artifact_ready',
+                        pixel_analysis_executed: false,
+                        note: 'OpenSpy created an evidence image artifact. A vision-capable agent/model can inspect artifact_url; this backend operation does not claim visual findings.',
+                    },
+                },
+                meta: {
+                    executed: true,
+                    persisted: false,
+                    artifact_persisted: true,
+                    raw_pixels_downloaded: true,
+                    artifact_store: '.local/imagery-artifacts',
+                },
+                warnings: ['Imagery artifact creation is evidence capture only; no backend pixel-level visual inference was executed.'],
+            });
+            return;
+        }
+
         res.json({
             status: 'unsupported',
             data: {
@@ -2746,6 +3696,82 @@ app.get('/api/imagery/copernicus/render', async (req, res) => {
         res.setHeader('X-OpenSpy-Imagery-Provider', 'copernicus');
         res.setHeader('X-OpenSpy-Imagery-Cached', rendered.cached ? 'true' : 'false');
         res.send(rendered.buffer);
+    } catch (err: any) {
+        sendError(res, err);
+    }
+});
+
+app.get('/api/imagery/firms/wms', async (req, res) => {
+    try {
+        const mapKey = process.env.FIRMS_MAP_KEY || process.env.NASA_FIRMS_MAP_KEY;
+        if (!mapKey) {
+            res.status(401).json({ error: 'FIRMS MAP_KEY is required for FIRMS WMS imagery' });
+            return;
+        }
+        const params = new URLSearchParams();
+        const setParam = (target: string, sourceNames: string[], fallback?: string) => {
+            for (const name of sourceNames) {
+                const value = req.query[name] ?? req.query[name.toLowerCase()] ?? req.query[name.toUpperCase()];
+                if (value != null) {
+                    params.set(target, String(Array.isArray(value) ? value[0] : value));
+                    return;
+                }
+            }
+            if (fallback != null) params.set(target, fallback);
+        };
+        setParam('SERVICE', ['SERVICE', 'service'], 'WMS');
+        setParam('REQUEST', ['REQUEST', 'request'], 'GetMap');
+        setParam('VERSION', ['VERSION', 'version'], '1.1.1');
+        setParam('FORMAT', ['FORMAT', 'format'], 'image/png');
+        setParam('TRANSPARENT', ['TRANSPARENT', 'transparent'], 'true');
+        setParam('SRS', ['SRS', 'srs', 'CRS', 'crs'], 'EPSG:4326');
+        setParam('BBOX', ['BBOX', 'bbox']);
+        setParam('WIDTH', ['WIDTH', 'width']);
+        setParam('HEIGHT', ['HEIGHT', 'height']);
+        setParam('STYLES', ['STYLES', 'styles'], '');
+        const layer = resolveFirmsWmsLayerAlias(req.query.layers || req.query.LAYERS || req.query.layer || req.query.wmsLayer);
+        params.set('LAYERS', layer);
+        const time = req.query.TIME || req.query.time;
+        if (time) params.set('TIME', String(Array.isArray(time) ? time[0] : time));
+        const upstream = `https://firms.modaps.eosdis.nasa.gov/mapserver/wms/fires/${encodeURIComponent(mapKey)}/?${params.toString()}`;
+        const response = await axios.get<ArrayBuffer>(upstream, {
+            timeout: 30_000,
+            responseType: 'arraybuffer',
+        });
+        res.setHeader('Content-Type', String(response.headers['content-type'] || 'image/png'));
+        res.setHeader('Cache-Control', 'public, max-age=300');
+        res.setHeader('X-OpenSpy-Imagery-Provider', 'firms');
+        res.setHeader('X-OpenSpy-Firms-Layer', layer);
+        res.send(Buffer.from(response.data));
+    } catch (err: any) {
+        sendError(res, err);
+    }
+});
+
+app.get('/api/imagery/artifacts/:filename', async (req, res) => {
+    try {
+        const filename = String(req.params.filename || '');
+        if (!/^[a-zA-Z0-9_.-]+$/.test(filename)) {
+            res.status(400).json({ error: 'Invalid imagery artifact filename' });
+            return;
+        }
+        const filePath = path.join(OPENSPY_LOCAL_ARTIFACT_DIR, filename);
+        if (!filePath.startsWith(OPENSPY_LOCAL_ARTIFACT_DIR)) {
+            res.status(400).json({ error: 'Invalid imagery artifact path' });
+            return;
+        }
+        if (!fs.existsSync(filePath)) {
+            res.status(404).json({ error: 'Imagery artifact not found' });
+            return;
+        }
+        const extension = path.extname(filename).toLowerCase();
+        const contentType = extension === '.json' ? 'application/json'
+            : extension === '.jpg' || extension === '.jpeg' ? 'image/jpeg'
+                : extension === '.webp' ? 'image/webp'
+                    : 'image/png';
+        res.setHeader('Content-Type', contentType);
+        res.setHeader('Cache-Control', 'private, max-age=3600');
+        res.send(await fs.promises.readFile(filePath));
     } catch (err: any) {
         sendError(res, err);
     }
