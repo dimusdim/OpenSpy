@@ -358,8 +358,15 @@ function stripActionBlocks(value: string): string {
     return output;
 }
 
+function stripEmptyMarkdownFences(text: string): string {
+    return String(text || '')
+        .replace(/(^|\n)[ \t]*```[A-Za-z0-9_-]*[ \t]*\n[ \t\r\n]*```[ \t]*(?=\n|$)/g, '$1')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+}
+
 function normalizeAssistantVisibleText(text: string): string {
-    return extractActionContract(text).visible.trim();
+    return stripEmptyMarkdownFences(extractActionContract(text).visible);
 }
 
 function finalAssistantTextAfterLastTool(events: AgentRunEventRow[], fallback: string): string {
@@ -1500,4 +1507,5 @@ export function getRepoRootFromBackend(): string {
 export const agentRuntimeTestHooks = {
     extractActionContract,
     finalAssistantTextAfterLastTool,
+    normalizeAssistantVisibleText,
 };

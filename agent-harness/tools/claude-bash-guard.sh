@@ -100,7 +100,7 @@ function shellUnescapeSingleQuotedEval(value) {
 
 function claudeEvalPayload(input) {
   const prefix = "shopt -u extglob 2>/dev/null || true && eval '";
-  const suffix = input.match(/' < \/dev\/null && pwd -P >\| \/tmp\/claude-[A-Za-z0-9_-]+-cwd$/);
+  const suffix = input.match(/'(?: < \/dev\/null)? && pwd -P >\| \/tmp\/claude-[A-Za-z0-9_-]+-cwd$/);
   if (!input.startsWith(prefix) || !suffix) return null;
   return shellUnescapeSingleQuotedEval(input.slice(prefix.length, input.length - suffix[0].length));
 }
