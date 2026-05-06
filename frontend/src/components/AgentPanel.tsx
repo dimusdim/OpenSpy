@@ -758,7 +758,10 @@ function parseOpenSpyLink(href: string, fallbackLabel?: string): AgentAction | n
     };
 
     if (target === 'entity' || target === 'object') {
-        const id = payload.entity_id || payload.entityId || payload.id;
+        const id = canonicalObjectIdForLayer(
+            payload.entity_id || payload.entityId || payload.id,
+            payload.layer || payload.layer_id || payload.layerId,
+        );
         if (!id) throw new Error(`ospy://${target} requires entity_id or id`);
         return {
             type: params.get('type') || (target === 'entity' ? 'entity.open' : 'object.open'),
@@ -766,7 +769,7 @@ function parseOpenSpyLink(href: string, fallbackLabel?: string): AgentAction | n
             payload: {
                 ...payload,
                 id,
-                entity_id: payload.entity_id || payload.entityId || id,
+                entity_id: id,
                 object_type: payload.object_type || payload.objectType || typeForLayer(payload.layer || payload.layer_id || target),
                 show_marker: payload.show_marker ?? true,
                 draw_marker: payload.draw_marker ?? true,
@@ -775,9 +778,12 @@ function parseOpenSpyLink(href: string, fallbackLabel?: string): AgentAction | n
     }
 
     if (target === 'asset' || target === 'event') {
-        const id = target === 'asset'
-            ? (payload.asset_id || payload.assetId || payload.id)
-            : (payload.event_id || payload.eventId || payload.id);
+        const id = canonicalObjectIdForLayer(
+            target === 'asset'
+                ? (payload.asset_id || payload.assetId || payload.id)
+                : (payload.event_id || payload.eventId || payload.id),
+            payload.layer || payload.layer_id || payload.layerId,
+        );
         if (!id) throw new Error(`ospy://${target} requires ${target}_id or id`);
         return {
             type: params.get('type') || (target === 'asset' ? 'asset.open' : 'event.open'),
@@ -785,8 +791,8 @@ function parseOpenSpyLink(href: string, fallbackLabel?: string): AgentAction | n
             payload: {
                 ...payload,
                 id,
-                ...(target === 'asset' ? { asset_id: payload.asset_id || payload.assetId || id } : {}),
-                ...(target === 'event' ? { event_id: payload.event_id || payload.eventId || id } : {}),
+                ...(target === 'asset' ? { asset_id: id } : {}),
+                ...(target === 'event' ? { event_id: id } : {}),
                 object_type: payload.object_type || payload.objectType || typeForLayer(payload.layer || payload.layer_id || target),
                 show_marker: payload.show_marker ?? true,
                 draw_marker: payload.draw_marker ?? true,
@@ -1058,79 +1064,105 @@ function ToolGroup({ parts }: { parts: AgentStreamPart[] }) {
         if (part.state === 'completed') row.state = 'completed';
         if (part.isError) row.isError = true;
     }
+    const runningCount = rows.filter((part) => part.state === 'started').length;
+    const failedCount = rows.filter((part) => part.isError).length;
+    const completedCount = rows.filter((part) => part.state === 'completed' && !part.isError).length;
+    const summaryParts = [
+        runningCount > 0 ? `${runningCount} running` : '',
+        completedCount > 0 ? `${completedCount} completed` : '',
+        failedCount > 0 ? `${failedCount} failed` : '',
+    ].filter(Boolean);
     return (
-        <div className="my-1 space-y-1 text-[10px] font-mono">
-            {rows.map((part) => {
-                const input = formatToolPayload(part.input);
-                const output = formatToolPayload(part.output);
-                const title = displayToolName(part);
-                return (
-                    <details
-                        key={part.key}
-                        className={`rounded border px-2 py-1 ${
-                            part.isError
-                                ? 'border-red-950/60 bg-red-950/15 text-red-300'
-                                : part.state === 'started'
-                                    ? 'border-zinc-800 bg-zinc-900/60 text-zinc-400'
-                                    : 'border-cyan-950/70 bg-cyan-950/15 text-cyan-300'
-                        }`}
-                    >
-                        <summary className="flex cursor-pointer list-none items-center gap-1.5">
-                            <Database size={12} className="shrink-0" />
-                            <span className="min-w-0 flex-1 truncate">
-                                {part.state === 'started' ? 'Started' : part.isError ? 'Failed' : 'Completed'}: {title}
-                            </span>
-                        </summary>
-                        <div className="mt-1 space-y-1 border-t border-zinc-800/70 pt-1 text-[10px] text-zinc-400">
-                            {part.name && part.name !== title && (
-                                <div className="truncate">
-                                    <span className="text-zinc-500">normalized:</span> {part.name}
-                                </div>
-                            )}
-                            {part.providerToolName && part.providerToolName !== title && (
-                                <div className="truncate">
-                                    <span className="text-zinc-500">provider tool:</span> {part.providerToolName}
-                                </div>
-                            )}
-                            {part.command && (
-                                <div className="truncate">
-                                    <span className="text-zinc-500">command:</span> {part.command}
-                                </div>
-                            )}
-                            {part.toolUseId && (
-                                <div className="truncate">
-                                    <span className="text-zinc-500">id:</span> {part.toolUseId}
-                                </div>
-                            )}
-                            {part.rawTypes.length > 0 && (
-                                <div className="truncate">
-                                    <span className="text-zinc-500">event:</span> {part.rawTypes.join(', ')}
-                                </div>
-                            )}
-                            {input && (
-                                <div>
-                                    <div className="mb-0.5 text-zinc-500">IN</div>
-                                    <pre className="max-h-44 overflow-auto whitespace-pre-wrap rounded bg-black/60 p-2 text-[10px] leading-relaxed text-zinc-300">
-                                        {input}
-                                    </pre>
-                                </div>
-                            )}
-                            {output && (
-                                <div>
-                                    <div className="mb-0.5 text-zinc-500">OUT</div>
-                                    <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded bg-black/60 p-2 text-[10px] leading-relaxed text-zinc-300">
-                                        {output}
-                                    </pre>
-                                </div>
-                            )}
-                            {!input && !output && (
-                                <div className="text-zinc-600">No structured payload in stream event.</div>
-                            )}
-                        </div>
-                    </details>
-                );
-            })}
-        </div>
+        <details
+            open={runningCount > 0}
+            className={`my-1 rounded border px-2 py-1 text-[10px] font-mono ${
+                failedCount > 0
+                    ? 'border-red-950/50 bg-red-950/10 text-red-300'
+                    : runningCount > 0
+                        ? 'border-zinc-800 bg-zinc-900/60 text-zinc-400'
+                        : 'border-cyan-950/60 bg-cyan-950/10 text-cyan-300'
+            }`}
+            data-agent-tool-group="true"
+        >
+            <summary className="flex cursor-pointer list-none items-center gap-1.5">
+                <Database size={12} className="shrink-0" />
+                <span className="min-w-0 flex-1 truncate">
+                    Tools: {summaryParts.length > 0 ? summaryParts.join(', ') : `${rows.length} events`}
+                </span>
+            </summary>
+            <div className="mt-1 space-y-1 border-t border-zinc-800/70 pt-1">
+                {rows.map((part) => {
+                    const input = formatToolPayload(part.input);
+                    const output = formatToolPayload(part.output);
+                    const title = displayToolName(part);
+                    return (
+                        <details
+                            key={part.key}
+                            className={`rounded border px-2 py-1 ${
+                                part.isError
+                                    ? 'border-red-950/60 bg-red-950/15 text-red-300'
+                                    : part.state === 'started'
+                                        ? 'border-zinc-800 bg-zinc-900/60 text-zinc-400'
+                                        : 'border-cyan-950/70 bg-cyan-950/15 text-cyan-300'
+                            }`}
+                            data-agent-tool-row="true"
+                        >
+                            <summary className="flex cursor-pointer list-none items-center gap-1.5">
+                                <span className="min-w-0 flex-1 truncate">
+                                    {part.state === 'started' ? 'Started' : part.isError ? 'Failed' : 'Completed'}: {title}
+                                </span>
+                            </summary>
+                            <div className="mt-1 space-y-1 border-t border-zinc-800/70 pt-1 text-[10px] text-zinc-400">
+                                {part.name && part.name !== title && (
+                                    <div className="truncate">
+                                        <span className="text-zinc-500">normalized:</span> {part.name}
+                                    </div>
+                                )}
+                                {part.providerToolName && part.providerToolName !== title && (
+                                    <div className="truncate">
+                                        <span className="text-zinc-500">provider tool:</span> {part.providerToolName}
+                                    </div>
+                                )}
+                                {part.command && (
+                                    <div className="truncate">
+                                        <span className="text-zinc-500">command:</span> {part.command}
+                                    </div>
+                                )}
+                                {part.toolUseId && (
+                                    <div className="truncate">
+                                        <span className="text-zinc-500">id:</span> {part.toolUseId}
+                                    </div>
+                                )}
+                                {part.rawTypes.length > 0 && (
+                                    <div className="truncate">
+                                        <span className="text-zinc-500">event:</span> {part.rawTypes.join(', ')}
+                                    </div>
+                                )}
+                                {input && (
+                                    <div>
+                                        <div className="mb-0.5 text-zinc-500">IN</div>
+                                        <pre className="max-h-44 overflow-auto whitespace-pre-wrap rounded bg-black/60 p-2 text-[10px] leading-relaxed text-zinc-300">
+                                            {input}
+                                        </pre>
+                                    </div>
+                                )}
+                                {output && (
+                                    <div>
+                                        <div className="mb-0.5 text-zinc-500">OUT</div>
+                                        <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded bg-black/60 p-2 text-[10px] leading-relaxed text-zinc-300">
+                                            {output}
+                                        </pre>
+                                    </div>
+                                )}
+                                {!input && !output && (
+                                    <div className="text-zinc-600">No structured payload in stream event.</div>
+                                )}
+                            </div>
+                        </details>
+                    );
+                })}
+            </div>
+        </details>
     );
 }
 
@@ -1309,6 +1341,13 @@ function normalizeCatalogLayerId(layer: any): string {
         cable: 'cable',
     };
     return aliases[key] || raw;
+}
+
+function canonicalObjectIdForLayer(id: any, layer: any): string {
+    const raw = String(id || '').trim();
+    if (!raw || raw.includes(':')) return raw;
+    const layerId = normalizeCatalogLayerId(layer);
+    return layerId ? `${layerId}:${raw}` : raw;
 }
 
 function normalizeLegendNodeId(node: any): string {
@@ -2076,6 +2115,31 @@ function markHistoricalReplayHydrating(): void {
     }
 }
 
+function defaultOpenObjectHeight(_actionType: string, payload: Record<string, any>): number {
+    const explicitHeight = Number(payload.height ?? payload.height_m ?? payload.camera_height ?? payload.cameraHeight);
+    if (Number.isFinite(explicitHeight) && explicitHeight > 0) return explicitHeight;
+
+    const layer = normalizeCatalogLayerId(payload.layer || payload.layer_id || payload.layerId || payload.entity_layer || payload.entityLayer);
+    const fallbackByLayer: Record<string, number> = {
+        vessel: 180000,
+        aircraft: 260000,
+        satellite: 1000000,
+        fire: 260000,
+        outage: 320000,
+        conflict: 320000,
+        jamming: 320000,
+        cable: 420000,
+        pipeline: 420000,
+    };
+    const fallbackHeight = fallbackByLayer[layer] || 300000;
+    const viewer = getViewer();
+    const currentHeight = Number(viewer?.camera?.positionCartographic?.height);
+    if (Number.isFinite(currentHeight) && currentHeight > 0) {
+        return Math.max(60000, Math.min(fallbackHeight, currentHeight));
+    }
+    return fallbackHeight;
+}
+
 function selectionCurrentlyAffectsReplay(selection: any): boolean {
     if (!selection?.selectionId) return false;
     const ids = Array.isArray(selection.itemIds) ? selection.itemIds : [];
@@ -2098,6 +2162,25 @@ function presentationDelayForAction(action: AgentAction): number {
     if (action.type === 'entity.animate_track' || action.type === 'track.animate') return Number(payload.duration_ms ?? payload.durationMs ?? 3500) + 500;
     if (action.type.startsWith('selection.')) return 700;
     return 500;
+}
+
+function movingReplayLayerForAction(action: AgentAction): string {
+    const payload = normalizedActionPayload(action);
+    const layer = normalizeCatalogLayerId(payload.layer || payload.layer_id || payload.layerId || payload.entity_layer || payload.entityLayer);
+    if (layer === 'vessel' || layer === 'aircraft' || layer === 'satellite') return layer;
+    const id = String(payload.entity_id || payload.entityId || payload.object_id || payload.objectId || payload.id || '').trim();
+    const prefix = normalizeCatalogLayerId(id.split(':')[0]);
+    return prefix === 'vessel' || prefix === 'aircraft' || prefix === 'satellite' ? prefix : '';
+}
+
+function isMovingReplayFocusAction(action: AgentAction): boolean {
+    return ['object.open', 'object.focus', 'entity.open', 'replay.follow_entity'].includes(action.type)
+        && Boolean(movingReplayLayerForAction(action));
+}
+
+function isStaticObjectCameraAction(action: AgentAction): boolean {
+    return ['object.open', 'object.focus', 'entity.open', 'asset.open', 'event.open'].includes(action.type)
+        && !isMovingReplayFocusAction(action);
 }
 
 async function hydrateAppliedSelectionItems(layer: string, selectionId: string, mode: string): Promise<void> {
@@ -2853,15 +2936,22 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         }
 
         if (action.type === 'replay.follow_entity') {
-            const entityId = String(payload.entity_id || payload.entityId || '');
+            const entityId = canonicalObjectIdForLayer(
+                payload.entity_id || payload.entityId || '',
+                payload.layer || payload.layer_id || payload.layerId,
+            );
             if (!entityId) throw new Error('replay.follow_entity requires entity_id');
             store.setSelectedEntityId(entityId, { id: entityId, agentSelected: true });
             return;
         }
 
         if (action.type === 'object.open' || action.type === 'object.focus' || action.type === 'entity.open' || action.type === 'asset.open' || action.type === 'event.open') {
-            const entityId = String(payload.entity_id || payload.entityId || payload.object_id || payload.objectId || payload.asset_id || payload.assetId || payload.event_id || payload.eventId || payload.id || '').trim();
+            const entityId = canonicalObjectIdForLayer(
+                payload.entity_id || payload.entityId || payload.object_id || payload.objectId || payload.asset_id || payload.assetId || payload.event_id || payload.eventId || payload.id || '',
+                payload.layer || payload.layer_id || payload.layerId || payload.entity_layer || payload.entityLayer,
+            );
             if (!entityId) throw new Error(`${action.type} requires an object, entity, asset or event id`);
+            store.addAgentReplayFocusId(entityId);
             const at = String(payload.at || payload.time || '');
             const shouldResumePlayback = shouldResumeHistoricalPlaybackAfterViewChange(useTimelineStore.getState());
             let changedReplayTime = false;
@@ -2893,8 +2983,8 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                 type: objectType,
                 layer,
                 source: payload.source || payload.source_id,
-                assetId: payload.asset_id || payload.assetId,
-                eventId: payload.event_id || payload.eventId,
+                assetId: action.type === 'asset.open' ? entityId : (payload.asset_id || payload.assetId),
+                eventId: action.type === 'event.open' ? entityId : (payload.event_id || payload.eventId),
                 lat: resolvedPoint?.lat,
                 lng: resolvedPoint?.lng,
                 alt: resolvedPoint?.alt,
@@ -2929,7 +3019,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                     viewer.scene.requestRender();
                 }
                 document.dispatchEvent(new CustomEvent('fly-to', {
-                    detail: { lat, lng, height: Number(payload.height || 15000) },
+                    detail: { lat, lng, height: defaultOpenObjectHeight(action.type, payload) },
                 }));
             }
             if (changedReplayTime && shouldResumePlayback) startHistoricalPlaybackWhenReady();
@@ -3025,7 +3115,12 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
             return;
         }
 
-        if (action.type === 'map.set_layers' || action.type === 'source.set_enabled' || action.type === 'layer.set_visibility') {
+        if (
+            action.type === 'map.set_layers'
+            || action.type === 'source.set_enabled'
+            || action.type === 'layer.set_visibility'
+            || (action.type === 'legend.set_node_state' && payload.visibility && typeof payload.visibility === 'object')
+        ) {
             const patch = buildLayerPatch(payload);
             if (Object.keys(patch).length === 0) throw new Error(`${action.type} requires layer/source/visibility payload`);
             const shouldResumePlayback = shouldResumeHistoricalPlaybackAfterViewChange(useTimelineStore.getState());
@@ -3161,15 +3256,36 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         setError(null);
         cancelReplayWindowEndGuard();
         cancelPendingHistoricalPlayback();
+        useTimelineStore.getState().clearAgentReplayFocusIds();
         const actionErrors: string[] = [];
         let replayWindowRequested = false;
         let replayWindowPlaybackAllowed = false;
+        let lastReplayOverviewAction: AgentAction | null = null;
+        let lastMovingReplayFocusAction: AgentAction | null = null;
+        let replayCameraNeedsRestore = false;
+        let lastCameraActionRole: 'map' | 'moving' | 'static' | '' = '';
+        const movingReplayFocusLayers = new Set<string>();
         try {
             for (const action of actions) {
                 if (activeSessionIdRef.current !== sessionId) {
                     throw new Error('Presentation stopped because another agent session became active');
                 }
                 try {
+                    const needsMultiLayerOverview = action.type === 'replay.play_window'
+                        && movingReplayFocusLayers.size > 1
+                        && lastReplayOverviewAction
+                        && lastCameraActionRole !== 'map';
+                    if (action.type === 'replay.play_window' && (replayCameraNeedsRestore || needsMultiLayerOverview)) {
+                        const restoreAction = lastReplayOverviewAction || lastMovingReplayFocusAction;
+                        if (restoreAction) {
+                            await applyAction({
+                                ...restoreAction,
+                                label: 'Restore replay camera before motion',
+                            }, sessionId);
+                            await sleep(presentationDelayForAction(restoreAction));
+                            replayCameraNeedsRestore = false;
+                        }
+                    }
                     await applyAction(action, sessionId);
                     if (action.type === 'replay.play_window') {
                         replayWindowRequested = true;
@@ -3180,6 +3296,20 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                     }
                     if (replayWindowRequested && replayWindowPlaybackAllowed && (action.type === 'replay.seek' || action.type === 'object.open' || action.type === 'object.focus' || action.type === 'entity.open' || action.type === 'asset.open' || action.type === 'event.open')) {
                         startHistoricalPlaybackWhenReady();
+                    }
+                    if (action.type === 'map.fly_to') {
+                        lastReplayOverviewAction = action;
+                        replayCameraNeedsRestore = false;
+                        lastCameraActionRole = 'map';
+                    } else if (isMovingReplayFocusAction(action)) {
+                        const movingLayer = movingReplayLayerForAction(action);
+                        if (movingLayer) movingReplayFocusLayers.add(movingLayer);
+                        lastMovingReplayFocusAction = action;
+                        replayCameraNeedsRestore = false;
+                        lastCameraActionRole = 'moving';
+                    } else if (isStaticObjectCameraAction(action) && (lastReplayOverviewAction || lastMovingReplayFocusAction)) {
+                        replayCameraNeedsRestore = true;
+                        lastCameraActionRole = 'static';
                     }
                 } catch (err) {
                     actionErrors.push(`${formatActionType(action.type)}: ${err instanceof Error ? err.message : 'failed'}`);

@@ -761,8 +761,17 @@ export default function EntityHUD({ avoidRightPx = 0 }: EntityHUDProps) {
 
     if (!selectedEntityId || !selectedEntityData) return null;
 
-    const panelWidth = 320;
+    const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 1280;
+    const reservedRightPx = Math.max(0, avoidRightPx);
+    const sideAvailableWidth = viewportWidth - reservedRightPx - 32;
+    const panelWidth = Math.max(
+        248,
+        Math.min(320, sideAvailableWidth >= 280 ? sideAvailableWidth : viewportWidth - 32)
+    );
     const panelMaxHeightPx = typeof window !== 'undefined' ? Math.round(window.innerHeight * 0.8) : 640;
+    const estimatedPanelHeightPx = typeof window !== 'undefined'
+        ? Math.min(panelMaxHeightPx, live?.layer === 'aircraft' ? 560 : 460)
+        : 460;
     const panelPlacement = (() => {
         if (typeof window === 'undefined') {
             return { x: 1000, y: 100, anchorX: 990, anchorY: 140 };
@@ -770,7 +779,7 @@ export default function EntityHUD({ avoidRightPx = 0 }: EntityHUDProps) {
         const margin = 16;
         const gap = 32;
         const legendSafeRight = window.innerWidth >= 900 ? 352 : margin;
-        const usableRight = Math.max(margin + panelWidth, window.innerWidth - Math.max(0, avoidRightPx) - margin);
+        const usableRight = Math.max(margin + panelWidth, window.innerWidth - reservedRightPx - margin);
         const fallbackX = Math.max(legendSafeRight, usableRight - panelWidth);
         const fallbackY = 100;
         if (!screenPos) {
@@ -778,43 +787,72 @@ export default function EntityHUD({ avoidRightPx = 0 }: EntityHUDProps) {
         }
 
         const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+        const relaxedMinX = margin;
+        const relaxedMaxX = Math.max(relaxedMinX, usableRight - panelWidth);
+        const minX = relaxedMaxX >= legendSafeRight ? legendSafeRight : relaxedMinX;
+        const maxX = Math.max(minX, usableRight - panelWidth);
+        const minY = 76;
+        const maxY = Math.max(minY, window.innerHeight - estimatedPanelHeightPx - margin);
+        const targetPadding = 18;
+        const targetSafeTop = screenPos.y - targetPadding;
+        const targetSafeBottom = screenPos.y + targetPadding;
+        const targetSafeLeft = screenPos.x - targetPadding;
+        const targetSafeRight = screenPos.x + targetPadding;
+        const clampedPanelHeight = Math.min(estimatedPanelHeightPx, window.innerHeight - minY - margin);
+        const scoreCandidate = (rawX: number, rawY: number, priority: number) => {
+            const x = clamp(rawX, minX, maxX);
+            const y = clamp(rawY, minY, maxY);
+            const horizontallyOverlaps = targetSafeRight >= x && targetSafeLeft <= x + panelWidth;
+            const verticallyOverlaps = targetSafeBottom >= y && targetSafeTop <= y + clampedPanelHeight;
+            const coversTarget = horizontallyOverlaps && verticallyOverlaps;
+            const dx = screenPos.x < x ? x - screenPos.x : screenPos.x > x + panelWidth ? screenPos.x - (x + panelWidth) : 0;
+            const dy = screenPos.y < y ? y - screenPos.y : screenPos.y > y + clampedPanelHeight ? screenPos.y - (y + clampedPanelHeight) : 0;
+            return {
+                x,
+                y,
+                score: (coversTarget ? 1_000_000 : 0) + priority * 10_000 + Math.hypot(dx, dy) * 0.25,
+            };
+        };
+
         const rightX = screenPos.x + gap;
         const leftX = screenPos.x - panelWidth - gap;
-        const rightFits = rightX + panelWidth <= usableRight;
-        const leftFits = leftX >= legendSafeRight;
-        const relaxedLeftFits = leftX >= margin;
-        const relaxedRightFits = rightX + panelWidth <= window.innerWidth - margin;
-        const preferLeft = avoidRightPx > 0 || screenPos.x > window.innerWidth * 0.56;
-        let x = fallbackX;
-        if (preferLeft && leftFits) x = leftX;
-        else if (!preferLeft && rightFits) x = rightX;
-        else if (leftFits) x = leftX;
-        else if (rightFits) x = rightX;
-        else if (preferLeft && relaxedLeftFits) x = leftX;
-        else if (!preferLeft && relaxedRightFits) x = rightX;
-        else if (relaxedLeftFits) x = leftX;
-        else if (relaxedRightFits) x = rightX;
-        else {
-            const minX = margin;
-            const maxX = Math.max(minX, usableRight - panelWidth);
-            const clampedLeft = clamp(leftX, minX, maxX);
-            const clampedRight = clamp(rightX, minX, maxX);
-            const leftOverlap = screenPos.x >= clampedLeft && screenPos.x <= clampedLeft + panelWidth ? 1 : 0;
-            const rightOverlap = screenPos.x >= clampedRight && screenPos.x <= clampedRight + panelWidth ? 1 : 0;
-            x = leftOverlap <= rightOverlap ? clampedLeft : clampedRight;
-        }
-
-        const minY = 76;
-        const maxY = Math.max(minY, window.innerHeight - panelMaxHeightPx - 112);
-        const horizontallyCoversTarget = screenPos.x >= x && screenPos.x <= x + panelWidth;
-        const desiredY = horizontallyCoversTarget ? screenPos.y + gap : screenPos.y - 110;
-        const y = Math.min(Math.max(desiredY, minY), maxY);
+        const aboveY = screenPos.y - estimatedPanelHeightPx - gap;
+        const belowY = screenPos.y + gap;
+        const sideY = screenPos.y - 110;
+        const centeredX = screenPos.x - panelWidth / 2;
+        const preferLeft = reservedRightPx > 0 || screenPos.x > window.innerWidth * 0.56;
+        const candidates = preferLeft
+            ? [
+                scoreCandidate(leftX, sideY, 0),
+                scoreCandidate(rightX, sideY, 1),
+                scoreCandidate(centeredX, belowY, 2),
+                scoreCandidate(centeredX, aboveY, 3),
+                scoreCandidate(fallbackX, fallbackY, 4),
+            ]
+            : [
+                scoreCandidate(rightX, sideY, 0),
+                scoreCandidate(leftX, sideY, 1),
+                scoreCandidate(centeredX, belowY, 2),
+                scoreCandidate(centeredX, aboveY, 3),
+                scoreCandidate(fallbackX, fallbackY, 4),
+            ];
+        const best = candidates.sort((a, b) => a.score - b.score)[0];
+        const x = best.x;
+        const y = best.y;
         const panelIsLeftOfTarget = x + panelWidth <= screenPos.x;
+        const panelIsRightOfTarget = x >= screenPos.x;
+        const panelIsAboveTarget = y + clampedPanelHeight <= screenPos.y;
+        const anchorClampX = clamp(screenPos.x, x + 18, x + panelWidth - 18);
+        const anchorClampY = clamp(screenPos.y, y + 18, y + clampedPanelHeight - 18);
         return {
             x,
             y,
-            anchorX: panelIsLeftOfTarget ? x + panelWidth + 10 : x - 10,
-            anchorY: y + 40,
+            anchorX: panelIsLeftOfTarget ? x + panelWidth + 10 : panelIsRightOfTarget ? x - 10 : anchorClampX,
+            anchorY: panelIsLeftOfTarget || panelIsRightOfTarget
+                ? anchorClampY
+                : panelIsAboveTarget
+                    ? y + clampedPanelHeight + 10
+                    : y - 10,
         };
     })();
 
@@ -867,8 +905,15 @@ export default function EntityHUD({ avoidRightPx = 0 }: EntityHUDProps) {
             <div
                 data-entity-hud-panel="true"
                 data-entity-id={selectedEntityId}
-                className="absolute w-80 max-h-[80vh] overflow-y-auto pointer-events-auto bg-black/85 backdrop-blur-xl border border-zinc-800 rounded-xl shadow-[0_0_30px_rgba(0,0,0,0.8)]"
-                style={{ top: panelPlacement.y, left: panelPlacement.x }}
+                className="absolute max-h-[80vh] overflow-y-auto pointer-events-auto bg-black/85 backdrop-blur-xl border border-zinc-800 rounded-xl shadow-[0_0_30px_rgba(0,0,0,0.8)]"
+                style={{
+                    top: panelPlacement.y,
+                    left: panelPlacement.x,
+                    width: panelWidth,
+                    maxHeight: typeof window !== 'undefined'
+                        ? Math.max(220, Math.min(panelMaxHeightPx, window.innerHeight - panelPlacement.y - 16))
+                        : panelMaxHeightPx,
+                }}
             >
                 <div className="p-4 border-b border-zinc-800 flex justify-between items-center">
                     <div className="text-xs font-mono font-bold text-cyan-400 tracking-wider">TARGET ACQUIRED</div>

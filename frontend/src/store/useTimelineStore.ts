@@ -288,6 +288,7 @@ interface TimelineStore {
   visibility: LayerFlags;
   selectedEntityId: string | null;
   selectedEntityData: any | null;
+  agentReplayFocusIds: string[];
   streamMetrics: Record<string, StreamMetric>;
   storageStatus: StorageStatus;
   // Per-subtype visibility (e.g. "aviation:airliner", "satellite:military").
@@ -336,6 +337,8 @@ interface TimelineStore {
   // Legend (right panel) action — controls rendering.
   toggleVisibility: (layer: keyof LayerFlags) => void;
   setSelectedEntityId: (id: string | null, data?: any) => void;
+  addAgentReplayFocusId: (id: string) => void;
+  clearAgentReplayFocusIds: () => void;
   setStreamMetric: (layer: string, data: Partial<StreamMetric>) => void;
   setStorageStatus: (data: Partial<StorageStatus>) => void;
   toggleSubtype: (key: string) => void;
@@ -461,6 +464,7 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
   },
   selectedEntityId: null,
   selectedEntityData: null,
+  agentReplayFocusIds: [],
   subtypeVisibility: {},
   sourceVisibility: {},
   appliedSelections: {},
@@ -609,6 +613,14 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
       return { visibility: next.visibility, sources: next.sources };
   }),
   setSelectedEntityId: (id, data) => set({ selectedEntityId: id, selectedEntityData: data || null }),
+  addAgentReplayFocusId: (id) => set((state) => {
+      const normalized = String(id || '').trim();
+      if (!normalized || state.agentReplayFocusIds.includes(normalized)) return state as any;
+      return { agentReplayFocusIds: [...state.agentReplayFocusIds, normalized] };
+  }),
+  clearAgentReplayFocusIds: () => set((state) => (
+      state.agentReplayFocusIds.length === 0 ? state as any : { agentReplayFocusIds: [] }
+  )),
   setStreamMetric: (layer, data) => set(state => {
       const current = state.streamMetrics[layer] || {};
       const nextMetric = { ...current, ...data };

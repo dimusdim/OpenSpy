@@ -384,6 +384,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
     const sourceVisibility = useTimelineStore((s) => s.sourceVisibility);
     const appliedSelections = useTimelineStore((s) => s.appliedSelections);
     const isolatedEntityId = useTimelineStore((s) => s.isolatedEntityId);
+    const agentReplayFocusIds = useTimelineStore((s) => s.agentReplayFocusIds);
     const clusteringEnabled = useTimelineStore((s) => s.clusteringEnabled);
 
     const pointCollectionRef = useRef<Cesium.BillboardCollection | null>(null);
@@ -536,6 +537,10 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([key]) => key)
         .join('|'), [sourceVisibility]);
+    const agentReplayFocusSet = useMemo(() => new Set(
+        (agentReplayFocusIds || []).map((id) => normalizeReplayId(String(id))).filter(Boolean),
+    ), [agentReplayFocusIds]);
+    const agentReplayFocusKey = useMemo(() => Array.from(agentReplayFocusSet).sort().join(','), [agentReplayFocusSet]);
 
     const layersKey = [
         `layers:${activeReplayLayers.join(',')}`,
@@ -544,6 +549,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
         `sub:${subtypeVisibilityKey}`,
         `src:${sourceVisibilityKey}`,
         `iso:${isolatedEntityId ? normalizeReplayId(isolatedEntityId) : ''}`,
+        `focus:${agentReplayFocusKey}`,
     ].join('|');
     const requestSceneRender = () => {
         if (!viewer || viewer.isDestroyed()) return;
@@ -1136,8 +1142,9 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
         const normalizedTargetId = normalizeReplayId(targetId);
         const normalizedIsolatedId = isolatedEntityId ? normalizeReplayId(isolatedEntityId) : null;
         if (normalizedIsolatedId && normalizedIsolatedId !== normalizedTargetId) return false;
+        const focusedByAgent = agentReplayFocusSet.has(normalizedTargetId);
         const selection = appliedSelectionForLayer(layerId);
-        if (selection && !selection.truncated) {
+        if (selection && !selection.truncated && !focusedByAgent) {
             const selected = selection.ids.has(normalizedTargetId);
             if (selection.mode === 'exclude') {
                 if (selected) return false;
@@ -2456,7 +2463,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
         });
         requestSceneRender();
         publishReplayStats();
-    }, [mode, playbackKind, subtypeVisibility, sourceVisibility, appliedSelectionSets, isolatedEntityId]);
+    }, [mode, playbackKind, subtypeVisibility, sourceVisibility, appliedSelectionSets, isolatedEntityId, agentReplayFocusSet]);
 
     useEffect(() => {
         if (mode !== 'playback' || playbackKind !== 'historical') {
