@@ -82,6 +82,8 @@ type ParsedActionContract = {
     incomplete: boolean;
 };
 
+const SESSION_PICKER_DISPLAY_LIMIT = 80;
+
 const LAYER_KEY_ALIASES: Record<string, string> = {
     aircraft: 'aviation',
     aviation: 'aviation',
@@ -644,9 +646,13 @@ function imageryDetails(action: AgentAction): {
     const sourceRaw = payload.source || payload.provider || scene.source || scene.provider || '';
     const source = /copernicus|sentinel/i.test(String(sourceRaw))
         ? 'Copernicus / Sentinel'
-        : /gibs|nasa|worldview/i.test(String(sourceRaw))
-            ? 'NASA GIBS / Worldview'
-            : String(sourceRaw || 'Imagery source');
+        : /landsat|usgs/i.test(String(sourceRaw))
+            ? 'USGS Landsat'
+            : /firms|fire/i.test(String(sourceRaw))
+                ? 'NASA FIRMS'
+                : /gibs|nasa|worldview/i.test(String(sourceRaw))
+                    ? 'NASA GIBS / Worldview'
+                    : String(sourceRaw || 'Imagery source');
     const sceneId = String(payload.scene_id || scene.scene_id || '').trim() || null;
     const acquisitionRaw = payload.time || payload.at || payload.date || payload.from || scene.datetime || scene.date || '';
     const acquisition = acquisitionRaw ? String(acquisitionRaw).slice(0, 19).replace('T', ' ') : 'date-addressed scene';
@@ -658,7 +664,11 @@ function imageryDetails(action: AgentAction): {
     const aoi = Array.isArray(bbox) && bbox.length === 4 ? 'bounded AOI overlay' : null;
     const limitation = /copernicus|sentinel/i.test(source)
         ? 'Preview rendered through backend credentials; not a raw scene download.'
-        : 'Public daily context imagery; not high-resolution tasking evidence.';
+        : /landsat/i.test(source)
+            ? 'Browse/thumbnail overlay; raw multiband Landsat COG rendering is not active.'
+            : /firms/i.test(source)
+                ? 'Thermal hotspot WMS overlay; not raw optical satellite imagery.'
+                : 'Public daily context imagery; not high-resolution tasking evidence.';
     return { source, sceneId, acquisition, layer, cloud, aoi, limitation };
 }
 
@@ -2140,6 +2150,11 @@ function defaultOpenObjectHeight(_actionType: string, payload: Record<string, an
     return fallbackHeight;
 }
 
+function explicitCameraHeightFromPayload(payload: Record<string, any>): number | null {
+    const explicitHeight = Number(payload.height ?? payload.height_m ?? payload.camera_height ?? payload.cameraHeight);
+    return Number.isFinite(explicitHeight) && explicitHeight > 0 ? explicitHeight : null;
+}
+
 function selectionCurrentlyAffectsReplay(selection: any): boolean {
     if (!selection?.selectionId) return false;
     const ids = Array.isArray(selection.itemIds) ? selection.itemIds : [];
@@ -2343,6 +2358,14 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
     const sessionPickerRef = useRef<HTMLDivElement | null>(null);
     const sessionsLoadSeqRef = useRef(0);
     const visibleSessions = useMemo(() => dedupeSessions(sessions), [sessions]);
+    const pickerSessions = useMemo(() => {
+        const limited = visibleSessions.slice(0, SESSION_PICKER_DISPLAY_LIMIT);
+        if (!activeSessionId || limited.some((session) => session.agent_session_id === activeSessionId)) {
+            return limited;
+        }
+        const active = visibleSessions.find((session) => session.agent_session_id === activeSessionId);
+        return active ? [active, ...limited.slice(0, Math.max(SESSION_PICKER_DISPLAY_LIMIT - 1, 0))] : limited;
+    }, [activeSessionId, visibleSessions]);
 
     const activeSession = useMemo(
         () => visibleSessions.find((session) => session.agent_session_id === activeSessionId) || null,
@@ -2870,7 +2893,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         if (action.type === 'map.fly_to') {
             const lat = Number(payload.lat ?? payload.latitude);
             const lng = Number(payload.lng ?? payload.lon ?? payload.longitude);
-            const height = Number(payload.height ?? payload.altitude_m ?? 15000);
+            const height = explicitCameraHeightFromPayload(payload) ?? 15000;
             if (!Number.isFinite(lat) || !Number.isFinite(lng)) throw new Error('map.fly_to requires lat and lng');
             document.dispatchEvent(new CustomEvent('fly-to', { detail: { lat, lng, height } }));
             return;
@@ -3416,11 +3439,13 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                     <div
                         id="agent-session-list"
                         role="listbox"
+                        data-agent-session-total={visibleSessions.length}
+                        data-agent-session-rendered={pickerSessions.length}
                         className="absolute left-2 right-2 top-[calc(100%-4px)] z-50 max-h-72 overflow-y-auto rounded border border-zinc-800 bg-zinc-950 shadow-2xl"
                     >
                         {visibleSessions.length === 0 ? (
                             <div className="px-3 py-2 text-[10px] font-mono text-zinc-500">No chats yet</div>
-                        ) : visibleSessions.map((session) => {
+                        ) : pickerSessions.map((session) => {
                             const title = sessionPromptTitle(session, messagesBySession[session.agent_session_id] || []);
                             const running = Boolean(runningRunsBySession[session.agent_session_id]);
                             const active = session.agent_session_id === activeSessionId;
@@ -3453,6 +3478,14 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                                 </button>
                             );
                         })}
+                        {visibleSessions.length > pickerSessions.length && (
+                            <div
+                                data-agent-session-overflow="true"
+                                className="px-3 py-2 text-[10px] font-mono text-zinc-500"
+                            >
+                                Showing latest {pickerSessions.length} of {visibleSessions.length}
+                            </div>
+                        )}
                     </div>
                 )}
             </div>

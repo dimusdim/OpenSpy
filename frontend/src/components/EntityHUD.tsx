@@ -114,6 +114,8 @@ export default function EntityHUD({ avoidRightPx = 0 }: EntityHUDProps) {
     const selectedEntityData = useTimelineStore(s => s.selectedEntityData);
     const mode = useTimelineStore(s => s.mode);
     const [screenPos, setScreenPos] = useState<{ x: number, y: number } | null>(null);
+    const panelRef = useRef<HTMLDivElement | null>(null);
+    const [measuredPanelHeightPx, setMeasuredPanelHeightPx] = useState(0);
     const [live, setLive] = useState<{
         lat: number;
         lng: number;
@@ -759,6 +761,26 @@ export default function EntityHUD({ avoidRightPx = 0 }: EntityHUDProps) {
         return () => { cancelled = true; };
     }, [selectedEntityId, selectedEntityData, liveDetails]);
 
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        const node = panelRef.current;
+        if (!node) return;
+        const measure = () => {
+            const rect = node.getBoundingClientRect();
+            if (Number.isFinite(rect.height) && rect.height > 0) {
+                setMeasuredPanelHeightPx(Math.ceil(rect.height));
+            }
+        };
+        measure();
+        const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null;
+        observer?.observe(node);
+        window.addEventListener('resize', measure);
+        return () => {
+            observer?.disconnect();
+            window.removeEventListener('resize', measure);
+        };
+    }, [selectedEntityId, selectedEntityData]);
+
     if (!selectedEntityId || !selectedEntityData) return null;
 
     const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 1280;
@@ -772,6 +794,9 @@ export default function EntityHUD({ avoidRightPx = 0 }: EntityHUDProps) {
     const estimatedPanelHeightPx = typeof window !== 'undefined'
         ? Math.min(panelMaxHeightPx, live?.layer === 'aircraft' ? 560 : 460)
         : 460;
+    const layoutPanelHeightPx = measuredPanelHeightPx > 0
+        ? Math.min(panelMaxHeightPx, measuredPanelHeightPx)
+        : estimatedPanelHeightPx;
     const panelPlacement = (() => {
         if (typeof window === 'undefined') {
             return { x: 1000, y: 100, anchorX: 990, anchorY: 140 };
@@ -789,16 +814,18 @@ export default function EntityHUD({ avoidRightPx = 0 }: EntityHUDProps) {
         const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
         const relaxedMinX = margin;
         const relaxedMaxX = Math.max(relaxedMinX, usableRight - panelWidth);
-        const minX = relaxedMaxX >= legendSafeRight ? legendSafeRight : relaxedMinX;
+        const minX = reservedRightPx > 0
+            ? relaxedMinX
+            : relaxedMaxX >= legendSafeRight ? legendSafeRight : relaxedMinX;
         const maxX = Math.max(minX, usableRight - panelWidth);
         const minY = 76;
-        const maxY = Math.max(minY, window.innerHeight - estimatedPanelHeightPx - margin);
+        const maxY = Math.max(minY, window.innerHeight - layoutPanelHeightPx - margin);
         const targetPadding = 18;
         const targetSafeTop = screenPos.y - targetPadding;
         const targetSafeBottom = screenPos.y + targetPadding;
         const targetSafeLeft = screenPos.x - targetPadding;
         const targetSafeRight = screenPos.x + targetPadding;
-        const clampedPanelHeight = Math.min(estimatedPanelHeightPx, window.innerHeight - minY - margin);
+        const clampedPanelHeight = Math.min(layoutPanelHeightPx, window.innerHeight - minY - margin);
         const scoreCandidate = (rawX: number, rawY: number, priority: number) => {
             const x = clamp(rawX, minX, maxX);
             const y = clamp(rawY, minY, maxY);
@@ -816,7 +843,7 @@ export default function EntityHUD({ avoidRightPx = 0 }: EntityHUDProps) {
 
         const rightX = screenPos.x + gap;
         const leftX = screenPos.x - panelWidth - gap;
-        const aboveY = screenPos.y - estimatedPanelHeightPx - gap;
+        const aboveY = screenPos.y - layoutPanelHeightPx - gap;
         const belowY = screenPos.y + gap;
         const sideY = screenPos.y - 110;
         const centeredX = screenPos.x - panelWidth / 2;
@@ -903,6 +930,7 @@ export default function EntityHUD({ avoidRightPx = 0 }: EntityHUDProps) {
             )}
 
             <div
+                ref={panelRef}
                 data-entity-hud-panel="true"
                 data-entity-id={selectedEntityId}
                 className="absolute max-h-[80vh] overflow-y-auto pointer-events-auto bg-black/85 backdrop-blur-xl border border-zinc-800 rounded-xl shadow-[0_0_30px_rgba(0,0,0,0.8)]"

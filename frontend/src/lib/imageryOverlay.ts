@@ -85,6 +85,8 @@ function applyImageryDisplayOptions(viewer: Cesium.Viewer, payload: Record<strin
 }
 
 function sourceLabel(source: string): string {
+    if (/firms|fire/.test(source)) return 'NASA FIRMS';
+    if (/landsat|usgs/.test(source)) return 'USGS Landsat';
     if (/copernicus|sentinel/.test(source)) return 'Copernicus Sentinel';
     if (/(gibs|nasa|worldview)/.test(source)) return 'NASA GIBS';
     return source || 'Satellite imagery';
@@ -242,12 +244,96 @@ function showCopernicusImageryLayer(viewer: Cesium.Viewer, payload: Record<strin
     openSpyImageryLayers.push(imageryLayer);
 }
 
+function showLandsatImageryLayer(viewer: Cesium.Viewer, payload: Record<string, any>): void {
+    const scene = payload.scene && typeof payload.scene === 'object' ? payload.scene : null;
+    const imageUrl = payload.thumbnail_url
+        || payload.thumbnailUrl
+        || scene?.thumbnail_url
+        || scene?.assets?.reduced_resolution_browse
+        || scene?.assets?.thumbnail;
+    const bbox = payload.bbox || scene?.bbox;
+    const bboxOrder = payload.bbox_order || scene?.bbox_order || 'west,south,east,north';
+    const normalizedBbox = normalizeBboxToOpenSpy(bbox, bboxOrder);
+    if (!imageUrl || !normalizedBbox) {
+        throw new Error('Landsat imagery requires a browse/thumbnail URL and bounded scene bbox');
+    }
+    const opacity = Number(payload.opacity ?? payload.alpha ?? 0.72);
+    const renderSize = imageryRenderSizeForBbox(normalizedBbox, Number(payload.maxPixels || payload.max_pixels || 1024));
+    const provider = new Cesium.SingleTileImageryProvider({
+        url: String(imageUrl),
+        rectangle: bboxToRectangle(normalizedBbox, 'west,south,east,north'),
+        tileWidth: Number(payload.width || renderSize.width),
+        tileHeight: Number(payload.height || renderSize.height),
+        credit: 'USGS Landsat',
+    });
+    const imageryLayer = viewer.imageryLayers.addImageryProvider(provider);
+    imageryLayer.alpha = Number.isFinite(opacity) ? Math.max(0, Math.min(opacity, 1)) : 0.72;
+    openSpyImageryLayers.push(imageryLayer);
+}
+
+function normalizeFirmsLayerName(value: any): string {
+    const key = String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+    const aliases: Record<string, string> = {
+        viirs: 'fires_viirs_24',
+        viirs_24: 'fires_viirs_24',
+        fires_viirs_24: 'fires_viirs_24',
+        fires_viirs_48: 'fires_viirs_48',
+        fires_viirs_72: 'fires_viirs_72',
+        fires_viirs_7: 'fires_viirs_7',
+        modis: 'fires_modis_24',
+        modis_24: 'fires_modis_24',
+        fires_modis_24: 'fires_modis_24',
+        fires_modis_48: 'fires_modis_48',
+        fires_modis_72: 'fires_modis_72',
+        fires_modis_7: 'fires_modis_7',
+        landsat: 'fires_landsat_24',
+        fires_landsat_24: 'fires_landsat_24',
+        tsd_viirs: 'tsd_4_viirs_all',
+        tsd_4_viirs_all: 'tsd_4_viirs_all',
+        tsd_modis: 'tsd_4_modis_all',
+        tsd_4_modis_all: 'tsd_4_modis_all',
+    };
+    if (aliases[key]) return aliases[key];
+    if (/^(fires|tsd)_/.test(key)) return key;
+    return 'fires_viirs_24';
+}
+
+function showFirmsImageryLayer(viewer: Cesium.Viewer, payload: Record<string, any>): void {
+    const scene = payload.scene && typeof payload.scene === 'object' ? payload.scene : null;
+    const layer = normalizeFirmsLayerName(payload.wmsLayer || payload.wms_layer || payload.layer || scene?.layer);
+    const opacity = Number(payload.opacity ?? payload.alpha ?? 0.72);
+    const time = payload.time || payload.date || scene?.time || scene?.date || null;
+    const provider = new Cesium.WebMapServiceImageryProvider({
+        url: `${API_URL}/api/imagery/firms/wms`,
+        layers: layer,
+        parameters: {
+            service: 'WMS',
+            request: 'GetMap',
+            version: '1.1.1',
+            format: 'image/png',
+            transparent: true,
+            styles: '',
+            ...(time ? { time: String(time) } : {}),
+        },
+        tilingScheme: new Cesium.GeographicTilingScheme(),
+        enablePickFeatures: false,
+        credit: 'NASA FIRMS',
+    });
+    const imageryLayer = viewer.imageryLayers.addImageryProvider(provider);
+    imageryLayer.alpha = Number.isFinite(opacity) ? Math.max(0, Math.min(opacity, 1)) : 0.72;
+    openSpyImageryLayers.push(imageryLayer);
+}
+
 export function showOpenSpyImageryLayer(viewer: Cesium.Viewer, payload: Record<string, any>): void {
     const scene = payload.scene && typeof payload.scene === 'object' ? payload.scene : null;
     const source = String(payload.source || payload.provider || scene?.source || 'nasa_gibs').toLowerCase();
     const shouldReplace = payload.replace !== false && payload.mode !== 'compare';
     if (shouldReplace) clearOpenSpyImageryLayers(viewer);
-    if (/copernicus|sentinel/.test(source)) {
+    if (/firms|fire/.test(source)) {
+        showFirmsImageryLayer(viewer, payload);
+    } else if (/landsat|usgs/.test(source)) {
+        showLandsatImageryLayer(viewer, payload);
+    } else if (/copernicus|sentinel/.test(source)) {
         showCopernicusImageryLayer(viewer, payload);
     } else if (/(gibs|nasa|worldview)/.test(source)) {
         showGibsImageryLayer(viewer, payload);
