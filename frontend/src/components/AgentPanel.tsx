@@ -1106,7 +1106,6 @@ function ToolGroup({ parts }: { parts: AgentStreamPart[] }) {
             : 'Evidence trace';
     return (
         <details
-            open={runningCount > 0}
             className={`my-1 rounded border px-2 py-1 text-[10px] font-mono ${
                 failedCount > 0
                     ? 'border-red-950/50 bg-red-950/10 text-red-300'
@@ -2483,6 +2482,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
     const latestActions = activeSessionId ? (actionsBySession[activeSessionId] || []) : [];
     const messageActionsVisible = messages.some((message) => actionsFromMessage(message).length > 0);
     const runningRunId = activeSessionId ? (runningRunsBySession[activeSessionId] || null) : null;
+    const presentationUiLocked = Boolean(runningPresentationKey);
 
     const availableProviders = providers.filter((provider) => provider.available);
     const defaultProvider = availableProviders[0]?.provider || 'claude_code';
@@ -2569,12 +2569,6 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
             .reverse()
             .map((message) => actionsFromMessage(message))
             .find((actions) => actions.length > 0) || [];
-        if (lastPersistedActions.length > 0) {
-            setActionsBySession((current) => ({
-                ...current,
-                [sessionId]: lastPersistedActions,
-            }));
-        }
         const activeRunId = runningRunsRef.current[sessionId]
             || (typeof json.data?.session?.metadata?.activeRunId === 'string' ? json.data.session.metadata.activeRunId : '');
         setMessagesBySession((current) => {
@@ -2616,6 +2610,12 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                 [sessionId]: dedupeMessages(next),
             };
         });
+        if (lastPersistedActions.length > 0) {
+            setActionsBySession((current) => ({
+                ...current,
+                [sessionId]: lastPersistedActions,
+            }));
+        }
     }, []);
 
     useEffect(() => {
@@ -3507,9 +3507,13 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                     aria-label="Chat history"
                     aria-expanded={sessionPickerOpen}
                     aria-controls="agent-session-list"
-                    title={activeSessionTitle}
-                    onClick={() => setSessionPickerOpen((current) => !current)}
-                    className="min-w-0 flex-1 flex items-center justify-between gap-2 rounded border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] font-mono text-zinc-300 hover:text-white"
+                    title={presentationUiLocked ? 'Presentation is running' : activeSessionTitle}
+                    disabled={presentationUiLocked}
+                    onClick={() => {
+                        if (presentationUiLocked) return;
+                        setSessionPickerOpen((current) => !current);
+                    }}
+                    className="min-w-0 flex-1 flex items-center justify-between gap-2 rounded border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] font-mono text-zinc-300 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
                 >
                     <span className="flex min-w-0 items-center gap-1.5">
                         <History size={12} className="shrink-0 text-zinc-500" />
@@ -3534,7 +3538,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                 <button
                     data-agent-new-session="true"
                     onClick={() => void createSession(selectedProvider || defaultProvider)}
-                    disabled={loading || availableProviders.length === 0}
+                    disabled={loading || availableProviders.length === 0 || presentationUiLocked}
                     className="shrink-0 flex items-center gap-1 px-2 py-1 rounded border border-zinc-800 bg-zinc-950 text-[10px] font-mono text-zinc-400 hover:text-white disabled:opacity-50"
                 >
                     {loading ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
@@ -3563,11 +3567,13 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                                     role="option"
                                     aria-selected={active}
                                     title={title}
+                                    disabled={presentationUiLocked}
                                     onClick={() => {
+                                        if (presentationUiLocked) return;
                                         setActiveSessionId(session.agent_session_id);
                                         setSessionPickerOpen(false);
                                     }}
-                                    className={`w-full px-3 py-2 text-left border-b border-zinc-900 last:border-b-0 ${
+                                    className={`w-full px-3 py-2 text-left border-b border-zinc-900 last:border-b-0 disabled:cursor-not-allowed disabled:opacity-50 ${
                                         active
                                             ? 'bg-cyan-950/40 text-cyan-100'
                                             : 'bg-zinc-950 text-zinc-300 hover:bg-zinc-900/80 hover:text-white'
@@ -3684,8 +3690,8 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                         </div>
                     );
                 })}
-                {latestActions.length > 0 && !messageActionsVisible && (
-                    <div className="mr-8 rounded-lg border border-cyan-900/60 bg-cyan-950/15 px-3 py-2">
+                {latestActions.length > 0 && !messageActionsVisible && !runningRunId && (
+                    <div data-agent-latest-actions="true" className="mr-8 rounded-lg border border-cyan-900/60 bg-cyan-950/15 px-3 py-2">
                         <div className="mb-2 text-[10px] uppercase font-mono text-cyan-500">
                             latest actions
                         </div>

@@ -287,7 +287,7 @@ export default function TimelinePlayer() {
                     aria-label="Toggle live mode"
                     className={twMerge(
                         "flex items-center space-x-2 px-4 py-1.5 rounded-full text-xs font-bold font-mono transition-all border",
-                        isLive ? "bg-red-500/20 text-red-400 border-red-500/50 shadow-[0_0_10px_rgba(255,0,0,0.3)] animate-pulse"
+                        isLive ? "bg-red-500/20 text-red-400 border-red-500/50 shadow-[0_0_10px_rgba(255,0,0,0.3)]"
                                : "bg-zinc-800 text-zinc-400 border-transparent hover:bg-zinc-700"
                     )}
                 >
