@@ -1268,8 +1268,13 @@ const SOURCE_FETCH_CAPABILITIES: Record<string, SourceFetchCapability> = {
     'gdacs-disasters': {
         source: 'gdacs',
         status: 'available',
-        history: 'GDACS exposes a public current/recent disaster MAP feed. OpenSpy can fetch it on demand and apply bbox/time filters to the returned feed.',
-        notes: 'Fetches and persists GDACS current/recent disaster alerts. This is not a deep arbitrary historical archive contract.',
+        history: 'GDACS exposes a public SEARCH API for historical event windows and a current/recent MAP feed for map context.',
+        notes: 'Fetches and persists GDACS disaster alerts. Requests with --from and --to use SEARCH with provider pagination; requests without a time window use the current/recent MAP feed.',
+        policy: {
+            free_tier: 'GDACS data are free through the public API; acknowledge Global Disaster Alert and Coordination System, GDACS.',
+            search_page_size: 'provider returns up to 100 records per page; OpenSpy follows pagenumber until the provider returns no more rows unless --max-pages is explicitly provided',
+            map_feed_mode: 'current/recent map context when no historical window is supplied',
+        },
     },
     'ioda-outages': {
         source: 'ioda',
@@ -1309,7 +1314,7 @@ const SOURCE_FETCH_CAPABILITIES: Record<string, SourceFetchCapability> = {
         source: 'copernicus',
         status: process.env.COPERNICUS_CLIENT_ID && process.env.COPERNICUS_CLIENT_SECRET ? 'available' : 'auth_required',
         history: 'Copernicus Data Space can search Sentinel scenes by AOI/time after registration/auth.',
-        notes: 'Searches Sentinel scene metadata and renders bounded Sentinel-2 optical previews through backend-owned Sentinel Hub APIs. Sentinel-1 metadata is searchable but is not exposed as a renderable scene until a radar renderer is added.',
+        notes: 'Searches Sentinel scene metadata and renders bounded Sentinel-2 optical previews and Sentinel-1 GRD VV radar previews through backend-owned Sentinel Hub APIs.',
         policy: {
             free_tier: 'Copernicus Data Space / Sentinel Hub general-user access is free after registration within request and processing-unit quotas.',
             max_search_window_days: Number.parseInt(process.env.COPERNICUS_MAX_SEARCH_WINDOW_DAYS || '14', 10) || 14,
@@ -1884,6 +1889,11 @@ function mapGdacsFeature(feature: any): DisasterEvent | null {
     };
 }
 
+function gdacsFeatureKey(feature: any): string {
+    const props = feature?.properties || {};
+    return String(props.eventid || props.eventId || feature?.id || stableHash(feature));
+}
+
 function iodaSeverityRank(level: string): number {
     if (level === 'critical') return 2;
     if (level === 'warning') return 1;
@@ -2299,6 +2309,8 @@ function compactOperationPolicyForCapabilityResponse(policy: Record<string, unkn
         'tracks_endpoint',
         'provider_history_import',
         'current_tle_cache_hours',
+        'search_page_size',
+        'map_feed_mode',
         'visual_overlay',
         'selected_date_rule',
         'resolution',
@@ -3008,6 +3020,37 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
 
         if (operation === 'gdacs-disasters') {
             const bbox = parseOpenSpyBbox(args.bbox);
+            const useHistoricalSearch = Boolean(from && to);
+            const fromMs = from ? new Date(from).getTime() : Number.NEGATIVE_INFINITY;
+            const toMs = to ? new Date(to).getTime() : Number.POSITIVE_INFINITY;
+            if ((from || to) && !useHistoricalSearch) {
+                res.status(400).json({
+                    status: 'error',
+                    error: {
+                        code: 'BAD_WINDOW',
+                        message: 'gdacs-disasters historical SEARCH requires both --from and --to ISO timestamps. Omit both for the current/recent MAP feed.',
+                    },
+                });
+                return;
+            }
+            if (useHistoricalSearch && (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs < fromMs)) {
+                res.status(400).json({
+                    status: 'error',
+                    error: { code: 'BAD_WINDOW', message: 'gdacs-disasters received an invalid historical SEARCH window' },
+                });
+                return;
+            }
+            const maxPagesArg = args.max_pages ?? args.maxPages;
+            const maxPages = maxPagesArg === undefined || maxPagesArg === null || maxPagesArg === ''
+                ? null
+                : Number(maxPagesArg);
+            if (maxPages !== null && (!Number.isFinite(maxPages) || maxPages < 1)) {
+                res.status(400).json({
+                    status: 'error',
+                    error: { code: 'BAD_MAX_PAGES', message: 'gdacs-disasters --max-pages must be a positive integer when provided' },
+                });
+                return;
+            }
             if (dryRun) {
                 res.json({
                     status: 'ok',
@@ -3017,23 +3060,99 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
                         bbox: bbox || null,
                         from: from || null,
                         to: to || null,
+                        query: useHistoricalSearch
+                            ? {
+                                endpoint: 'https://www.gdacs.org/gdacsapi/api/events/geteventlist/SEARCH',
+                                fromdate: isoDateOnly(from),
+                                todate: isoDateOnly(to),
+                                max_pages: maxPages,
+                            }
+                            : {
+                                endpoint: 'https://www.gdacs.org/gdacsapi/api/events/geteventlist/MAP',
+                            },
                         capability: capabilityWithPolicy,
                     },
                     meta: {
                         executed: false,
                         persisted: false,
                         dry_run: true,
-                        provider_feed: 'current_recent_map',
+                        provider_feed: useHistoricalSearch ? 'historical_search' : 'current_recent_map',
                     },
                     warnings: ['Dry run only. No GDACS provider request was sent and no local data was written.'],
                 });
                 return;
             }
-            const response = await axios.get('https://www.gdacs.org/gdacsapi/api/events/geteventlist/MAP', { timeout: 30_000 });
-            const features = Array.isArray(response.data?.features) ? response.data.features : [];
+            const providerFeed = useHistoricalSearch ? 'historical_search' : 'current_recent_map';
+            let features: any[] = [];
+            let providerPayload: any = null;
+            let pageCount = 0;
+            let pageLimited = false;
+            let repeatedPage = false;
+            let query: Record<string, any> = {};
+
+            if (useHistoricalSearch) {
+                const baseQuery: Record<string, any> = {
+                    fromdate: isoDateOnly(from),
+                    todate: isoDateOnly(to),
+                };
+                const eventList = args.eventlist ?? args.event_list ?? args.event_types ?? args.eventType;
+                const alertLevel = args.alertlevel ?? args.alert_level;
+                const pageSize = args.pagesize ?? args.page_size;
+                if (eventList) baseQuery.eventlist = String(eventList);
+                if (alertLevel) baseQuery.alertlevel = String(alertLevel);
+                if (pageSize) baseQuery.pagesize = String(pageSize);
+
+                const pages: Array<{ pagenumber: number; rawCount: number; acceptedCount: number }> = [];
+                const seenPageFingerprints = new Set<string>();
+                const seenFeatureKeys = new Set<string>();
+                for (let page = 1; ; page += 1) {
+                    const params = new URLSearchParams(
+                        Object.entries({ ...baseQuery, pagenumber: String(page) })
+                            .filter(([, value]) => value !== null && value !== undefined)
+                            .map(([key, value]) => [key, String(value)]),
+                    );
+                    const response = await axios.get(`https://www.gdacs.org/gdacsapi/api/events/geteventlist/SEARCH?${params.toString()}`, {
+                        timeout: 30_000,
+                        validateStatus: (status) => (status >= 200 && status < 300) || status === 204,
+                    });
+                    if (response.status === 204 || !response.data) break;
+                    const pageFeatures = Array.isArray(response.data?.features) ? response.data.features : [];
+                    if (pageFeatures.length === 0) break;
+                    const pageKeys = pageFeatures.map(gdacsFeatureKey);
+                    const pageFingerprint = pageKeys.join('|');
+                    if (seenPageFingerprints.has(pageFingerprint)) {
+                        repeatedPage = true;
+                        break;
+                    }
+                    seenPageFingerprints.add(pageFingerprint);
+                    const acceptedFeatures = pageFeatures.filter((feature: any, index: number) => {
+                        const key = pageKeys[index];
+                        if (seenFeatureKeys.has(key)) return false;
+                        seenFeatureKeys.add(key);
+                        return true;
+                    });
+                    if (acceptedFeatures.length === 0) {
+                        repeatedPage = true;
+                        break;
+                    }
+                    features.push(...acceptedFeatures);
+                    pages.push({ pagenumber: page, rawCount: pageFeatures.length, acceptedCount: acceptedFeatures.length });
+                    if (maxPages !== null && page >= Math.trunc(maxPages)) {
+                        pageLimited = true;
+                        break;
+                    }
+                }
+                pageCount = pages.length;
+                query = { ...baseQuery, max_pages: maxPages, pages };
+                providerPayload = { type: 'FeatureCollection', features };
+            } else {
+                const response = await axios.get('https://www.gdacs.org/gdacsapi/api/events/geteventlist/MAP', { timeout: 30_000 });
+                features = Array.isArray(response.data?.features) ? response.data.features : [];
+                providerPayload = response.data;
+                query = { endpoint: 'MAP' };
+            }
+
             const allEvents = features.map(mapGdacsFeature).filter((event: DisasterEvent | null): event is DisasterEvent => Boolean(event));
-            const fromMs = from ? new Date(from).getTime() : Number.NEGATIVE_INFINITY;
-            const toMs = to ? new Date(to).getTime() : Number.POSITIVE_INFINITY;
             const events = allEvents.filter((event: DisasterEvent) => {
                 if (bbox && (event.lng < bbox[0] || event.lng > bbox[2] || event.lat < bbox[1] || event.lat > bbox[3])) {
                     return false;
@@ -3046,13 +3165,18 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
                 await sourcePersistenceService.persistDisasterEvents(events, {
                     rawPayloads: [{
                         source_id: 'gdacs',
-                        payload: response.data,
+                        payload: providerPayload,
                         observed_at: from || new Date().toISOString(),
-                        upstream_id: `gdacs-map:${from || 'open'}:${to || 'open'}:${bbox ? bbox.join(',') : 'world'}`,
+                        upstream_id: useHistoricalSearch
+                            ? `gdacs-search:${isoDateOnly(from)}:${isoDateOnly(to)}:${bbox ? bbox.join(',') : 'world'}`
+                            : `gdacs-map:${from || 'open'}:${to || 'open'}:${bbox ? bbox.join(',') : 'world'}`,
                         metadata: {
                             format: 'geojson',
-                            payloadKind: 'current_recent_map_feed',
+                            payloadKind: useHistoricalSearch ? 'historical_search' : 'current_recent_map_feed',
                             filters: { from, to, bbox },
+                            query,
+                            pageCount,
+                            complete: !pageLimited && !repeatedPage,
                         },
                     }],
                 });
@@ -3064,10 +3188,13 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
                     source: capability.source,
                     count: events.length,
                     rawCount: features.length,
-                    provider_feed: 'current_recent_map',
+                    provider_feed: providerFeed,
                     bbox: bbox || null,
                     from: from || null,
                     to: to || null,
+                    query,
+                    page_count: pageCount,
+                    complete: !pageLimited && !repeatedPage,
                 },
                 meta: {
                     executed: true,
@@ -3075,7 +3202,11 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
                     provider_checked: true,
                 },
                 warnings: [
-                    'GDACS MAP feed is current/recent event context. It is not a guaranteed complete arbitrary historical archive; bbox/time filters are applied to returned feed rows.',
+                    ...(useHistoricalSearch
+                        ? ['GDACS SEARCH returns historical event collections. OpenSpy followed provider pagination until no more rows were returned unless --max-pages was explicitly supplied.']
+                        : ['GDACS MAP feed is current/recent event context. Pass both --from and --to to use the historical SEARCH API.']),
+                    ...(pageLimited ? ['GDACS SEARCH stopped at the explicit --max-pages limit supplied by the caller; result is not complete.'] : []),
+                    ...(repeatedPage ? ['GDACS SEARCH stopped because the provider returned a repeated page fingerprint; result is marked incomplete to avoid duplicating rows.'] : []),
                 ],
             });
             return;

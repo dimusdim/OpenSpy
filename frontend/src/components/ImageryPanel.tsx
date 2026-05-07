@@ -122,6 +122,10 @@ function offsetIsoDate(value: string | undefined | null, days: number): string {
     return date.toISOString();
 }
 
+function copernicusCollectionForLayer(layer: string): string {
+    return layer === 'radar_vv' ? 'sentinel-1-grd' : 'sentinel-2-l2a';
+}
+
 export function ImageryToggle({ onClick }: { onClick: () => void }) {
     return (
         <button
@@ -174,9 +178,10 @@ export default function ImageryPanel({ isOpen, onClose }: { isOpen: boolean; onC
     const [scenes, setScenes] = useState<ImageryScene[]>([]);
     const [selectedIndex, setSelectedIndex] = useState(0);
     const selectedScene = scenes[selectedIndex] || null;
+    const copernicusRadar = source === 'copernicus' && layer === 'radar_vv';
     const providerNote = useMemo(() => (
         source === 'copernicus'
-            ? 'Sentinel search uses backend-owned credentials and cached bounded renders.'
+            ? 'Sentinel search uses backend-owned credentials and cached bounded renders. Sentinel-1 radar works through clouds but is not a natural-color photo.'
             : 'NASA GIBS is public daily context imagery; no key is required.'
     ), [source]);
 
@@ -204,6 +209,7 @@ export default function ImageryPanel({ isOpen, onClose }: { isOpen: boolean; onC
                         bbox: bbox.join(','),
                         from: isoDaysAgo(days),
                         to: new Date().toISOString(),
+                        collection: copernicusCollectionForLayer(layer),
                         layer,
                         max_cloud_cover: maxCloudCover,
                         limit: 5,
@@ -351,6 +357,7 @@ export default function ImageryPanel({ isOpen, onClose }: { isOpen: boolean; onC
                                 <>
                                     <option value="true_color">Sentinel-2 true color</option>
                                     <option value="false_color">Sentinel-2 false color</option>
+                                    <option value="radar_vv">Sentinel-1 radar VV</option>
                                 </>
                             )}
                         </select>
@@ -363,7 +370,7 @@ export default function ImageryPanel({ isOpen, onClose }: { isOpen: boolean; onC
                         </label>
                         <label>
                             <span className="mb-1 block text-zinc-500">Cloud %</span>
-                            <input type="number" min={0} max={100} value={maxCloudCover} onChange={(event) => setMaxCloudCover(Number(event.target.value) || 0)} disabled={source !== 'copernicus'} className="w-full rounded border border-zinc-800 bg-zinc-950 px-2 py-2 text-zinc-200 outline-none focus:border-cyan-600 disabled:text-zinc-700" />
+                            <input type="number" min={0} max={100} value={maxCloudCover} onChange={(event) => setMaxCloudCover(Number(event.target.value) || 0)} disabled={source !== 'copernicus' || copernicusRadar} className="w-full rounded border border-zinc-800 bg-zinc-950 px-2 py-2 text-zinc-200 outline-none focus:border-cyan-600 disabled:text-zinc-700" />
                         </label>
                         <label>
                             <span className="mb-1 flex items-center gap-1 text-zinc-500"><SlidersHorizontal size={12} /> Opacity</span>

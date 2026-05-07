@@ -98,11 +98,15 @@ function isSentinel2Collection(collection: string): boolean {
     return normalizeCollection(collection) === 'sentinel-2-l2a';
 }
 
+function isSentinel1Collection(collection: string): boolean {
+    return normalizeCollection(collection) === 'sentinel-1-grd';
+}
+
 function normalizeRenderLayer(layer?: string): string {
     const key = String(layer || 'true_color').trim().toLowerCase().replace(/[\s-]+/g, '_');
     if (key === 'false_color' || key === 'vegetation') return 'false_color';
     if (key === 'true_color' || key === 'natural_color' || key === 'rgb') return 'true_color';
-    if (key === 'radar' || key === 'radar_vv' || key === 'vv') return 'radar_vv';
+    if (key === 'radar' || key === 'sar' || key === 'radar_vv' || key === 'sar_vv' || key === 'vv') return 'radar_vv';
     return key || 'true_color';
 }
 
@@ -121,6 +125,17 @@ function renderSizeForBbox([west, south, east, north]: Bbox, maxPixels: number):
 
 function evalscriptForLayer(layer?: string): string {
     const key = normalizeRenderLayer(layer);
+    if (key === 'radar_vv') {
+        return `//VERSION=3
+function setup() {
+  return { input: ["VV", "dataMask"], output: { bands: 4 } };
+}
+function evaluatePixel(sample) {
+  var value = sample.VV <= 0 ? 0 : Math.log(sample.VV) * 0.18 + 1.0;
+  value = Math.max(0, Math.min(1, value));
+  return [value, value, value, sample.dataMask];
+}`;
+    }
     if (key === 'false_color' || key === 'vegetation') {
         return `//VERSION=3
 function setup() {
@@ -289,7 +304,8 @@ export class CopernicusService {
         const platform = props.platform || props['sat:platform_international_designator'] || props.constellation || null;
         const instruments = Array.isArray(props.instruments) ? props.instruments.join(', ') : props.instruments || null;
         const cloudCover = props['eo:cloud_cover'] ?? props.cloud_cover ?? props.cloudCover ?? null;
-        const renderable = isSentinel2Collection(collection) && requestedLayer !== 'radar_vv';
+        const renderable = (isSentinel2Collection(collection) && requestedLayer !== 'radar_vv')
+            || (isSentinel1Collection(collection) && requestedLayer === 'radar_vv');
         const render = renderable
             ? {
                 source: 'copernicus' as const,
@@ -322,7 +338,7 @@ export class CopernicusService {
                 cloud_cover: cloudCover,
             },
             render_supported: Boolean(render),
-            render_unsupported_reason: render ? null : 'Copernicus preview rendering currently supports Sentinel-2 L2A optical scenes only.',
+            render_unsupported_reason: render ? null : 'Copernicus preview rendering supports Sentinel-2 optical true/false color and Sentinel-1 GRD VV radar scenes.',
             render,
         };
     }
@@ -341,8 +357,10 @@ export class CopernicusService {
             : defaultSize.height;
         const collection = normalizeCollection(input.collection);
         const layer = normalizeRenderLayer(input.layer);
-        if (!isSentinel2Collection(collection) || layer === 'radar_vv') {
-            throw new Error('Copernicus render currently supports Sentinel-2 L2A optical true_color and false_color previews only');
+        const sentinel2Optical = isSentinel2Collection(collection) && layer !== 'radar_vv';
+        const sentinel1Radar = isSentinel1Collection(collection) && layer === 'radar_vv';
+        if (!sentinel2Optical && !sentinel1Radar) {
+            throw new Error('Copernicus render supports Sentinel-2 L2A optical true_color/false_color and Sentinel-1 GRD radar_vv previews');
         }
         const maxCloudCover = clamp(Number(input.maxCloudCover ?? 40), 0, 100);
         const request = {
@@ -355,8 +373,7 @@ export class CopernicusService {
                     type: collection,
                     dataFilter: {
                         timeRange: { from, to },
-                        maxCloudCoverage: maxCloudCover,
-                        mosaickingOrder: 'leastCC',
+                        ...(sentinel2Optical ? { maxCloudCoverage: maxCloudCover, mosaickingOrder: 'leastCC' } : { mosaickingOrder: 'mostRecent' }),
                     },
                 }],
             },
