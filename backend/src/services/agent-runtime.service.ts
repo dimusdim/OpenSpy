@@ -154,6 +154,14 @@ function commandExists(command: string, cwd?: string): boolean {
     });
 }
 
+function commandForLaunch(command: string, cwd: string): string {
+    // Product agents run from an isolated runtime cwd. Relative configured
+    // commands are repo-relative so test fixtures and packaged launch wrappers
+    // resolve the same way regardless of the isolated working directory.
+    if (command.includes('/') && !path.isAbsolute(command)) return path.resolve(cwd, command);
+    return command;
+}
+
 function ensureUuid(value: string | null | undefined): string {
     if (value && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
         return value;
@@ -870,7 +878,7 @@ export class AgentRuntimeService {
                 args.push('--session-id', providerSessionId);
             }
             return {
-                command: process.env.AGENT_CLAUDE_COMMAND || 'claude',
+                command: commandForLaunch(process.env.AGENT_CLAUDE_COMMAND || 'claude', this.repoRoot),
                 args,
                 cwd,
                 providerSessionId,
@@ -882,7 +890,7 @@ export class AgentRuntimeService {
         if (session.provider === 'codex_cli') {
             if (session.provider_session_id) {
                 return {
-                    command: process.env.AGENT_CODEX_COMMAND || 'codex',
+                    command: commandForLaunch(process.env.AGENT_CODEX_COMMAND || 'codex', this.repoRoot),
                     args: [
                         'exec',
                         'resume',
@@ -904,7 +912,7 @@ export class AgentRuntimeService {
                 };
             }
             return {
-                command: process.env.AGENT_CODEX_COMMAND || 'codex',
+                command: commandForLaunch(process.env.AGENT_CODEX_COMMAND || 'codex', this.repoRoot),
                 args: [
                     'exec',
                     '--json',

@@ -554,44 +554,66 @@ case "$cmd" in
     shift || true
     case "$sub" in
       report)
-        coverage_sql="$(cat <<'SQL'
-WITH summary AS (
-  SELECT layer_id, 'position_fixes' AS storage_kind, COUNT(*)::bigint AS record_count, MIN(observed_at) AS min_observed_at, MAX(observed_at) AS max_observed_at, COUNT(DISTINCT source_id)::bigint AS source_count
-  FROM core.position_fixes
-  WHERE observed_at IS NOT NULL
+        read -r -d '' coverage_sql <<'SQL' || true
+WITH ingest_counts AS (
+  SELECT
+    layer_id,
+    SUM(COALESCE(NULLIF(metadata #>> '{sourceMetrics,normalizedCount}', '')::bigint, record_count::bigint, 0))::bigint AS ingested_record_count,
+    COUNT(DISTINCT source_id)::bigint AS ingest_source_count
+  FROM raw.ingest_runs
+  WHERE layer_id IS NOT NULL
+    AND status = 'completed'
   GROUP BY layer_id
+),
+summary AS (
+  SELECT
+    e.layer_id,
+    'position_fixes' AS storage_kind,
+    COALESCE(ic.ingested_record_count, COUNT(*)::bigint) AS record_count,
+    MIN(COALESCE(e.first_observed_at, e.last_observed_at)) AS min_observed_at,
+    MAX(COALESCE(e.last_observed_at, e.first_observed_at)) AS max_observed_at,
+    COALESCE(NULLIF(ic.ingest_source_count, 0), COUNT(DISTINCT e.source_id)::bigint) AS source_count,
+    CASE WHEN ic.ingested_record_count IS NULL THEN 'entity_count' ELSE 'ingest_run_sum' END AS record_count_basis,
+    'entity_observation_bounds' AS time_basis
+  FROM core.entities e
+  JOIN catalog.layers moving_layers ON moving_layers.layer_id = e.layer_id
+  LEFT JOIN ingest_counts ic ON ic.layer_id = e.layer_id
+  WHERE moving_layers.layer_type = 'moving_entity'
+    AND moving_layers.history_mode = 'time_series'
+    AND COALESCE(e.first_observed_at, e.last_observed_at) IS NOT NULL
+  GROUP BY e.layer_id, ic.ingested_record_count, ic.ingest_source_count
   UNION ALL
-  SELECT layer_id, 'entity_live_states' AS storage_kind, COUNT(*)::bigint AS record_count, MIN(observed_at) AS min_observed_at, MAX(observed_at) AS max_observed_at, COUNT(DISTINCT source_id)::bigint AS source_count
+  SELECT layer_id, 'entity_live_states' AS storage_kind, COUNT(*)::bigint AS record_count, MIN(observed_at) AS min_observed_at, MAX(observed_at) AS max_observed_at, COUNT(DISTINCT source_id)::bigint AS source_count, 'storage_exact_count' AS record_count_basis, 'observed_at' AS time_basis
   FROM app.entity_live_states
   WHERE observed_at IS NOT NULL
   GROUP BY layer_id
   UNION ALL
-  SELECT layer_id, 'event_snapshots' AS storage_kind, COUNT(*)::bigint AS record_count, MIN(COALESCE(observed_at, valid_from, created_at)) AS min_observed_at, MAX(COALESCE(observed_at, valid_from, created_at)) AS max_observed_at, COUNT(DISTINCT source_id)::bigint AS source_count
+  SELECT layer_id, 'event_snapshots' AS storage_kind, COUNT(*)::bigint AS record_count, MIN(COALESCE(observed_at, valid_from, created_at)) AS min_observed_at, MAX(COALESCE(observed_at, valid_from, created_at)) AS max_observed_at, COUNT(DISTINCT source_id)::bigint AS source_count, 'storage_exact_count' AS record_count_basis, 'event_effective_time' AS time_basis
   FROM core.event_snapshots
   WHERE COALESCE(observed_at, valid_from, created_at) IS NOT NULL
   GROUP BY layer_id
   UNION ALL
-  SELECT layer_id, 'events' AS storage_kind, COUNT(*)::bigint AS record_count, MIN(COALESCE(observed_at, valid_from, created_at)) AS min_observed_at, MAX(COALESCE(observed_at, valid_from, created_at)) AS max_observed_at, COUNT(DISTINCT source_id)::bigint AS source_count
+  SELECT layer_id, 'events' AS storage_kind, COUNT(*)::bigint AS record_count, MIN(COALESCE(observed_at, valid_from, created_at)) AS min_observed_at, MAX(COALESCE(observed_at, valid_from, created_at)) AS max_observed_at, COUNT(DISTINCT source_id)::bigint AS source_count, 'storage_exact_count' AS record_count_basis, 'event_effective_time' AS time_basis
   FROM core.events
   WHERE COALESCE(observed_at, valid_from, created_at) IS NOT NULL
   GROUP BY layer_id
   UNION ALL
-  SELECT layer_id, 'asset_snapshots' AS storage_kind, COUNT(*)::bigint AS record_count, MIN(COALESCE(observed_at, created_at)) AS min_observed_at, MAX(COALESCE(observed_at, created_at)) AS max_observed_at, COUNT(DISTINCT source_id)::bigint AS source_count
+  SELECT layer_id, 'asset_snapshots' AS storage_kind, COUNT(*)::bigint AS record_count, MIN(COALESCE(observed_at, created_at)) AS min_observed_at, MAX(COALESCE(observed_at, created_at)) AS max_observed_at, COUNT(DISTINCT source_id)::bigint AS source_count, 'storage_exact_count' AS record_count_basis, 'asset_effective_time' AS time_basis
   FROM core.asset_snapshots
   WHERE COALESCE(observed_at, created_at) IS NOT NULL
   GROUP BY layer_id
   UNION ALL
-  SELECT layer_id, 'assets' AS storage_kind, COUNT(*)::bigint AS record_count, MIN(COALESCE(last_observed_at, updated_at, created_at)) AS min_observed_at, MAX(COALESCE(last_observed_at, updated_at, created_at)) AS max_observed_at, COUNT(DISTINCT source_id)::bigint AS source_count
+  SELECT layer_id, 'assets' AS storage_kind, COUNT(*)::bigint AS record_count, MIN(COALESCE(last_observed_at, updated_at, created_at)) AS min_observed_at, MAX(COALESCE(last_observed_at, updated_at, created_at)) AS max_observed_at, COUNT(DISTINCT source_id)::bigint AS source_count, 'storage_exact_count' AS record_count_basis, 'asset_effective_time' AS time_basis
   FROM core.assets
   WHERE COALESCE(last_observed_at, updated_at, created_at) IS NOT NULL
   GROUP BY layer_id
   UNION ALL
-  SELECT layer_id, 'observations' AS storage_kind, COUNT(*)::bigint AS record_count, MIN(observed_at) AS min_observed_at, MAX(observed_at) AS max_observed_at, COUNT(DISTINCT source_id)::bigint AS source_count
+  SELECT layer_id, 'observations' AS storage_kind, COUNT(*)::bigint AS record_count, MIN(observed_at) AS min_observed_at, MAX(observed_at) AS max_observed_at, COUNT(DISTINCT source_id)::bigint AS source_count, 'storage_exact_count' AS record_count_basis, 'observed_at' AS time_basis
   FROM core.observations
   WHERE observed_at IS NOT NULL
   GROUP BY layer_id
   UNION ALL
-  SELECT COALESCE(layer_id, 'satellite') AS layer_id, 'orbital_elements' AS storage_kind, COUNT(*)::bigint AS record_count, MIN(observed_at) AS min_observed_at, MAX(observed_at) AS max_observed_at, COUNT(DISTINCT source_id)::bigint AS source_count
+  SELECT COALESCE(layer_id, 'satellite') AS layer_id, 'orbital_elements' AS storage_kind, COUNT(*)::bigint AS record_count, MIN(observed_at) AS min_observed_at, MAX(observed_at) AS max_observed_at, COUNT(DISTINCT source_id)::bigint AS source_count, 'storage_exact_count' AS record_count_basis, 'observed_at' AS time_basis
   FROM core.orbital_elements
   WHERE observed_at IS NOT NULL
   GROUP BY COALESCE(layer_id, 'satellite')
@@ -611,9 +633,11 @@ SELECT
     ELSE 'unknown'
   END AS coverage_role,
   s.record_count,
+  s.record_count_basis,
   s.source_count,
   s.min_observed_at,
   s.max_observed_at,
+  s.time_basis,
   date_trunc('hour', s.max_observed_at) AS recommended_hour_start,
   date_trunc('day', s.max_observed_at) AS recommended_day_start,
   'latest_observed_window' AS recommendation_kind
@@ -621,7 +645,6 @@ FROM summary s
 JOIN catalog.layers l ON l.layer_id = s.layer_id
 ORDER BY l.layer_id, s.storage_kind
 SQL
-)"
         "$TOOLS_DIR/sql-readonly.sh" \
           --reason "agent data coverage report for choosing real replay test windows" \
           --limit 5000 \

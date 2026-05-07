@@ -2514,13 +2514,18 @@ app.post('/api/agent-tools/sql-query', async (req, res) => {
             });
             return;
         }
-        if (/SQL|SELECT|statement|allowed|required|operator|column|relation|syntax/i.test(err.message || '') || ['42601', '42703', '42804', '42883', '42P01'].includes(String(err.code || ''))) {
+        const sqlErrorCode = String(err.code || '');
+        const sqlErrorMessage = String(err.message || '');
+        const geometryAggregateHint = /function\s+(min|max)\(geometry\)|min\(geometry\)|max\(geometry\)/i.test(sqlErrorMessage)
+            ? 'Geometry values cannot be aggregated with MIN/MAX. For a representative point, select a concrete geometry with array_agg(... ORDER BY observed_at)[1], or use semantic OpenSpy track/search tools.'
+            : null;
+        if (/SQL|SELECT|statement|allowed|required|operator|column|relation|syntax|function/i.test(sqlErrorMessage) || ['42601', '42703', '42725', '42804', '42883', '42P01'].includes(sqlErrorCode)) {
             res.status(400).json({
                 status: 'error',
                 error: {
                     code: 'SQL_REJECTED',
-                    message: err.message,
-                    hint: 'Fix the read-only SELECT or use a semantic OpenSpy query tool.',
+                    message: sqlErrorMessage,
+                    hint: geometryAggregateHint || 'Fix the read-only SELECT or use a semantic OpenSpy query tool.',
                 },
             });
             return;
