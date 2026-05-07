@@ -83,6 +83,23 @@ type ParsedActionContract = {
 };
 
 const SESSION_PICKER_DISPLAY_LIMIT = 80;
+const AGENT_LABEL_FONT = '16px sans-serif';
+const AGENT_LABEL_OFFSET_Y = -34;
+const AGENT_GEOMETRY_HEIGHT_M = 2500;
+const AGENT_LINE_HEIGHT_M = 1800;
+const AGENT_LABEL_STAGGER_OFFSETS = [
+    [0, -44],
+    [220, -44],
+    [-220, -44],
+    [0, -104],
+    [220, -104],
+    [-220, -104],
+    [0, 64],
+    [220, 64],
+    [-220, 64],
+    [0, -164],
+] as const;
+const agentLabelClusterCounts = new Map<string, number>();
 
 const LAYER_KEY_ALIASES: Record<string, string> = {
     aircraft: 'aviation',
@@ -1082,6 +1099,11 @@ function ToolGroup({ parts }: { parts: AgentStreamPart[] }) {
         completedCount > 0 ? `${completedCount} completed` : '',
         failedCount > 0 ? `${failedCount} failed` : '',
     ].filter(Boolean);
+    const summaryLabel = runningCount > 0
+        ? `Working${summaryParts.length > 0 ? `: ${summaryParts.join(', ')}` : ''}`
+        : failedCount > 0
+            ? 'Evidence trace · attention'
+            : 'Evidence trace';
     return (
         <details
             open={runningCount > 0}
@@ -1097,7 +1119,7 @@ function ToolGroup({ parts }: { parts: AgentStreamPart[] }) {
             <summary className="flex cursor-pointer list-none items-center gap-1.5">
                 <Database size={12} className="shrink-0" />
                 <span className="min-w-0 flex-1 truncate">
-                    Tools: {summaryParts.length > 0 ? summaryParts.join(', ') : `${rows.length} events`}
+                    {summaryLabel}
                 </span>
             </summary>
             <div className="mt-1 space-y-1 border-t border-zinc-800/70 pt-1">
@@ -1527,16 +1549,82 @@ function colorFromPayload(value: any, fallback: Cesium.Color): Cesium.Color {
     return fallback;
 }
 
+function overlayHeightFromPayload(payload: Record<string, any>, fallback = AGENT_GEOMETRY_HEIGHT_M): number {
+    const raw = payload.height ?? payload.alt ?? payload.altitude ?? payload.height_m ?? payload.heightMeters;
+    const height = Number(raw);
+    return Number.isFinite(height) ? height : fallback;
+}
+
+function labelClusterKey(lat: number, lng: number): string {
+    return `${Math.round(lat * 100)}:${Math.round(lng * 100)}`;
+}
+
+function labelOffsetFromPayload(payload: Record<string, any>, lat: number, lng: number): Cesium.Cartesian2 {
+    const explicitX = Number(payload.label_offset_x ?? payload.labelOffsetX ?? payload.pixel_offset_x ?? payload.pixelOffsetX);
+    const explicitY = Number(payload.label_offset_y ?? payload.labelOffsetY ?? payload.pixel_offset_y ?? payload.pixelOffsetY);
+    if (Number.isFinite(explicitX) || Number.isFinite(explicitY)) {
+        return new Cesium.Cartesian2(Number.isFinite(explicitX) ? explicitX : 0, Number.isFinite(explicitY) ? explicitY : AGENT_LABEL_OFFSET_Y);
+    }
+    const key = labelClusterKey(lat, lng);
+    const index = agentLabelClusterCounts.get(key) || 0;
+    agentLabelClusterCounts.set(key, index + 1);
+    const base = AGENT_LABEL_STAGGER_OFFSETS[index % AGENT_LABEL_STAGGER_OFFSETS.length];
+    const cycle = Math.floor(index / AGENT_LABEL_STAGGER_OFFSETS.length);
+    return new Cesium.Cartesian2(base[0], base[1] - cycle * 60);
+}
+
+function labelGraphics(text: string, pixelOffset = new Cesium.Cartesian2(0, AGENT_LABEL_OFFSET_Y)): Cesium.LabelGraphics.ConstructorOptions {
+    return {
+        text,
+        font: AGENT_LABEL_FONT,
+        pixelOffset,
+        fillColor: Cesium.Color.WHITE,
+        outlineColor: Cesium.Color.BLACK,
+        outlineWidth: 2,
+        style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+        showBackground: true,
+        backgroundColor: Cesium.Color.BLACK.withAlpha(0.62),
+        backgroundPadding: new Cesium.Cartesian2(8, 5),
+        verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+        horizontalOrigin: Cesium.HorizontalOrigin.CENTER,
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
+    };
+}
+
+function shouldClampOverlayToGround(payload: Record<string, any>): boolean {
+    return explicitBoolean(payload.clampToGround ?? payload.clamp_to_ground) === true;
+}
+
+function normalizeOpenSpyBbox(values: number[]): [number, number, number, number] | null {
+    if (!Array.isArray(values) || values.length < 4) return null;
+    let [west, south, east, north] = values.slice(0, 4).map(Number);
+    if (![west, south, east, north].every(Number.isFinite)) return null;
+    if (west < -180 || west > 180 || east < -180 || east > 180) return null;
+    if (south < -90 || south > 90 || north < -90 || north > 90) return null;
+    if (north < south) return null;
+    if (east === west) {
+        const epsilon = 0.0001;
+        west = Math.max(-180, west - epsilon);
+        east = Math.min(180, east + epsilon);
+    }
+    if (north === south) {
+        const epsilon = 0.0001;
+        south = Math.max(-90, south - epsilon);
+        north = Math.min(90, north + epsilon);
+    }
+    return [west, south, east, north];
+}
+
 function bboxToDegreesArray(bbox: any): number[] | null {
     if (Array.isArray(bbox) && bbox.length >= 4) {
-        return bbox.slice(0, 4).map(Number);
+        return normalizeOpenSpyBbox(bbox.slice(0, 4).map(Number));
     }
     if (bbox && typeof bbox === 'object') {
         const west = Number(bbox.west ?? bbox.minLng ?? bbox.min_lng ?? bbox.lng_min);
         const south = Number(bbox.south ?? bbox.minLat ?? bbox.min_lat ?? bbox.lat_min);
         const east = Number(bbox.east ?? bbox.maxLng ?? bbox.max_lng ?? bbox.lng_max);
         const north = Number(bbox.north ?? bbox.maxLat ?? bbox.max_lat ?? bbox.lat_max);
-        if ([west, south, east, north].every(Number.isFinite)) return [west, south, east, north];
+        return normalizeOpenSpyBbox([west, south, east, north]);
     }
     return null;
 }
@@ -1611,14 +1699,20 @@ function drawTrackOverlay(
     if (points.length < 2) throw new Error('Track action requires at least two points');
     const color = colorFromPayload(payload.color, Cesium.Color.CYAN);
     const idBase = `${AGENT_ENTITY_PREFIX}track-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const positions = points.flatMap((point) => [point.lng, point.lat, Number(point.alt || 0)]);
+    const visualHeight = overlayHeightFromPayload(payload, AGENT_LINE_HEIGHT_M);
+    const clampToGround = shouldClampOverlayToGround(payload);
+    const positions = points.flatMap((point) => [point.lng, point.lat, Number(point.alt || visualHeight)]);
     viewer.entities.add({
         id: `${idBase}:line`,
         polyline: {
-            positions: Cesium.Cartesian3.fromDegreesArrayHeights(positions),
-            width: Number(payload.width || 3),
-            material: color.withAlpha(Number(payload.alpha ?? 0.85)),
-            clampToGround: payload.clampToGround !== false && points.every((point) => !point.alt),
+            positions: clampToGround
+                ? Cesium.Cartesian3.fromDegreesArray(points.flatMap((point) => [point.lng, point.lat]))
+                : Cesium.Cartesian3.fromDegreesArrayHeights(positions),
+            width: Number(payload.width || 6),
+            material: payload.arrow === false
+                ? color.withAlpha(Number(payload.alpha ?? 0.85))
+                : new Cesium.PolylineArrowMaterialProperty(color.withAlpha(Number(payload.alpha ?? 0.9))),
+            clampToGround,
         },
     });
     const first = points[0];
@@ -1716,7 +1810,7 @@ async function animateTrackOverlay(
     const color = colorFromPayload(payload.color, Cesium.Color.LIME);
     const marker = viewer.entities.add({
         id: `${AGENT_ENTITY_PREFIX}track-marker-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-        position: Cesium.Cartesian3.fromDegrees(points[0].lng, points[0].lat, Number(points[0].alt || 0)),
+        position: Cesium.Cartesian3.fromDegrees(points[0].lng, points[0].lat, Number(points[0].alt || overlayHeightFromPayload(payload, AGENT_LINE_HEIGHT_M))),
         point: {
             pixelSize: Number(payload.pixelSize || 12),
             color: color.withAlpha(0.95),
@@ -1724,16 +1818,10 @@ async function animateTrackOverlay(
             outlineWidth: 2,
             disableDepthTestDistance: Number.POSITIVE_INFINITY,
         },
-        label: {
-            text: String(payload.label || label || payload.entity_id || 'tracked object'),
-            font: '12px monospace',
-            pixelOffset: new Cesium.Cartesian2(0, -24),
-            fillColor: Cesium.Color.WHITE,
-            outlineColor: Cesium.Color.BLACK,
-            outlineWidth: 3,
-            style: Cesium.LabelStyle.FILL_AND_OUTLINE,
-            disableDepthTestDistance: Number.POSITIVE_INFINITY,
-        },
+        label: labelGraphics(
+            String(payload.label || label || payload.entity_id || 'tracked object'),
+            labelOffsetFromPayload(payload, points[0].lat, points[0].lng),
+        ),
     });
     const durationMs = Math.max(250, Math.min(Number(payload.duration_ms ?? payload.durationMs ?? 3500), 30_000));
     const startedAt = performance.now();
@@ -1748,7 +1836,8 @@ async function animateTrackOverlay(
             const b = points[index + 1];
             const lng = a.lng + (b.lng - a.lng) * local;
             const lat = a.lat + (b.lat - a.lat) * local;
-            const alt = Number(a.alt || 0) + (Number(b.alt || 0) - Number(a.alt || 0)) * local;
+            const defaultHeight = overlayHeightFromPayload(payload, AGENT_LINE_HEIGHT_M);
+            const alt = Number(a.alt || defaultHeight) + (Number(b.alt || defaultHeight) - Number(a.alt || defaultHeight)) * local;
             (marker as any).position = new Cesium.ConstantPositionProperty(Cesium.Cartesian3.fromDegrees(lng, lat, alt));
             viewer.scene.requestRender();
             if (progress >= 1) {
@@ -1782,7 +1871,7 @@ function drawPointOrLabel(
         || payload.id
         || `${AGENT_ENTITY_PREFIX}annotation-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     );
-    const height = Number(payload.height ?? payload.alt ?? payload.altitude ?? 0);
+    const height = overlayHeightFromPayload(payload, AGENT_LINE_HEIGHT_M);
     const existing = viewer.entities.getById(id);
     if (existing) viewer.entities.remove(existing);
     viewer.entities.add({
@@ -1798,16 +1887,10 @@ function drawPointOrLabel(
             outlineWidth: 2,
             disableDepthTestDistance: Number.POSITIVE_INFINITY,
         },
-        label: {
-            text: String(payload.label || payload.text || label || 'Agent note'),
-            font: '12px monospace',
-            pixelOffset: new Cesium.Cartesian2(0, -24),
-            fillColor: Cesium.Color.WHITE,
-            outlineColor: Cesium.Color.BLACK,
-            outlineWidth: 3,
-            style: Cesium.LabelStyle.FILL_AND_OUTLINE,
-            disableDepthTestDistance: Number.POSITIVE_INFINITY,
-        },
+        label: labelGraphics(
+            String(payload.label || payload.text || label || 'Agent note'),
+            labelOffsetFromPayload(payload, lat, lng),
+        ),
     });
     replayMetaMap.set(id, {
         id,
@@ -1840,24 +1923,35 @@ function drawGeometryOverlay(
     const fill = color.withAlpha(Number(payload.fillAlpha ?? payload.fill_alpha ?? 0.16));
     const outline = color.withAlpha(Number(payload.outlineAlpha ?? payload.outline_alpha ?? 0.85));
     const id = `${AGENT_ENTITY_PREFIX}overlay-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const height = overlayHeightFromPayload(payload);
     const rawGeometry = payload.geojson || payload.geometry;
     const geojson = rawGeometry?.type === 'Feature' ? rawGeometry.geometry : rawGeometry;
 
     const bbox = bboxToDegreesArray(payload.bbox || geojson?.bbox || payload);
     if (bbox) {
         const [west, south, east, north] = bbox;
-        const coords: [number, number][] = [[west, south], [east, south], [east, north], [west, north]];
-        viewer.entities.add({
-            id,
-            polygon: {
-                hierarchy: Cesium.Cartesian3.fromDegreesArray(coords.flat()),
-                material: fill,
-                outline: true,
-                outlineColor: outline,
-                height: Number(payload.height || 0),
-            },
+        const rings: Array<[number, number][]> = east < west
+            ? [
+                [[west, south], [180, south], [180, north], [west, north]],
+                [[-180, south], [east, south], [east, north], [-180, north]],
+            ]
+            : [[[west, south], [east, south], [east, north], [west, north]]];
+        rings.forEach((coords, index) => {
+            viewer.entities.add({
+                id: rings.length > 1 ? `${id}:${index}` : id,
+                polygon: {
+                    hierarchy: Cesium.Cartesian3.fromDegreesArray(coords.flat()),
+                    material: fill,
+                    outline: true,
+                    outlineColor: outline,
+                    height,
+                    perPositionHeight: false,
+                },
+            });
         });
-        const center = centerOfCoordinates(coords);
+        const center = east < west
+            ? { lng: ((west + ((east + 360 - west) / 2) + 540) % 360) - 180, lat: (south + north) / 2 }
+            : centerOfCoordinates(rings[0]);
         if (center && (payload.label || payload.text || label)) {
             drawPointOrLabel(viewer, { ...payload, ...center, pixelSize: 6 }, label, color);
         }
@@ -1876,13 +1970,14 @@ function drawGeometryOverlay(
         }
         viewer.entities.add({
             id,
-            position: Cesium.Cartesian3.fromDegrees(lng, lat),
+            position: Cesium.Cartesian3.fromDegrees(lng, lat, height),
             ellipse: {
                 semiMajorAxis: radius,
                 semiMinorAxis: radius,
                 material: fill,
                 outline: true,
                 outlineColor: outline,
+                height,
             },
         });
         if (payload.label || payload.text || label) drawPointOrLabel(viewer, { ...payload, lat, lng, pixelSize: 6 }, label, color);
@@ -1890,18 +1985,24 @@ function drawGeometryOverlay(
     }
 
     const geometryType = String(payload.geometry_type || payload.type || geojson?.type || '').toLowerCase();
+    const actionType = String(payload.action_type || payload.actionType || '').toLowerCase();
     const rawCoordinates = payload.coordinates || geojson?.coordinates || [];
-    const lineCoordinates = geometryType.includes('line')
+    const lineCoordinates = geometryType.includes('line') || actionType.includes('corridor')
         ? normalizeCoordinates(Array.isArray(rawCoordinates?.[0]?.[0]) ? rawCoordinates[0] : rawCoordinates)
         : [];
     if (lineCoordinates.length >= 2) {
+        const clampToGround = shouldClampOverlayToGround(payload);
         viewer.entities.add({
             id,
             polyline: {
-                positions: Cesium.Cartesian3.fromDegreesArray(lineCoordinates.flat()),
-                width: Number(payload.width || 4),
-                material: outline,
-                clampToGround: payload.clampToGround !== false,
+                positions: clampToGround
+                    ? Cesium.Cartesian3.fromDegreesArray(lineCoordinates.flat())
+                    : Cesium.Cartesian3.fromDegreesArrayHeights(lineCoordinates.flatMap(([lng, lat]) => [lng, lat, overlayHeightFromPayload(payload, AGENT_LINE_HEIGHT_M)])),
+                width: Number(payload.width || 6),
+                material: payload.arrow === false
+                    ? outline
+                    : new Cesium.PolylineArrowMaterialProperty(outline),
+                clampToGround,
             },
         });
         const lineCenter = centerOfCoordinates(lineCoordinates);
@@ -1922,7 +2023,8 @@ function drawGeometryOverlay(
                 material: fill,
                 outline: true,
                 outlineColor: outline,
-                height: Number(payload.height || 0),
+                height,
+                perPositionHeight: false,
             },
         });
         const polygonCenter = centerOfCoordinates(polygonCoordinates);
@@ -2391,6 +2493,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
 
     useEffect(() => {
         activeSessionIdRef.current = activeSessionId;
+        agentLabelClusterCounts.clear();
     }, [activeSessionId]);
 
     useEffect(() => {
@@ -3058,7 +3161,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         ) {
             const viewer = getViewer();
             if (!viewer) throw new Error('Cesium viewer is not ready');
-            drawGeometryOverlay(viewer, payload, action.label || 'Agent AOI');
+            drawGeometryOverlay(viewer, { ...payload, action_type: action.type }, action.label || 'Agent AOI');
             viewer.scene.requestRender();
             return;
         }
@@ -3074,6 +3177,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
             for (const [id, meta] of Array.from(replayMetaMap.entries())) {
                 if (id.startsWith(AGENT_ENTITY_PREFIX) || meta.extra?.agentOverlay) replayMetaMap.delete(id);
             }
+            agentLabelClusterCounts.clear();
             clearOpenSpyImageryLayers(viewer);
             viewer.scene.requestRender();
             return;
@@ -3280,6 +3384,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         cancelReplayWindowEndGuard();
         cancelPendingHistoricalPlayback();
         useTimelineStore.getState().clearAgentReplayFocusIds();
+        agentLabelClusterCounts.clear();
         const actionErrors: string[] = [];
         let replayWindowRequested = false;
         let replayWindowPlaybackAllowed = false;

@@ -55,12 +55,17 @@ export default function Globe() {
             selectionIndicator: false,
             scene3DOnly: true,
             requestRenderMode: true,
+            useBrowserRecommendedResolution: false,
             baseLayer: Cesium.ImageryLayer.fromProviderAsync(
                 Cesium.createWorldImageryAsync({
                     style: Cesium.IonWorldImageryStyle.AERIAL_WITH_LABELS,
                 })
             )
         });
+
+        // Keep Cesium labels readable on Retina/HiDPI screens without letting a
+        // 2x display turn the whole globe into a 4x pixel workload.
+        v.resolutionScale = Math.min(window.devicePixelRatio || 1, 1.5);
 
         // Rate-limit clock-driven renders to ~1 Hz.
         //
