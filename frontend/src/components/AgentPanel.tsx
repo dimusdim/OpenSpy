@@ -7,6 +7,8 @@ import * as Cesium from 'cesium';
 import {
     Bot,
     ChevronDown,
+    ChevronLeft,
+    ChevronRight,
     Database,
     History,
     Loader2,
@@ -57,6 +59,16 @@ type AgentAction = {
     type: string;
     label?: string;
     payload?: Record<string, any>;
+};
+
+type PresentationGuideState = {
+    key: string;
+    sessionId: string;
+    messageId: string;
+    actions: AgentAction[];
+    currentIndex: number;
+    status: 'running' | 'manual' | 'completed' | 'partial' | 'stopped';
+    skippedSteps?: number;
 };
 
 type AgentStreamPart = {
@@ -2462,6 +2474,182 @@ function normalizedActionPayload(action: AgentAction): Record<string, any> {
     return payload;
 }
 
+function compactPresentationText(value: any, maxLength = 180): string {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    if (text.length <= maxLength) return text;
+    return `${text.slice(0, Math.max(0, maxLength - 1)).trim()}...`;
+}
+
+function presentationStepTitle(action: AgentAction, index: number, total: number): string {
+    const payload = normalizedActionPayload(action);
+    const title = payload.title || payload.heading || action.label || payload.label || formatActionType(action.type);
+    return `${index + 1}/${Math.max(total, 1)} ${compactPresentationText(title, 72)}`;
+}
+
+function presentationStepNarration(action: AgentAction): string {
+    const payload = normalizedActionPayload(action);
+    return compactPresentationText(
+        payload.narration
+        || payload.caption
+        || payload.summary
+        || payload.note
+        || payload.description
+        || payload.text
+        || payload.body
+        || '',
+        220,
+    );
+}
+
+function pointFromActionPayload(payload: Record<string, any>): { lat: number; lng: number } | null {
+    const lat = Number(payload.lat ?? payload.latitude);
+    const lng = Number(payload.lng ?? payload.lon ?? payload.longitude);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
+
+    const bbox = bboxToDegreesArray(payload.bbox || payload.bounds);
+    if (bbox) {
+        const [west, south, east, north] = bbox;
+        return { lat: (south + north) / 2, lng: (west + east) / 2 };
+    }
+
+    const coordinates = normalizeCoordinates(payload.coordinates);
+    if (coordinates.length > 0) {
+        const [firstLng, firstLat] = coordinates[Math.floor(coordinates.length / 2)];
+        return { lat: firstLat, lng: firstLng };
+    }
+
+    return null;
+}
+
+function presentationStepPoint(action: AgentAction): { lat: number; lng: number } | null {
+    const point = pointFromActionPayload(normalizedActionPayload(action));
+    if (point) return point;
+    for (const nested of nestedActionsFor(action)) {
+        const nestedPoint = presentationStepPoint(nested);
+        if (nestedPoint) return nestedPoint;
+    }
+    return null;
+}
+
+function clearPresentationStepCallout(): void {
+    const viewer = getViewer();
+    const id = `${AGENT_ENTITY_PREFIX}presentation-current-callout`;
+    const existing = viewer?.entities.getById(id);
+    if (viewer && existing) {
+        viewer.entities.remove(existing);
+        viewer.scene.requestRender();
+    }
+    replayMetaMap.delete(id);
+}
+
+function showPresentationStepCallout(action: AgentAction, index: number, total: number): void {
+    const viewer = getViewer();
+    if (!viewer) return;
+    const point = presentationStepPoint(action);
+    if (!point) {
+        clearPresentationStepCallout();
+        return;
+    }
+    const title = presentationStepTitle(action, index, total).replace(/^\d+\/\d+\s+/, '');
+    drawPointOrLabel(
+        viewer,
+        {
+            id: `${AGENT_ENTITY_PREFIX}presentation-current-callout`,
+            lat: point.lat,
+            lng: point.lng,
+            label: compactPresentationText(title, 82),
+            pixelSize: 14,
+            color: 'blue',
+        },
+        compactPresentationText(title, 82),
+        Cesium.Color.CYAN,
+    );
+    viewer.scene.requestRender();
+}
+
+function PresentationGuideOverlay({
+    guide,
+    onStep,
+    onClose,
+}: {
+    guide: PresentationGuideState | null;
+    onStep: (index: number) => void;
+    onClose: () => void;
+}) {
+    if (!guide || guide.actions.length === 0) return null;
+    const total = guide.actions.length;
+    const currentIndex = Math.max(0, Math.min(guide.currentIndex, total - 1));
+    const action = guide.actions[currentIndex];
+    const title = presentationStepTitle(action, currentIndex, total);
+    const narration = presentationStepNarration(action);
+    const statusLabel = guide.status === 'running'
+        ? 'Playing'
+        : guide.status === 'manual'
+            ? 'Step'
+            : guide.status === 'partial'
+                ? `Partial${guide.skippedSteps ? ` · ${guide.skippedSteps} skipped` : ''}`
+                : guide.status === 'stopped'
+                    ? 'Stopped'
+                    : 'Complete';
+    return (
+        <div
+            data-agent-presentation-guide="true"
+            style={{
+                left: 'clamp(160px, calc((100vw - min(456px, calc(100vw - 24px))) / 2), 50vw)',
+                width: 'min(560px, max(280px, calc(100vw - min(456px, calc(100vw - 24px)) - 48px)))',
+            }}
+            className="fixed bottom-6 z-50 -translate-x-1/2 rounded border border-cyan-900/80 bg-black/88 px-3 py-2 text-zinc-100 shadow-2xl backdrop-blur-xl"
+        >
+            <div className="flex items-start gap-2">
+                <MapPin size={14} className="mt-0.5 shrink-0 text-cyan-300" />
+                <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 text-[10px] font-mono uppercase text-cyan-300">
+                        <span>{statusLabel}</span>
+                        <span className="text-zinc-600">/</span>
+                        <span>{currentIndex + 1} of {total}</span>
+                    </div>
+                    <div className="mt-0.5 truncate text-[12px] font-semibold text-zinc-100">
+                        {title.replace(/^\d+\/\d+\s+/, '')}
+                    </div>
+                    {narration && (
+                        <div className="mt-1 text-[11px] leading-snug text-zinc-300">
+                            {narration}
+                        </div>
+                    )}
+                </div>
+                <button
+                    type="button"
+                    onClick={onClose}
+                    title="Hide presentation guide"
+                    className="rounded border border-zinc-800 bg-zinc-950/80 p-1 text-zinc-500 hover:border-zinc-600 hover:text-zinc-200"
+                >
+                    <X size={13} />
+                </button>
+            </div>
+            <div className="mt-2 flex items-center justify-between gap-2 border-t border-zinc-900 pt-2">
+                <button
+                    type="button"
+                    onClick={() => onStep(currentIndex - 1)}
+                    disabled={currentIndex <= 0}
+                    className="inline-flex items-center gap-1 rounded border border-zinc-800 bg-zinc-950/70 px-2 py-1 text-[11px] font-mono text-zinc-300 hover:border-cyan-700 hover:text-cyan-100 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                    <ChevronLeft size={13} />
+                    Previous
+                </button>
+                <button
+                    type="button"
+                    onClick={() => onStep(currentIndex + 1)}
+                    disabled={currentIndex >= total - 1}
+                    className="inline-flex items-center gap-1 rounded border border-zinc-800 bg-zinc-950/70 px-2 py-1 text-[11px] font-mono text-zinc-300 hover:border-cyan-700 hover:text-cyan-100 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                    Next
+                    <ChevronRight size={13} />
+                </button>
+            </div>
+        </div>
+    );
+}
+
 export function AgentToggle({ onClick }: { onClick: () => void }) {
     return (
         <button
@@ -2486,12 +2674,14 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
     const [runningRunsBySession, setRunningRunsBySession] = useState<Record<string, string>>({});
     const [actionsBySession, setActionsBySession] = useState<Record<string, AgentAction[]>>({});
     const [runningPresentationKey, setRunningPresentationKey] = useState<string | null>(null);
+    const [presentationGuide, setPresentationGuide] = useState<PresentationGuideState | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [selectedProvider, setSelectedProvider] = useState('claude_code');
     const eventSourcesRef = useRef<Map<string, EventSource>>(new Map());
     const runCursorsRef = useRef<Map<string, number>>(new Map());
     const toolNamesByRunRef = useRef<Map<string, Map<string, { name?: string; providerToolName?: string; command?: string }>>>(new Map());
     const runningRunsRef = useRef<Record<string, string>>({});
+    const presentationGuideRef = useRef<PresentationGuideState | null>(null);
     const activeSessionIdRef = useRef<string | null>(null);
     const sessionPickerRef = useRef<HTMLDivElement | null>(null);
     const sessionsLoadSeqRef = useRef(0);
@@ -2527,6 +2717,10 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
     useEffect(() => {
         runningRunsRef.current = runningRunsBySession;
     }, [runningRunsBySession]);
+
+    useEffect(() => {
+        presentationGuideRef.current = presentationGuide;
+    }, [presentationGuide]);
 
     useEffect(() => {
         activeSessionIdRef.current = activeSessionId;
@@ -3425,12 +3619,63 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         }
     }, [applyAction]);
 
+    const updatePresentationGuideStep = useCallback((
+        base: PresentationGuideState,
+        currentIndex: number,
+        status: PresentationGuideState['status'] = base.status,
+        extra: Partial<PresentationGuideState> = {},
+    ) => {
+        const boundedIndex = Math.max(0, Math.min(currentIndex, base.actions.length - 1));
+        const nextGuide: PresentationGuideState = {
+            ...base,
+            ...extra,
+            currentIndex: boundedIndex,
+            status,
+        };
+        setPresentationGuide(nextGuide);
+        const action = nextGuide.actions[boundedIndex];
+        if (action) {
+            showPresentationStepCallout(action, boundedIndex, nextGuide.actions.length);
+            publishPresentationState({
+                key: nextGuide.key,
+                sessionId: nextGuide.sessionId,
+                messageId: nextGuide.messageId,
+                status: nextGuide.status,
+                currentStep: boundedIndex + 1,
+                totalSteps: nextGuide.actions.length,
+                stepTitle: presentationStepTitle(action, boundedIndex, nextGuide.actions.length),
+                stepNarration: presentationStepNarration(action) || null,
+            });
+        }
+    }, []);
+
+    const applyPresentationGuideStep = useCallback(async (index: number) => {
+        const guide = presentationGuideRef.current;
+        if (!guide || guide.actions.length === 0) return;
+        const boundedIndex = Math.max(0, Math.min(index, guide.actions.length - 1));
+        updatePresentationGuideStep(guide, boundedIndex, 'manual');
+        try {
+            await applyAction(guide.actions[boundedIndex], guide.sessionId);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Presentation step failed');
+        }
+    }, [applyAction, updatePresentationGuideStep]);
+
     const replayPresentation = useCallback(async (sessionId: string, messageId: string, actions: AgentAction[]) => {
         if (activeSessionIdRef.current !== sessionId) {
             setError('Switch back to this agent session to replay its presentation');
             return;
         }
         const key = `${sessionId}:${messageId}`;
+        const guideBase: PresentationGuideState = {
+            key,
+            sessionId,
+            messageId,
+            actions,
+            currentIndex: 0,
+            status: 'running',
+        };
+        setPresentationGuide(guideBase);
         setRunningPresentationKey(key);
         publishPresentationState({ key, sessionId, messageId, status: 'running' });
         setError(null);
@@ -3447,11 +3692,13 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         let lastCameraActionRole: 'map' | 'moving' | 'static' | '' = '';
         const movingReplayFocusLayers = new Set<string>();
         try {
-            for (const action of actions) {
+            for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
+                const action = actions[actionIndex];
                 if (activeSessionIdRef.current !== sessionId) {
                     throw new Error('Presentation stopped because another agent session became active');
                 }
                 try {
+                    updatePresentationGuideStep(guideBase, actionIndex, 'running');
                     const needsMultiLayerOverview = action.type === 'replay.play_window'
                         && movingReplayFocusLayers.size > 1
                         && lastReplayOverviewAction
@@ -3503,6 +3750,15 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
             if (actionErrors.length > 0) {
                 setError(`Presentation finished with ${actionErrors.length} skipped step(s)`);
             }
+            setPresentationGuide((current) => (
+                current?.key === key
+                    ? {
+                        ...current,
+                        status: actionErrors.length > 0 ? 'partial' : 'completed',
+                        skippedSteps: actionErrors.length,
+                    }
+                    : current
+            ));
             publishPresentationState({
                 key,
                 sessionId,
@@ -3514,6 +3770,9 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                 replayPlaybackActive: replayWindowPlaybackAllowed,
             });
         } catch (err) {
+            setPresentationGuide((current) => (
+                current?.key === key ? { ...current, status: 'stopped' } : current
+            ));
             publishPresentationState({
                 key,
                 sessionId,
@@ -3525,11 +3784,20 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         } finally {
             setRunningPresentationKey((current) => (current === key ? null : current));
         }
-    }, [applyAction]);
+    }, [applyAction, updatePresentationGuideStep]);
 
     if (!isOpen) return null;
 
     return (
+        <>
+        <PresentationGuideOverlay
+            guide={presentationGuide}
+            onStep={(index) => void applyPresentationGuideStep(index)}
+            onClose={() => {
+                clearPresentationStepCallout();
+                setPresentationGuide(null);
+            }}
+        />
         <div
             data-agent-panel="true"
             className="absolute top-4 right-4 bottom-4 z-40 w-[min(456px,calc(100vw-24px))] rounded-lg border border-zinc-800 bg-black/85 backdrop-blur-xl shadow-2xl flex flex-col overflow-hidden"
@@ -3671,7 +3939,6 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                     const streamParts = displayPartsForMessage(message, runningRunId);
                     const streamGroups = groupStreamParts(streamParts);
                     const shouldShowFinalContent = shouldRenderFinalContent(message, streamParts, runningRunId);
-                    const showFinalContentFirst = message.role === 'assistant' && shouldShowFinalContent && streamParts.some((part) => part.type !== 'text');
                     const presentationKey = activeSessionId ? `${activeSessionId}:${message.agent_message_id}` : '';
                     const presentationRunning = Boolean(presentationKey && runningPresentationKey === presentationKey);
                     return (
@@ -3688,9 +3955,6 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                             </div>
                             {streamParts.length > 0 ? (
                                 <div className="space-y-1.5">
-                                    {showFinalContentFirst && (
-                                        <MarkdownBlock text={message.content} onOpenSpyLinkClick={(href, label) => void openOpenSpyLink(href, label)} />
-                                    )}
                                     {streamGroups.map((group, idx) => (
                                         group.type === 'text' ? (
                                             <MarkdownBlock key={group.part.id} text={group.part.text || ''} onOpenSpyLinkClick={(href, label) => void openOpenSpyLink(href, label)} />
@@ -3698,7 +3962,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                                             <ToolGroup key={`tools-${idx}-${group.parts[0]?.id || idx}`} parts={group.parts} />
                                         )
                                     ))}
-                                    {shouldShowFinalContent && !showFinalContentFirst && (
+                                    {shouldShowFinalContent && (
                                         <MarkdownBlock text={message.content} onOpenSpyLinkClick={(href, label) => void openOpenSpyLink(href, label)} />
                                     )}
                                 </div>
@@ -3835,5 +4099,6 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                 </div>
             </div>
         </div>
+        </>
     );
 }
