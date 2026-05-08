@@ -3524,6 +3524,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                     </span>
                 </button>
                 <select
+                    data-agent-provider-select="true"
                     value={selectedProvider}
                     onChange={(event) => setSelectedProvider(event.target.value)}
                     disabled={availableProviders.length === 0}
