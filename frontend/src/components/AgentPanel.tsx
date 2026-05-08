@@ -357,6 +357,15 @@ function parseActionJson(raw: string): ParsedActionContract {
     }
 }
 
+function rawJsonHasActions(raw: string): boolean {
+    try {
+        const parsed = JSON.parse(String(raw || '{}'));
+        return normalizeAgentActions(parsed?.actions).length > 0;
+    } catch {
+        return false;
+    }
+}
+
 function findCompleteFenceActionBlock(content: string): {
     start: number;
     end: number;
@@ -378,6 +387,31 @@ function findCompleteFenceActionBlock(content: string): {
     return { start, end, rawStart, rawEnd, incomplete: false };
 }
 
+function findCompleteGenericJsonActionBlock(content: string): {
+    start: number;
+    end: number;
+    rawStart: number;
+    rawEnd: number;
+    incomplete: boolean;
+} | null {
+    const pattern = /(^|\n)(```json[ \t]*\n?)([\s\S]*?)(\s*```)/ig;
+    for (const match of content.matchAll(pattern)) {
+        if (match.index == null) continue;
+        const leading = match[1] || '';
+        const prefix = match[2] || '';
+        const raw = match[3] || '';
+        const suffix = match[4] || '';
+        if (!rawJsonHasActions(raw.trim())) continue;
+        const start = match.index + leading.length;
+        const rawStart = start + prefix.length;
+        const rawEnd = rawStart + raw.length;
+        const end = rawEnd + suffix.length;
+        if (content.slice(end).trim().length > 0) continue;
+        return { start, end, rawStart, rawEnd, incomplete: false };
+    }
+    return null;
+}
+
 function isActionFenceStart(line: string): boolean {
     const trimmed = line.trim();
     const upper = trimmed.toUpperCase();
@@ -397,6 +431,8 @@ function findFenceActionBlock(content: string): {
 } | null {
     const complete = findCompleteFenceActionBlock(content);
     if (complete) return complete;
+    const genericJson = findCompleteGenericJsonActionBlock(content);
+    if (genericJson) return genericJson;
 
     const lines = content.split('\n');
     let offset = 0;
@@ -775,6 +811,7 @@ function parseOpenSpyLink(href: string, fallbackLabel?: string): AgentAction | n
     if (!href || !href.startsWith('ospy://')) return null;
     const url = new URL(href);
     const target = (url.hostname || url.pathname.replace(/^\/+/, '')).toLowerCase();
+    const pathId = decodeURIComponent(url.pathname.replace(/^\/+/, '').split('/')[0] || '');
     const params = url.searchParams;
     const label = params.get('label') || fallbackLabel || undefined;
     const jsonPayload = parseJsonParam(params);
@@ -786,7 +823,7 @@ function parseOpenSpyLink(href: string, fallbackLabel?: string): AgentAction | n
 
     if (target === 'entity' || target === 'object') {
         const id = canonicalObjectIdForLayer(
-            payload.entity_id || payload.entityId || payload.id,
+            payload.entity_id || payload.entityId || payload.id || pathId,
             payload.layer || payload.layer_id || payload.layerId,
         );
         if (!id) throw new Error(`ospy://${target} requires entity_id or id`);
@@ -807,8 +844,8 @@ function parseOpenSpyLink(href: string, fallbackLabel?: string): AgentAction | n
     if (target === 'asset' || target === 'event') {
         const id = canonicalObjectIdForLayer(
             target === 'asset'
-                ? (payload.asset_id || payload.assetId || payload.id)
-                : (payload.event_id || payload.eventId || payload.id),
+                ? (payload.asset_id || payload.assetId || payload.id || pathId)
+                : (payload.event_id || payload.eventId || payload.id || pathId),
             payload.layer || payload.layer_id || payload.layerId,
         );
         if (!id) throw new Error(`ospy://${target} requires ${target}_id or id`);
@@ -829,10 +866,10 @@ function parseOpenSpyLink(href: string, fallbackLabel?: string): AgentAction | n
 
     if (target === 'selection') {
         const type = params.get('type') || 'selection.apply';
+        if (!payload.selection_id && !payload.selectionId && pathId) payload.selection_id = pathId;
         if (type !== 'selection.clear' && !payload.selection_id && !payload.selectionId) {
             throw new Error('ospy://selection requires selection_id');
         }
-        if (!payload.layer && !payload.layer_id) throw new Error('ospy://selection requires layer');
         const selectionId = payload.selection_id || payload.selectionId;
         const layer = payload.layer || payload.layer_id;
         return {
@@ -2993,6 +3030,15 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
             return json;
         };
 
+        const getJson = async (path: string) => {
+            const response = await fetch(`${API_URL}${path}`);
+            const json = await response.json().catch(() => null);
+            if (!response.ok || json?.status === 'error') {
+                throw new Error(json?.error?.message || json?.error || `${path} failed`);
+            }
+            return json;
+        };
+
         if (action.type === 'map.fly_to') {
             const lat = Number(payload.lat ?? payload.latitude);
             const lng = Number(payload.lng ?? payload.lon ?? payload.longitude);
@@ -3118,6 +3164,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                 speed: resolvedPoint?.speed,
                 observedAt: resolvedPoint?.at || at || undefined,
                 agentSelected: true,
+                skipLiveDetails: payload.live_details === true || payload.liveDetails === true ? false : true,
                 ...((payload.metadata && typeof payload.metadata === 'object') ? payload.metadata : {}),
             });
             const lat = Number(resolvedPoint?.lat);
@@ -3298,6 +3345,12 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
 
         if (action.type === 'selection.apply' || action.type === 'selection.clear') {
             const shouldResumePlayback = shouldResumeHistoricalPlaybackAfterViewChange(useTimelineStore.getState());
+            if (action.type === 'selection.apply' && !payload.layer && !payload.layer_id && (payload.selection_id || payload.selectionId)) {
+                const selectionId = String(payload.selection_id || payload.selectionId);
+                const selection = await getJson(`/api/selections/${encodeURIComponent(selectionId)}`);
+                const row = selection.data || selection;
+                payload.layer = normalizeCatalogLayerId(row.layer || row.layer_id || row.layerId);
+            }
             if (action.type === 'selection.apply' && Array.isArray(payload.entities) && payload.entities.length > 0) {
                 const ids = payload.entities
                     .map((entity: any) => String(entity?.entity_id || entity?.entityId || entity?.id || '').trim())

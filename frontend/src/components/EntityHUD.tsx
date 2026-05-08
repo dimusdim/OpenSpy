@@ -135,6 +135,7 @@ export default function EntityHUD({ avoidRightPx = 0 }: EntityHUDProps) {
     useEffect(() => {
         setLiveDetails(null);
         if (mode !== 'live' || !selectedEntityId || !selectedEntityData?.type) return;
+        if ((selectedEntityData as any).skipLiveDetails) return;
         const layer = LIVE_DETAILS_LAYER_BY_TYPE[selectedEntityData.type] || null;
         if (!layer) return;
         let cancelled = false;

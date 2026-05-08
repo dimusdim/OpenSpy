@@ -128,7 +128,7 @@ const DEFAULT_CLAUDE_DISALLOWED_TOOLS = [
     'Bash(command *)',
 ].join(',');
 const EMPTY_MCP_CONFIG = '{"mcpServers":{}}';
-const DEFAULT_CODEX_SANDBOX = 'read-only';
+const DEFAULT_CODEX_SANDBOX = 'danger-full-access';
 function isCodexProviderEnabled(): boolean {
     return process.env.AGENT_ENABLE_CODEX_PROVIDER !== 'false';
 }
@@ -210,6 +210,15 @@ function parseActionJson(raw: string): Omit<ParsedActionContract, 'visible'> {
     }
 }
 
+function rawJsonHasActions(raw: string): boolean {
+    try {
+        const parsed = JSON.parse(String(raw || '{}'));
+        return normalizeAgentActions(parsed?.actions).length > 0;
+    } catch {
+        return false;
+    }
+}
+
 function findCompleteFenceActionBlock(content: string): {
     start: number;
     end: number;
@@ -231,6 +240,31 @@ function findCompleteFenceActionBlock(content: string): {
     return { start, end, rawStart, rawEnd, incomplete: false };
 }
 
+function findCompleteGenericJsonActionBlock(content: string): {
+    start: number;
+    end: number;
+    rawStart: number;
+    rawEnd: number;
+    incomplete: boolean;
+} | null {
+    const pattern = /(^|\n)(```json[ \t]*\n?)([\s\S]*?)(\s*```)/ig;
+    for (const match of content.matchAll(pattern)) {
+        if (match.index == null) continue;
+        const leading = match[1] || '';
+        const prefix = match[2] || '';
+        const raw = match[3] || '';
+        const suffix = match[4] || '';
+        if (!rawJsonHasActions(raw.trim())) continue;
+        const start = match.index + leading.length;
+        const rawStart = start + prefix.length;
+        const rawEnd = rawStart + raw.length;
+        const end = rawEnd + suffix.length;
+        if (content.slice(end).trim().length > 0) continue;
+        return { start, end, rawStart, rawEnd, incomplete: false };
+    }
+    return null;
+}
+
 function isActionFenceStart(line: string): boolean {
     const trimmed = line.trim();
     const upper = trimmed.toUpperCase();
@@ -250,6 +284,8 @@ function findFenceActionBlock(content: string): {
 } | null {
     const complete = findCompleteFenceActionBlock(content);
     if (complete) return complete;
+    const genericJson = findCompleteGenericJsonActionBlock(content);
+    if (genericJson) return genericJson;
 
     const lines = content.split('\n');
     let offset = 0;
@@ -557,6 +593,81 @@ function toolResultOutput(result: any): any {
         });
     }
     return content;
+}
+
+function codexItemFromEvent(raw: any): any {
+    const item = raw?.item ?? raw?.msg?.item;
+    return item && typeof item === 'object' && !Array.isArray(item) ? item : null;
+}
+
+function codexItemType(item: any): string {
+    return firstString(item?.type, item?.kind);
+}
+
+function codexAssistantTextFromItem(item: any): string {
+    if (!item || typeof item !== 'object') return '';
+    const itemType = codexItemType(item);
+    const role = firstString(item?.role);
+    const isAssistant = itemType === 'agent_message'
+        || itemType === 'assistant_message'
+        || (itemType === 'message' && (!role || role === 'assistant'));
+    if (!isAssistant) return '';
+    return firstString(
+        item?.text,
+        item?.message,
+        item?.output_text,
+        item?.content_text,
+        collectTextFromContent(item?.content),
+    );
+}
+
+function codexToolCommand(item: any): string {
+    return firstString(
+        item?.command,
+        item?.cmd,
+        item?.input?.command,
+        item?.arguments?.command,
+    );
+}
+
+function isCodexToolItem(item: any): boolean {
+    if (!item || typeof item !== 'object') return false;
+    const itemType = codexItemType(item);
+    return itemType === 'command_execution'
+        || itemType === 'local_shell_call'
+        || itemType === 'tool_call'
+        || itemType === 'function_call'
+        || itemType === 'custom_tool_call'
+        || Boolean(codexToolCommand(item));
+}
+
+function codexToolInput(item: any): any {
+    if (!item || typeof item !== 'object') return undefined;
+    if (item.input !== undefined) return item.input;
+    if (item.arguments !== undefined) return item.arguments;
+    const command = codexToolCommand(item);
+    return command ? { command } : undefined;
+}
+
+function codexToolOutput(item: any): any {
+    if (!item || typeof item !== 'object') return undefined;
+    return item.output
+        ?? item.aggregated_output
+        ?? item.result
+        ?? item.stdout
+        ?? item.stderr
+        ?? item.text;
+}
+
+function codexToolIsError(item: any): boolean {
+    if (!item || typeof item !== 'object') return false;
+    if (item.is_error === true) return true;
+    const exitCode = Number(item.exit_code);
+    if (Number.isFinite(exitCode) && exitCode !== 0) return true;
+    const error = item.error;
+    if (typeof error === 'string') return error.trim().length > 0;
+    if (error && typeof error === 'object') return Object.keys(error).length > 0;
+    return false;
 }
 
 function truthyEnv(value: string | undefined): boolean {
@@ -1258,9 +1369,15 @@ export class AgentRuntimeService {
             : [
                 event?.session_id,
                 event?.sessionId,
+                event?.thread_id,
+                event?.threadId,
                 raw?.session_id,
                 raw?.sessionId,
+                raw?.thread_id,
+                raw?.threadId,
+                raw?.thread?.id,
                 raw?.msg?.session_id,
+                raw?.msg?.thread_id,
                 raw?.message?.session_id,
             ];
         for (const candidate of candidates) {
@@ -1287,6 +1404,44 @@ export class AgentRuntimeService {
         const toolCommand = firstString(raw?.content_block?.input?.command, raw?.input?.command, raw?.msg?.input?.command);
         const toolInput = raw?.content_block?.input ?? raw?.input ?? raw?.msg?.input;
         const displayName = summarizeToolName(toolName, toolCommand);
+        if (provider === 'codex_cli' && (type === 'item.started' || type === 'item.completed')) {
+            const item = codexItemFromEvent(raw);
+            const itemType = codexItemType(item);
+            const command = codexToolCommand(item);
+            if (isCodexToolItem(item)) {
+                const eventType = type === 'item.started' ? 'tool.started' : 'tool.completed';
+                events.push({
+                    eventType,
+                    payload: {
+                        provider,
+                        raw_type: itemType || type,
+                        name: summarizeToolName(firstString(item?.name, item?.tool_name, itemType, 'tool'), command),
+                        tool_name: firstString(item?.name, item?.tool_name, itemType),
+                        tool_use_id: firstString(item?.id, item?.call_id),
+                        command,
+                        input: eventType === 'tool.started' ? compactToolPayload(codexToolInput(item)) : undefined,
+                        output: eventType === 'tool.completed' ? compactToolPayload(codexToolOutput(item)) : undefined,
+                        output_summary: eventType === 'tool.completed' ? summarizeToolOutputForTrace(codexToolOutput(item)) : undefined,
+                        is_error: codexToolIsError(item),
+                    },
+                });
+            }
+
+            let text = '';
+            let snapshot: string | null = null;
+            const assistantSnapshot = codexAssistantTextFromItem(item);
+            if (assistantSnapshot) {
+                snapshot = assistantSnapshot;
+                if (assistantSnapshot.startsWith(currentText)) {
+                    text = assistantSnapshot.slice(currentText.length);
+                } else if (lastSnapshot && assistantSnapshot.startsWith(lastSnapshot)) {
+                    text = assistantSnapshot.slice(lastSnapshot.length);
+                } else if (!currentText && assistantSnapshot !== lastSnapshot) {
+                    text = assistantSnapshot;
+                }
+            }
+            return { delta: text, snapshot, events };
+        }
         if (provider === 'claude_code' && raw?.type === 'content_block_start' && raw?.content_block?.type === 'tool_use' && toolDraftKey && !toolCommand) {
             const draft = {
                 id: toolUseId,
