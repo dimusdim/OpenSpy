@@ -1047,6 +1047,9 @@ export class AgentRuntimeService {
 
     private ensureProviderWorkdir(provider: AgentProvider): string {
         const harnessRoot = this.productHarnessRoot();
+        const coreDir = path.join(harnessRoot, 'core');
+        const coreInstructions = path.join(coreDir, 'INSTRUCTIONS.md');
+        const coreSkills = path.join(coreDir, 'skills');
         const baseDir = process.env.OPENSPY_AGENT_RUNTIME_DIR
             ? path.resolve(process.env.OPENSPY_AGENT_RUNTIME_DIR)
             : path.join(os.tmpdir(), 'openspy-agent-runtime');
@@ -1057,11 +1060,19 @@ export class AgentRuntimeService {
         fs.mkdirSync(workdir, { recursive: true });
         this.ensureSymlink(path.join(harnessRoot, 'tools'), path.join(workdir, 'tools'), 'dir');
         if (provider === 'claude_code') {
-            this.ensureSymlink(path.join(harnessRoot, 'claude', 'CLAUDE.md'), path.join(workdir, 'CLAUDE.md'), 'file');
-            this.ensureSymlink(path.join(harnessRoot, 'claude', '.claude'), path.join(workdir, '.claude'), 'dir');
+            this.ensureSymlink(coreInstructions, path.join(workdir, 'CLAUDE.md'), 'file');
+            const claudeDir = path.join(workdir, '.claude');
+            this.ensureDirectory(claudeDir);
+            this.ensureSymlink(coreSkills, path.join(claudeDir, 'skills'), 'dir');
+            this.ensureSymlink(path.join(coreDir, 'claude-settings.json'), path.join(claudeDir, 'settings.json'), 'file');
         } else if (provider === 'codex_cli') {
-            this.ensureSymlink(path.join(harnessRoot, 'codex', 'AGENTS.md'), path.join(workdir, 'AGENTS.md'), 'file');
-            this.ensureSymlink(path.join(harnessRoot, 'codex', 'skills'), path.join(workdir, 'skills'), 'dir');
+            this.ensureSymlink(coreInstructions, path.join(workdir, 'AGENTS.md'), 'file');
+            const agentsDir = path.join(workdir, '.agents');
+            this.ensureDirectory(agentsDir);
+            this.ensureSymlink(coreSkills, path.join(agentsDir, 'skills'), 'dir');
+            // Temporary compatibility link for local inspection and older smoke
+            // checks; Codex discovers product skills through `.agents/skills`.
+            this.ensureSymlink(coreSkills, path.join(workdir, 'skills'), 'dir');
         }
         return workdir;
     }
@@ -1073,6 +1084,14 @@ export class AgentRuntimeService {
         const toolsDir = path.join(override, 'tools');
         if (!fs.existsSync(toolsDir)) {
             throw new Error(`OpenSpy product agent harness is missing tools directory: ${toolsDir}`);
+        }
+        const coreInstructions = path.join(override, 'core', 'INSTRUCTIONS.md');
+        if (!fs.existsSync(coreInstructions)) {
+            throw new Error(`OpenSpy product agent harness is missing core instructions: ${coreInstructions}`);
+        }
+        const coreSkills = path.join(override, 'core', 'skills');
+        if (!fs.existsSync(coreSkills)) {
+            throw new Error(`OpenSpy product agent harness is missing core skills directory: ${coreSkills}`);
         }
         return override;
     }
@@ -1093,13 +1112,27 @@ export class AgentRuntimeService {
             if (stat.isSymbolicLink()) {
                 const current = fs.readlinkSync(linkPath);
                 const resolved = path.resolve(path.dirname(linkPath), current);
-                if (resolved === target) return;
+                if (resolved === path.resolve(target)) return;
+                fs.unlinkSync(linkPath);
+            } else {
+                fs.rmSync(linkPath, { recursive: true, force: true });
             }
-            fs.rmSync(linkPath, { recursive: true, force: true });
         } catch (err: any) {
             if (err?.code !== 'ENOENT') throw err;
         }
         fs.symlinkSync(target, linkPath, kind === 'dir' && process.platform === 'win32' ? 'junction' : kind);
+    }
+
+    private ensureDirectory(dirPath: string): void {
+        try {
+            const stat = fs.lstatSync(dirPath);
+            if (stat.isDirectory() && !stat.isSymbolicLink()) return;
+            if (stat.isSymbolicLink()) fs.unlinkSync(dirPath);
+            else fs.rmSync(dirPath, { recursive: true, force: true });
+        } catch (err: any) {
+            if (err?.code !== 'ENOENT') throw err;
+        }
+        fs.mkdirSync(dirPath, { recursive: true });
     }
 
     private buildStreamParts(runId: string, events: AgentRunEventRow[], finalContent: string): AgentStreamPart[] {
