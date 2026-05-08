@@ -8,8 +8,36 @@ reason=""
 limit=""
 timeout_ms=""
 
+emit_help() {
+  node -e '
+console.log(JSON.stringify({
+  status: "ok",
+  data: {
+    usage: "sql-readonly.sh --reason <text> (--sql <select> | --sql-b64 <base64>) [--limit N] [--timeout-ms N]",
+    purpose: "Guarded read-only SQL fallback through the backend read-only endpoint.",
+    rules: [
+      "Use semantic worldview-cli commands first when they answer the question.",
+      "SQL must start with SELECT or WITH and requires --reason.",
+      "Do not read credential files or product transcript tables.",
+      "Prefer direct --sql strings over temp files, pipes or shell-generated base64."
+    ],
+    examples: [
+      "sql-readonly.sh --reason \"Need a direct aggregate\" --sql \"select layer_id, count(*) from core.entities group by layer_id\"",
+      "sql-readonly.sh --reason \"Need vessel fixes\" --timeout-ms 30000 --sql \"select entity_id, count(*) from core.position_fixes group by entity_id limit 20\""
+    ]
+  },
+  meta: { command: "sql-readonly.help" },
+  warnings: []
+}));
+'
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    help|--help|-h)
+      emit_help
+      exit 0
+      ;;
     --sql)
       sql="${2:-}"
       shift 2
@@ -90,8 +118,8 @@ try {
 fi
 
 if [[ -z "$sql" ]]; then
-  emit_error "USAGE" "Usage: sql-readonly.sh --reason <text> (--sql <select> | --sql-file <path> | --sql-b64 <base64> | --stdin) [--limit N]"
-  exit 1
+  emit_help
+  exit 0
 fi
 
 if [[ -z "$reason" ]]; then

@@ -5,9 +5,54 @@ method="${1:-}"
 path="${2:-}"
 body="${3:-}"
 
+emit_help() {
+  node -e '
+console.log(JSON.stringify({
+  status: "ok",
+  data: {
+    usage: "backend-api.sh <GET|POST|DELETE> </api/path> [json-body]",
+    purpose: "Low-level JSON HTTP wrapper for OpenSpy backend endpoints when a semantic worldview-cli/source/map/sql wrapper does not cover the need.",
+    when_to_use: [
+      "Prefer worldview-cli.sh, source-fetch.sh, map-command.sh or sql-readonly.sh first.",
+      "Use backend-api.sh for catalog/status endpoints, small diagnostics, or documented backend endpoints that already return JSON.",
+      "Do not use it to bypass source/tool contracts or read credentials."
+    ],
+    response: {
+      success: "Passes through backend JSON response.",
+      http_error: "Returns status=error, error.code=BACKEND_HTTP_ERROR, error.http_status and backend body when available.",
+      unavailable: "Returns status=error, error.code=BACKEND_UNAVAILABLE when localhost backend cannot be reached."
+    },
+    examples: [
+      "backend-api.sh GET /api/catalog/layers",
+      "backend-api.sh GET /api/agents/providers",
+      "backend-api.sh POST /api/agent-tools/source-fetch \"{\\\"operation\\\":\\\"capabilities\\\",\\\"args\\\":{}}\""
+    ]
+  },
+  meta: { command: "backend-api.help" },
+  warnings: []
+}));
+'
+}
+
+case "$method" in
+  help|--help|-h|"")
+    emit_help
+    exit 0
+    ;;
+esac
+
+for arg in "$@"; do
+  case "$arg" in
+    help|--help|-h)
+      emit_help
+      exit 0
+      ;;
+  esac
+done
+
 if [[ -z "$method" || -z "$path" ]]; then
-  printf '{"status":"error","error":{"code":"USAGE","message":"Usage: backend-api.sh <GET|POST|DELETE> </api/path> [json-body]"}}\n'
-  exit 1
+  emit_help
+  exit 0
 fi
 
 api_url="${AI_WORLDVIEW_API_URL:-${API_URL:-http://127.0.0.1:3055}}"

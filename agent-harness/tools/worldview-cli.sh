@@ -107,6 +107,18 @@ get_arg() {
   return 0
 }
 
+has_help_arg() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      help|--help|-h)
+        return 0
+        ;;
+    esac
+    shift
+  done
+  return 1
+}
+
 build_query_string() {
   node -e '
 const args = process.argv.slice(1);
@@ -435,6 +447,17 @@ const docs = {
       "worldview-cli.sh replay evidence --entity vessel:123 --layer vessel --from <iso> --to <iso>"
     ]
   },
+  "replay.evidence": {
+    usage: "worldview-cli.sh replay evidence --entity <entity_id> [--layer <layer>] --from <iso> --to <iso>",
+    purpose: "Validate whether one moving entity has replay-visible fixes inside the exact final presentation window.",
+    required: ["--entity", "--from", "--to"],
+    optional: ["--layer"],
+    output_fields: ["entity_id", "layer_id", "window_from", "window_to", "fix_count", "has_motion", "first_fix_at", "last_fix_at", "max_displacement_m", "endpoint_displacement_m", "first_lat", "first_lng", "last_lat", "last_lng"],
+    examples: [
+      "worldview-cli.sh replay evidence --entity vessel:538003352 --layer vessel --from 2026-05-01T00:00:00Z --to 2026-05-01T01:00:00Z"
+    ],
+    recovery: "If fix_count < 2 or displacement is not visually useful, choose another entity or a tighter replay window with real fixes."
+  },
   geo: {
     usage: "worldview-cli.sh geo <nearest|corridor|spatial_join|simplify> ...",
     examples: [
@@ -450,6 +473,50 @@ const docs = {
     examples: [
       "worldview-cli.sh geo corridor --kind entities --layer vessel --coordinates \"[[24.0,59.4],[25.4,60.1]]\" --radius_m 50000 --from 2026-05-01T08:30:00Z --to 2026-05-02T08:30:00Z --limit 25"
     ]
+  },
+  selection: {
+    usage: "worldview-cli.sh selection <create|get|patch|preview|materialize|items|apply|clear> ...",
+    examples: [
+      "worldview-cli.sh selection create --json \"{...}\"",
+      "worldview-cli.sh selection materialize --selection <selection_id>",
+      "worldview-cli.sh selection items --selection <selection_id> --limit all",
+      "worldview-cli.sh selection apply --layer vessel --selection <selection_id> --mode only"
+    ],
+    notes: [
+      "selection create accepts only --json",
+      "canonical JSON fields are selectionId, layerId, selectionMode, predicate and metadata",
+      "put bbox/from/to/ids/subtype/source_id inside predicate"
+    ]
+  },
+  "selection.create": {
+    usage: "worldview-cli.sh selection create --json \"<selection-json>\"",
+    required: ["--json"],
+    examples: [
+      "worldview-cli.sh selection create --json \"{\\\"selectionId\\\":\\\"sel:hormuz:vessels\\\",\\\"layerId\\\":\\\"vessel\\\",\\\"selectionMode\\\":\\\"filter\\\",\\\"predicate\\\":{\\\"bbox\\\":[54,24,58.5,28.5],\\\"from\\\":\\\"2026-04-30T22:00:00Z\\\",\\\"to\\\":\\\"2026-05-01T00:00:00Z\\\"},\\\"metadata\\\":{\\\"title\\\":\\\"Hormuz vessels\\\"}}\""
+    ],
+    predicate_keys: ["bbox", "from", "to", "observed_from", "observed_to", "ids", "entity_ids", "event_ids", "asset_ids", "source_id", "source_ids", "subtype", "subtype_in", "entity_kind", "entity_kind_in", "event_kind", "event_kind_in", "asset_kind", "asset_kind_in"],
+    recovery: "If materialization rejects a predicate key, remove unsupported keys or use a semantic query result to build explicit ids."
+  },
+  map: {
+    usage: "worldview-cli.sh map <backend-backed-map-command> [flags]",
+    examples: [
+      "worldview-cli.sh map replay.seek --at <iso>",
+      "worldview-cli.sh map map.set_layers --json \"{...}\"",
+      "worldview-cli.sh map selection.apply --layer vessel --selection <selection_id> --mode only"
+    ],
+    notes: [
+      "Use ACTIONS_JSON for browser presentation actions such as map.fly_to, object.open, track.animate and replay.play_window.",
+      "Use map-command/worldview-cli map for backend-backed view-state mutations and diagnostics."
+    ]
+  },
+  source: {
+    usage: "worldview-cli.sh source <source-fetch-operation> [flags]",
+    examples: [
+      "worldview-cli.sh source capabilities",
+      "worldview-cli.sh source gpsjam-history --date <YYYY-MM-DD>",
+      "worldview-cli.sh source copernicus-sentinel-imagery --bbox <west,south,east,north> --from <iso> --to <iso> --limit 1"
+    ],
+    notes: ["Alias for source-fetch.sh. Call capabilities before source capability claims."]
   }
 };
 const doc = docs[topic] || docs.root;
@@ -459,6 +526,16 @@ console.log(JSON.stringify({ status: "ok", data: { topic, ...doc }, meta: { comm
 
 if [[ -z "$cmd" ]]; then
   emit_help root
+  exit 0
+fi
+
+if has_help_arg "$@"; then
+  help_sub="${1:-}"
+  if [[ -n "$help_sub" && "$help_sub" != "help" && "$help_sub" != "--help" && "$help_sub" != "-h" ]]; then
+    emit_help "$cmd.$help_sub"
+  else
+    emit_help "$cmd"
+  fi
   exit 0
 fi
 
