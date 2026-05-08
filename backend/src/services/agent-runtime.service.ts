@@ -130,7 +130,7 @@ const DEFAULT_CLAUDE_DISALLOWED_TOOLS = [
 const EMPTY_MCP_CONFIG = '{"mcpServers":{}}';
 const DEFAULT_CODEX_SANDBOX = 'read-only';
 function isCodexProviderEnabled(): boolean {
-    return process.env.AGENT_ENABLE_CODEX_PROVIDER === 'true';
+    return process.env.AGENT_ENABLE_CODEX_PROVIDER !== 'false';
 }
 
 function commandExists(command: string, cwd?: string): boolean {
@@ -905,6 +905,8 @@ export class AgentRuntimeService {
                         'resume',
                         '--json',
                         '--ignore-user-config',
+                        '--ignore-rules',
+                        '--skip-git-repo-check',
                         session.provider_session_id,
                         prompt,
                     ],
@@ -921,6 +923,8 @@ export class AgentRuntimeService {
                     'exec',
                     '--json',
                     '--ignore-user-config',
+                    '--ignore-rules',
+                    '--skip-git-repo-check',
                     prompt,
                 ],
                 cwd,
@@ -1093,7 +1097,9 @@ export class AgentRuntimeService {
         fs.mkdirSync(runtimeHome, { recursive: true });
         env.HOME = runtimeHome;
         if (session.provider === 'codex_cli') {
-            const codexHome = process.env.AGENT_CODEX_HOME || path.join(isolatedHome, 'codex');
+            const codexHome = process.env.AGENT_CODEX_HOME
+                || process.env.CODEX_HOME
+                || path.join(process.env.HOME || os.homedir(), '.codex');
             fs.mkdirSync(codexHome, { recursive: true });
             env.CODEX_HOME = codexHome;
         }
