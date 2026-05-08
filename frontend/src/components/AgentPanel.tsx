@@ -395,7 +395,7 @@ function findCompleteGenericJsonActionBlock(content: string): {
     incomplete: boolean;
 } | null {
     const pattern = /(^|\n)(```json[ \t]*\n?)([\s\S]*?)(\s*```)/ig;
-    for (const match of content.matchAll(pattern)) {
+    for (const match of Array.from(content.matchAll(pattern))) {
         if (match.index == null) continue;
         const leading = match[1] || '';
         const prefix = match[2] || '';
@@ -3670,6 +3670,8 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                     const actions = actionsFromMessage(message);
                     const streamParts = displayPartsForMessage(message, runningRunId);
                     const streamGroups = groupStreamParts(streamParts);
+                    const shouldShowFinalContent = shouldRenderFinalContent(message, streamParts, runningRunId);
+                    const showFinalContentFirst = message.role === 'assistant' && shouldShowFinalContent && streamParts.some((part) => part.type !== 'text');
                     const presentationKey = activeSessionId ? `${activeSessionId}:${message.agent_message_id}` : '';
                     const presentationRunning = Boolean(presentationKey && runningPresentationKey === presentationKey);
                     return (
@@ -3686,6 +3688,9 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                             </div>
                             {streamParts.length > 0 ? (
                                 <div className="space-y-1.5">
+                                    {showFinalContentFirst && (
+                                        <MarkdownBlock text={message.content} onOpenSpyLinkClick={(href, label) => void openOpenSpyLink(href, label)} />
+                                    )}
                                     {streamGroups.map((group, idx) => (
                                         group.type === 'text' ? (
                                             <MarkdownBlock key={group.part.id} text={group.part.text || ''} onOpenSpyLinkClick={(href, label) => void openOpenSpyLink(href, label)} />
@@ -3693,13 +3698,13 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                                             <ToolGroup key={`tools-${idx}-${group.parts[0]?.id || idx}`} parts={group.parts} />
                                         )
                                     ))}
-                                    {shouldRenderFinalContent(message, streamParts, runningRunId) && (
+                                    {shouldShowFinalContent && !showFinalContentFirst && (
                                         <MarkdownBlock text={message.content} onOpenSpyLinkClick={(href, label) => void openOpenSpyLink(href, label)} />
                                     )}
                                 </div>
                             ) : (
                                 <div>
-                                    {shouldRenderFinalContent(message, streamParts, runningRunId) ? <MarkdownBlock text={message.content} onOpenSpyLinkClick={(href, label) => void openOpenSpyLink(href, label)} /> : (message.role === 'assistant' && runningRunId ? <Loader2 size={14} className="animate-spin text-cyan-300" /> : '')}
+                                    {shouldShowFinalContent ? <MarkdownBlock text={message.content} onOpenSpyLinkClick={(href, label) => void openOpenSpyLink(href, label)} /> : (message.role === 'assistant' && runningRunId ? <Loader2 size={14} className="animate-spin text-cyan-300" /> : '')}
                                 </div>
                             )}
                             <ImageryEvidenceRows
