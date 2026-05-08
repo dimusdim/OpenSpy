@@ -888,20 +888,23 @@ export class AgentRuntimeService {
         }
 
         if (session.provider === 'codex_cli') {
+            const codexGlobalArgs = [
+                '--ask-for-approval',
+                process.env.AGENT_CODEX_APPROVAL || 'never',
+                '--sandbox',
+                process.env.AGENT_CODEX_SANDBOX || DEFAULT_CODEX_SANDBOX,
+                '-C',
+                cwd,
+            ];
             if (session.provider_session_id) {
                 return {
                     command: commandForLaunch(process.env.AGENT_CODEX_COMMAND || 'codex', this.repoRoot),
                     args: [
+                        ...codexGlobalArgs,
                         'exec',
                         'resume',
                         '--json',
                         '--ignore-user-config',
-                        '--sandbox',
-                        process.env.AGENT_CODEX_SANDBOX || DEFAULT_CODEX_SANDBOX,
-                        '--ask-for-approval',
-                        process.env.AGENT_CODEX_APPROVAL || 'never',
-                        '-C',
-                        cwd,
                         session.provider_session_id,
                         prompt,
                     ],
@@ -914,15 +917,10 @@ export class AgentRuntimeService {
             return {
                 command: commandForLaunch(process.env.AGENT_CODEX_COMMAND || 'codex', this.repoRoot),
                 args: [
+                    ...codexGlobalArgs,
                     'exec',
                     '--json',
                     '--ignore-user-config',
-                    '-C',
-                    cwd,
-                    '--sandbox',
-                    process.env.AGENT_CODEX_SANDBOX || DEFAULT_CODEX_SANDBOX,
-                    '--ask-for-approval',
-                    process.env.AGENT_CODEX_APPROVAL || 'never',
                     prompt,
                 ],
                 cwd,
