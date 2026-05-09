@@ -424,11 +424,67 @@ const docs = {
   root: {
     usage: "worldview-cli.sh <command> ...",
     commands: ["catalog", "layers", "sources", "diagnostics", "coverage", "resolver", "geometry", "query", "geo", "selection", "legend", "view", "sql", "map", "replay", "source"],
+    purpose: "Agent-oriented OpenSpy data, source, map and replay wrapper. Prefer specific semantic subcommands before falling back to backend-api.sh or sql-readonly.sh.",
     examples: [
       "worldview-cli.sh source capabilities",
       "worldview-cli.sh query aggregate --kind entities --layer vessel --bbox <west,south,east,north> --from <iso> --to <iso> --group_by hour",
       "worldview-cli.sh geo corridor --kind entities --layer vessel --coordinates \"[[lng,lat],[lng,lat]]\" --radius_m 50000 --from <iso> --to <iso>",
       "worldview-cli.sh selection create --json \"{...}\""
+    ]
+  },
+  catalog: {
+    usage: "worldview-cli.sh catalog describe (--layer <layer_id> | --source <source_id>)",
+    purpose: "Describe one catalog layer or source before choosing query/source/replay operations.",
+    examples: [
+      "worldview-cli.sh catalog describe --layer vessel",
+      "worldview-cli.sh catalog describe --source copernicus"
+    ],
+    output_fields: ["layer/source metadata", "capabilities", "storage/replay/source context when available"]
+  },
+  layers: {
+    usage: "worldview-cli.sh layers <list|describe> [--layer <layer_id>]",
+    purpose: "Inspect OpenSpy logical layers and their user-facing capabilities.",
+    examples: [
+      "worldview-cli.sh layers list",
+      "worldview-cli.sh layers describe --layer vessel"
+    ]
+  },
+  sources: {
+    usage: "worldview-cli.sh sources <list|describe|status> [--source <source_id>]",
+    purpose: "Inspect catalog sources and current ingest/status diagnostics. Use source capabilities for provider-side operation status.",
+    examples: [
+      "worldview-cli.sh sources status",
+      "worldview-cli.sh sources describe --source firms"
+    ]
+  },
+  diagnostics: {
+    usage: "worldview-cli.sh diagnostics <list_layer_statuses|get_layer_status> [--layer <layer_id>] [--only-problematic true]",
+    purpose: "Summarize layer/source health and explain missing or degraded data before making completeness claims.",
+    examples: [
+      "worldview-cli.sh diagnostics list_layer_statuses --only-problematic true",
+      "worldview-cli.sh diagnostics get_layer_status --layer vessel"
+    ]
+  },
+  coverage: {
+    usage: "worldview-cli.sh coverage report",
+    purpose: "Report local data coverage windows and storage roles for choosing realistic replay/test windows.",
+    examples: [
+      "worldview-cli.sh coverage report"
+    ]
+  },
+  resolver: {
+    usage: "worldview-cli.sh resolver <region|entity> [flags]",
+    purpose: "Resolve user-facing place/entity names into structured AOI/entity context.",
+    examples: [
+      "worldview-cli.sh resolver region --name \"Strait of Hormuz\"",
+      "worldview-cli.sh resolver entity --query \"3c6589\""
+    ]
+  },
+  geometry: {
+    usage: "worldview-cli.sh geometry <create_aoi|aoi> [flags]",
+    purpose: "Create structured AOI geometry from names, bbox or coordinates for later queries and map actions.",
+    examples: [
+      "worldview-cli.sh geometry aoi --bbox 54,24,58.5,28.5"
     ]
   },
   query: {
@@ -487,6 +543,40 @@ const docs = {
       "canonical JSON fields are selectionId, layerId, selectionMode, predicate and metadata",
       "put bbox/from/to/ids/subtype/source_id inside predicate"
     ]
+  },
+  legend: {
+    usage: "worldview-cli.sh legend <tree|describe_node|set_node_state> [flags]",
+    purpose: "Inspect and mutate user-visible layer tree state through backend-backed view-state commands.",
+    examples: [
+      "worldview-cli.sh legend tree",
+      "worldview-cli.sh legend describe_node --node layer:vessel",
+      "worldview-cli.sh legend set_node_state --node layer:vessel --enabled true --target visibility"
+    ],
+    notes: [
+      "Use legend/view/map commands only for explicit map state changes.",
+      "Do not use legend state as evidence that data exists; use query/source diagnostics for that."
+    ]
+  },
+  view: {
+    usage: "worldview-cli.sh view <get|summary|request_context|patch> [flags]",
+    purpose: "Read current map/request context or patch backend-owned view state.",
+    examples: [
+      "worldview-cli.sh view summary",
+      "worldview-cli.sh view request_context",
+      "worldview-cli.sh view patch --json \"{\\\"tileMode\\\":\\\"modis\\\"}\""
+    ],
+    notes: [
+      "Use request_context at run start when current viewport matters.",
+      "Use ACTIONS_JSON for browser presentation actions; view.patch is for backend view-state only."
+    ]
+  },
+  sql: {
+    usage: "worldview-cli.sh sql query --reason <text> --sql <select>",
+    purpose: "Read-only SQL fallback when semantic commands cannot answer the question.",
+    examples: [
+      "worldview-cli.sh sql query --reason \"Need layer counts\" --sql \"select layer_id, count(*) from core.entities group by layer_id\""
+    ],
+    notes: ["Prefer semantic commands first.", "SQL is guarded by sql-readonly.sh."]
   },
   "selection.create": {
     usage: "worldview-cli.sh selection create --json \"<selection-json>\"",

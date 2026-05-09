@@ -41,7 +41,7 @@ function safeInit(): void {
     if (initialized || typeof window === 'undefined') return;
     initialized = true;
     if (!OTEL_ENABLED) {
-        console.log('[otel] disabled; set NEXT_PUBLIC_OTEL_ENABLED=1 to export browser telemetry');
+        console.debug('[otel] disabled; set NEXT_PUBLIC_OTEL_ENABLED=1 to export browser telemetry');
         return;
     }
     try {
