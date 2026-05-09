@@ -461,6 +461,8 @@ export default function EntityHUD({ avoidRightPx = 0 }: EntityHUDProps) {
                     speed: acMeta.speed,
                     heading: acMeta.heading,
                     extra: {
+                        count: acMeta.aggregated ? acMeta.count : undefined,
+                        aggregated: acMeta.aggregated || undefined,
                         squawk: details?.squawk ?? acMeta.squawk,
                         verticalRate: details?.verticalRate ?? acMeta.verticalRate,
                         onGround: details?.onGround ?? acMeta.onGround,
@@ -489,6 +491,8 @@ export default function EntityHUD({ avoidRightPx = 0 }: EntityHUDProps) {
                     speed: vesselMeta.speed,
                     heading: vesselMeta.heading,
                     extra: {
+                        count: vesselMeta.aggregated ? vesselMeta.count : undefined,
+                        aggregated: vesselMeta.aggregated || undefined,
                         vesselName: details?.name ?? vesselMeta.name,
                         callSign: details?.callSign ?? vesselMeta.callSign,
                         imo: details?.imo ?? vesselMeta.imo,
@@ -560,6 +564,8 @@ export default function EntityHUD({ avoidRightPx = 0 }: EntityHUDProps) {
                     source: conflictMeta.source,
                     description: details?.name || conflictMeta.eventType,
                     extra: {
+                        count: conflictMeta.aggregated ? conflictMeta.count : undefined,
+                        aggregated: conflictMeta.aggregated || undefined,
                         event_type: eventDetails.eventType ?? conflictMeta.eventType,
                         sub_event_type: eventDetails.subEventType ?? conflictMeta.subEventType,
                         fatalities: eventDetails.fatalities ?? conflictMeta.fatalities,

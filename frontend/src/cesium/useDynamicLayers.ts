@@ -5,7 +5,7 @@ import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
 import { perfLog } from '../lib/perf-log';
 import { getAviIcon, getShipIcon, DARK_VESSEL_ICON } from '../icons/map-icons';
-import { safeCartesianFromDegrees } from './position-utils';
+import { getViewerAltitudeMeters, safeCartesianFromDegrees } from './position-utils';
 import { TrailBatcher } from './TrailBatcher';
 
 declare global {
@@ -20,6 +20,10 @@ declare global {
             lastProcessStartedAt: string | null;
             lastProcessFinishedAt: string | null;
             lastProcessMs: number;
+            renderMode?: 'raw' | 'cluster';
+            gridDegrees?: number | null;
+            aircraftRenderedMarkers?: number;
+            vesselRenderedMarkers?: number;
         };
     }
 }
@@ -59,6 +63,8 @@ interface AircraftMeta {
     verticalRate?: number | null; // m/s
     onGround?: boolean;
     lastContact?: number | null;  // unix timestamp
+    aggregated?: boolean;
+    count?: number;
 }
 
 // Global registry so Globe.tsx picking can look up aircraft metadata by billboard.
@@ -83,9 +89,32 @@ interface VesselMeta {
     vesselLength?: number | null;
     beam?: number | null;
     cog?: number | null;
+    aggregated?: boolean;
+    count?: number;
 }
 
 export const vesselMetaMap = new Map<string, VesselMeta>();
+
+function getLiveClusterGridDegrees(altitudeMeters: number | null): number | null {
+    if (altitudeMeters == null) return 5.0;
+    if (altitudeMeters >= 12_000_000) return 10.0;
+    if (altitudeMeters >= 6_000_000) return 5.0;
+    if (altitudeMeters >= 2_500_000) return 2.5;
+    return null;
+}
+
+function liveClusterCoordinate(value: number, min: number, max: number, gridDegrees: number): number {
+    const cell = Math.floor((value - min) / gridDegrees);
+    return Math.max(min, Math.min(max, min + cell * gridDegrees + gridDegrees / 2));
+}
+
+function liveClusterPixelSize(count: number): number {
+    return Math.max(7, Math.min(24, 6 + Math.log2(Math.max(1, count)) * 2.4));
+}
+
+function isFiniteLatLng(lat: unknown, lng: unknown): boolean {
+    return Number.isFinite(Number(lat)) && Number.isFinite(Number(lng));
+}
 
 export function useDynamicLayers(viewer: Cesium.Viewer | null) {
     // Visibility + subtype filters are reactive because they only touch
@@ -105,11 +134,18 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
     // Aviation: BillboardCollection (GPU-batched, 1 draw call for 11K billboards)
     const aviBillboardsRef = useRef<Cesium.BillboardCollection | null>(null);
     const aviBillboardMap = useRef<Map<string, Cesium.Billboard>>(new Map());
+    const aviClusterPointsRef = useRef<Cesium.PointPrimitiveCollection | null>(null);
 
     // Maritime: BillboardCollection. The old Entity+SampledPositionProperty path
     // did not scale well and was the weakest live renderer left in the scene.
     const maritimeBillboardsRef = useRef<Cesium.BillboardCollection | null>(null);
     const maritimeBillboardMap = useRef<Map<string, Cesium.Billboard>>(new Map());
+    const maritimeClusterPointsRef = useRef<Cesium.PointPrimitiveCollection | null>(null);
+    const aviClusterIdsRef = useRef<Set<string>>(new Set());
+    const maritimeClusterIdsRef = useRef<Set<string>>(new Set());
+    const liveRenderModeRef = useRef<'raw' | 'cluster'>('raw');
+    const liveClusterGridDegreesRef = useRef<number | null>(null);
+    const refreshLivePresentationRef = useRef<(() => void) | null>(null);
     // Dark vessels: separate datasource for AIS-dark flagged vessels
     const darkVesselDsRef = useRef<Cesium.CustomDataSource | null>(null);
     const socketRef = useRef<Socket | null>(null);
@@ -188,6 +224,11 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
         aviBillboardsRef.current = aviBillboards;
         const billboardMap = new Map<string, Cesium.Billboard>();
         aviBillboardMap.current = billboardMap;
+        const aviClusterPoints = new Cesium.PointPrimitiveCollection({
+            blendOption: Cesium.BlendOption.TRANSLUCENT,
+        });
+        viewer.scene.primitives.add(aviClusterPoints);
+        aviClusterPointsRef.current = aviClusterPoints;
 
         // --- Maritime: BillboardCollection ---
         const maritimeBillboards = new Cesium.BillboardCollection({
@@ -198,6 +239,11 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
         maritimeBillboardsRef.current = maritimeBillboards;
         const vesselBillboardMap = new Map<string, Cesium.Billboard>();
         maritimeBillboardMap.current = vesselBillboardMap;
+        const maritimeClusterPoints = new Cesium.PointPrimitiveCollection({
+            blendOption: Cesium.BlendOption.TRANSLUCENT,
+        });
+        viewer.scene.primitives.add(maritimeClusterPoints);
+        maritimeClusterPointsRef.current = maritimeClusterPoints;
 
         // --- Dark vessels: AIS-silent vessels flagged by backend ---
         const darkVesselDs = new Cesium.CustomDataSource('dark-vessels');
@@ -352,8 +398,195 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                 lastProcessStartedAt,
                 lastProcessFinishedAt,
                 lastProcessMs,
+                renderMode: liveRenderModeRef.current,
+                gridDegrees: liveClusterGridDegreesRef.current,
+                aircraftRenderedMarkers: liveRenderModeRef.current === 'cluster' ? aviClusterPoints.length : billboardMap.size,
+                vesselRenderedMarkers: liveRenderModeRef.current === 'cluster' ? maritimeClusterPoints.length : vesselBillboardMap.size,
             };
         };
+
+        const clearLiveClusterMeta = () => {
+            aviClusterIdsRef.current.forEach((id) => aircraftMetaMap.delete(id));
+            maritimeClusterIdsRef.current.forEach((id) => vesselMetaMap.delete(id));
+            aviClusterIdsRef.current.clear();
+            maritimeClusterIdsRef.current.clear();
+        };
+
+        const recordMatches = (layer: 'aviation' | 'maritime', id: string, subtype: string): boolean => {
+            const state = useTimelineStore.getState();
+            const subtypeOk = state.subtypeVisibility[`${layer}:${subtype}`] !== false;
+            const soloOk = !state.isolatedEntityId || state.isolatedEntityId === id;
+            return subtypeOk && soloOk;
+        };
+
+        const rebuildAircraftClusters = (gridDegrees: number) => {
+            aviClusterIdsRef.current.forEach((id) => aircraftMetaMap.delete(id));
+            aviClusterIdsRef.current.clear();
+            aviClusterPoints.removeAll();
+            const clusters = new Map<string, {
+                latSum: number;
+                lngSum: number;
+                altSum: number;
+                speedSum: number;
+                count: number;
+                type: string;
+            }>();
+            aircraftMetaMap.forEach((meta, id) => {
+                if (meta.aggregated || !isFiniteLatLng(meta.lat, meta.lng)) return;
+                if (!recordMatches('aviation', id, meta.type)) return;
+                const latCell = liveClusterCoordinate(meta.lat, -90, 90, gridDegrees);
+                const lngCell = liveClusterCoordinate(meta.lng, -180, 180, gridDegrees);
+                const key = `${lngCell.toFixed(3)}:${latCell.toFixed(3)}`;
+                const existing = clusters.get(key);
+                if (existing) {
+                    existing.latSum += meta.lat;
+                    existing.lngSum += meta.lng;
+                    existing.altSum += Number(meta.alt) || 0;
+                    existing.speedSum += Number(meta.speed) || 0;
+                    existing.count += 1;
+                    return;
+                }
+                clusters.set(key, {
+                    latSum: meta.lat,
+                    lngSum: meta.lng,
+                    altSum: Number(meta.alt) || 0,
+                    speedSum: Number(meta.speed) || 0,
+                    count: 1,
+                    type: meta.type,
+                });
+            });
+            clusters.forEach((cluster, key) => {
+                const id = `aircraft-cluster-${key.replace(/[^a-z0-9:-]/gi, '_')}`;
+                const lat = cluster.latSum / cluster.count;
+                const lng = cluster.lngSum / cluster.count;
+                const position = safeCartesianFromDegrees(lng, lat, 0);
+                if (!position) return;
+                aviClusterPoints.add({
+                    id,
+                    position,
+                    color: Cesium.Color.CYAN.withAlpha(0.88),
+                    outlineColor: Cesium.Color.BLACK.withAlpha(0.45),
+                    outlineWidth: 1,
+                    pixelSize: liveClusterPixelSize(cluster.count),
+                });
+                aircraftMetaMap.set(id, {
+                    id,
+                    icao24: '',
+                    type: cluster.count > 1 ? 'cluster' : cluster.type,
+                    speed: cluster.speedSum / cluster.count,
+                    heading: 0,
+                    lat,
+                    lng,
+                    alt: cluster.altSum / cluster.count,
+                    aggregated: true,
+                    count: cluster.count,
+                });
+                aviClusterIdsRef.current.add(id);
+            });
+        };
+
+        const rebuildVesselClusters = (gridDegrees: number) => {
+            maritimeClusterIdsRef.current.forEach((id) => vesselMetaMap.delete(id));
+            maritimeClusterIdsRef.current.clear();
+            maritimeClusterPoints.removeAll();
+            const clusters = new Map<string, {
+                latSum: number;
+                lngSum: number;
+                speedSum: number;
+                count: number;
+                type: string;
+            }>();
+            vesselMetaMap.forEach((meta, id) => {
+                if (meta.aggregated || !isFiniteLatLng(meta.lat, meta.lng)) return;
+                if (!recordMatches('maritime', id, meta.type)) return;
+                const latCell = liveClusterCoordinate(meta.lat, -90, 90, gridDegrees);
+                const lngCell = liveClusterCoordinate(meta.lng, -180, 180, gridDegrees);
+                const key = `${lngCell.toFixed(3)}:${latCell.toFixed(3)}`;
+                const existing = clusters.get(key);
+                if (existing) {
+                    existing.latSum += meta.lat;
+                    existing.lngSum += meta.lng;
+                    existing.speedSum += Number(meta.speed) || 0;
+                    existing.count += 1;
+                    return;
+                }
+                clusters.set(key, {
+                    latSum: meta.lat,
+                    lngSum: meta.lng,
+                    speedSum: Number(meta.speed) || 0,
+                    count: 1,
+                    type: meta.type,
+                });
+            });
+            clusters.forEach((cluster, key) => {
+                const id = `vessel-cluster-${key.replace(/[^a-z0-9:-]/gi, '_')}`;
+                const lat = cluster.latSum / cluster.count;
+                const lng = cluster.lngSum / cluster.count;
+                const position = safeCartesianFromDegrees(lng, lat, 0);
+                if (!position) return;
+                maritimeClusterPoints.add({
+                    id,
+                    position,
+                    color: Cesium.Color.fromCssColorString('#38bdf8').withAlpha(0.88),
+                    outlineColor: Cesium.Color.BLACK.withAlpha(0.45),
+                    outlineWidth: 1,
+                    pixelSize: liveClusterPixelSize(cluster.count),
+                });
+                vesselMetaMap.set(id, {
+                    id,
+                    name: `Vessel cluster (${cluster.count})`,
+                    type: cluster.count > 1 ? 'cluster' : cluster.type,
+                    lat,
+                    lng,
+                    speed: cluster.speedSum / cluster.count,
+                    heading: 0,
+                    aggregated: true,
+                    count: cluster.count,
+                });
+                maritimeClusterIdsRef.current.add(id);
+            });
+        };
+
+        const refreshLivePresentation = () => {
+            if (!viewer || viewer.isDestroyed()) return;
+            const state = useTimelineStore.getState();
+            const liveVisible = state.mode !== 'playback';
+            const gridDegrees = state.clusteringEnabled && !state.isolatedEntityId
+                ? getLiveClusterGridDegrees(getViewerAltitudeMeters(viewer))
+                : null;
+            liveRenderModeRef.current = gridDegrees == null ? 'raw' : 'cluster';
+            liveClusterGridDegreesRef.current = gridDegrees;
+            if (gridDegrees == null) {
+                clearLiveClusterMeta();
+                aviClusterPoints.removeAll();
+                maritimeClusterPoints.removeAll();
+                aviBillboards.show = state.sources.aviation && state.visibility.aviation && liveVisible;
+                maritimeBillboards.show = state.sources.maritime && state.visibility.maritime && liveVisible;
+                aviClusterPoints.show = false;
+                maritimeClusterPoints.show = false;
+            } else {
+                rebuildAircraftClusters(gridDegrees);
+                rebuildVesselClusters(gridDegrees);
+                aviBillboards.show = false;
+                maritimeBillboards.show = false;
+                aviClusterPoints.show = state.sources.aviation && state.visibility.aviation && liveVisible;
+                maritimeClusterPoints.show = state.sources.maritime && state.visibility.maritime && liveVisible;
+            }
+            darkVesselDs.show = state.sources.maritime && state.visibility.maritime && liveVisible;
+            publishLiveStats();
+            viewer.scene.requestRender();
+        };
+        refreshLivePresentationRef.current = refreshLivePresentation;
+
+        let clusterRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+        const onCameraMoveEnd = () => {
+            if (clusterRefreshTimer) clearTimeout(clusterRefreshTimer);
+            clusterRefreshTimer = setTimeout(() => {
+                clusterRefreshTimer = null;
+                refreshLivePresentationRef.current?.();
+            }, 120);
+        };
+        const removeMoveEnd = viewer.camera.moveEnd.addEventListener(onCameraMoveEnd);
 
         const processLiveUpdate = async (data: any) => {
             if (!active) return;
@@ -615,9 +848,9 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                 for (const id of toRemove) darkVesselDs.entities.removeById(id);
             }
 
-            requestSceneRender();
             lastProcessMs = performance.now() - processStartedAt;
             lastProcessFinishedAt = new Date().toISOString();
+            refreshLivePresentationRef.current?.();
             publishLiveStats();
         };
 
@@ -717,22 +950,30 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
             active = false;
             snapshotAbort.abort();
             unsubscribeModeAbort();
+            if (clusterRefreshTimer) clearTimeout(clusterRefreshTimer);
+            removeMoveEnd();
             clearInterval(speedInterval);
             clearInterval(staleCleanup);
             socket.disconnect();
             socketRef.current = null;
+            clearLiveClusterMeta();
             aircraftMetaMap.clear();
             if (viewer && !viewer.isDestroyed()) {
                 viewer.scene.primitives.remove(aviBillboards);
+                viewer.scene.primitives.remove(aviClusterPoints);
                 viewer.scene.primitives.remove(maritimeBillboards);
+                viewer.scene.primitives.remove(maritimeClusterPoints);
                 viewer.dataSources.remove(darkVesselDs);
             }
             liveBatcher.dispose();
             aviBillboardsRef.current = null;
+            aviClusterPointsRef.current = null;
             maritimeBillboardsRef.current = null;
+            maritimeClusterPointsRef.current = null;
             maritimeBillboardMap.current.clear();
             vesselMetaMap.clear();
             darkVesselDsRef.current = null;
+            refreshLivePresentationRef.current = null;
             delete window.__openspyLiveStats;
         };
     }, [viewer]);
@@ -743,13 +984,10 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
     // on top of each other.
     const aviSourceOnSel = useTimelineStore(s => s.sources.aviation);
     const marSourceOnSel = useTimelineStore(s => s.sources.maritime);
+    const clusteringEnabled = useTimelineStore(s => s.clusteringEnabled);
     useEffect(() => {
-        const liveVisible = mode !== 'playback';
-        if (aviBillboardsRef.current) aviBillboardsRef.current.show = aviSourceOnSel && isAviationVisible && liveVisible;
-        if (maritimeBillboardsRef.current) maritimeBillboardsRef.current.show = marSourceOnSel && isMaritimeVisible && liveVisible;
-        if (darkVesselDsRef.current) darkVesselDsRef.current.show = marSourceOnSel && isMaritimeVisible && liveVisible;
-        requestSceneRender();
-    }, [aviSourceOnSel, marSourceOnSel, isAviationVisible, isMaritimeVisible, mode]);
+        refreshLivePresentationRef.current?.();
+    }, [aviSourceOnSel, marSourceOnSel, isAviationVisible, isMaritimeVisible, mode, clusteringEnabled]);
 
     // ---- Effect 0a: source-off scene clear ----
     // When the user turns aviation / maritime OFF, drop the existing
@@ -761,7 +999,10 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
         if (!aviSourceOnSel) {
             const bbs = aviBillboardsRef.current;
             if (bbs) bbs.removeAll();
+            if (aviClusterPointsRef.current) aviClusterPointsRef.current.removeAll();
             aviBillboardMap.current.clear();
+            aviClusterIdsRef.current.forEach((id) => aircraftMetaMap.delete(id));
+            aviClusterIdsRef.current.clear();
             aviLastSeenRef.current.clear();
             aircraftMetaMap.clear();
             useTimelineStore.getState().setSubtypeCounts('aviation', {});
@@ -778,8 +1019,11 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
             const dvs = darkVesselDsRef.current;
             const bbs = maritimeBillboardsRef.current;
             if (bbs) bbs.removeAll();
+            if (maritimeClusterPointsRef.current) maritimeClusterPointsRef.current.removeAll();
             if (dvs) dvs.entities.removeAll();
             maritimeBillboardMap.current.clear();
+            maritimeClusterIdsRef.current.forEach((id) => vesselMetaMap.delete(id));
+            maritimeClusterIdsRef.current.clear();
             vesselMetaMap.clear();
             marLastSeenRef.current.clear();
             useTimelineStore.getState().setSubtypeCounts('maritime', {});
@@ -830,6 +1074,6 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                 e.show = soloOk;
             });
         }
-        requestSceneRender();
+        refreshLivePresentationRef.current?.();
     }, [subtypeVisibility, isolatedEntityId]);
 }

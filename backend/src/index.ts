@@ -79,7 +79,7 @@ const corsOptions: cors.CorsOptions = {
         callback(new Error(`CORS: origin ${origin} not allowed`));
     },
     credentials: true,
-    methods: ['GET', 'POST', 'DELETE'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
 };
 
 const SENSITIVE_QUERY_KEYS = new Set([

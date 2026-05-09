@@ -63,9 +63,13 @@ export default function Globe() {
             )
         });
 
-        // Keep Cesium labels readable on Retina/HiDPI screens without letting a
-        // 2x display turn the whole globe into a 4x pixel workload.
-        v.resolutionScale = Math.min(window.devicePixelRatio || 1, 1.5);
+        // Render the globe at CSS-pixel resolution even on Retina displays.
+        // `devicePixelRatio=2` would otherwise make a 1440x900 viewport render
+        // as 2880x1800; the previous extra scale pushed that to 4320x2700.
+        // Presentation readability belongs in UI annotations/cards, not in a
+        // larger Cesium render target for every frame.
+        const devicePixelRatio = window.devicePixelRatio || 1;
+        v.resolutionScale = devicePixelRatio > 0 ? 1 / devicePixelRatio : 1;
 
         // Rate-limit clock-driven renders to ~1 Hz.
         //
@@ -388,13 +392,16 @@ export default function Globe() {
                 const acMeta = aircraftMetaMap.get(pickedObject.id);
                 if (acMeta) {
                     // Show callsign in header, fall back to icao24 if empty
-                    const displayName = acMeta.callsign && acMeta.callsign !== acMeta.icao24
+                    const displayName = acMeta.aggregated
+                        ? `Aircraft cluster (${acMeta.count || 0})`
+                        : acMeta.callsign && acMeta.callsign !== acMeta.icao24
                         ? `Flight ${acMeta.callsign}`
                         : `Aircraft ${acMeta.icao24.toUpperCase()}`;
                     useTimelineStore.getState().setSelectedEntityId(pickedObject.id, {
                         name: displayName,
                         id: pickedObject.id,
                         type: 'Aircraft',
+                        skipLiveDetails: acMeta.aggregated === true,
                     });
                     return;
                 }
@@ -403,9 +410,10 @@ export default function Globe() {
                 const vesselMeta = vesselMetaMap.get(pickedObject.id);
                 if (vesselMeta) {
                     useTimelineStore.getState().setSelectedEntityId(pickedObject.id, {
-                        name: vesselMeta.name || `Vessel ${pickedObject.id}`,
+                        name: vesselMeta.aggregated ? `Vessel cluster (${vesselMeta.count || 0})` : vesselMeta.name || `Vessel ${pickedObject.id}`,
                         id: pickedObject.id,
                         type: 'Vessel',
+                        skipLiveDetails: vesselMeta.aggregated === true,
                     });
                     return;
                 }
@@ -431,6 +439,7 @@ export default function Globe() {
                         name: conflictMeta.eventType || 'Conflict event',
                         id: pickedObject.id,
                         type: 'Conflict',
+                        skipLiveDetails: conflictMeta.aggregated === true,
                     });
                     return;
                 }

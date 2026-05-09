@@ -97,7 +97,7 @@ type ParsedActionContract = {
 const SESSION_PICKER_DISPLAY_LIMIT = 80;
 const AGENT_LABEL_FONT = '16px sans-serif';
 const AGENT_LABEL_OFFSET_Y = -34;
-const AGENT_GEOMETRY_HEIGHT_M = 2500;
+const AGENT_GEOMETRY_HEIGHT_M = 0;
 const AGENT_LINE_HEIGHT_M = 1800;
 const AGENT_LABEL_STAGGER_OFFSETS = [
     [0, -44],
@@ -1643,6 +1643,31 @@ function shouldClampOverlayToGround(payload: Record<string, any>): boolean {
     return explicitBoolean(payload.clampToGround ?? payload.clamp_to_ground) === true;
 }
 
+function shouldShowGeometryLabel(payload: Record<string, any>): boolean {
+    return explicitBoolean(payload.show_label ?? payload.showLabel ?? payload.label_visible ?? payload.labelVisible) === true;
+}
+
+function polygonGraphics(
+    coords: Array<[number, number]>,
+    fill: Cesium.Color,
+    outline: Cesium.Color,
+    height: number,
+): Cesium.PolygonGraphics.ConstructorOptions {
+    const graphics: Cesium.PolygonGraphics.ConstructorOptions = {
+        hierarchy: Cesium.Cartesian3.fromDegreesArray(coords.flat()),
+        material: fill,
+        outline: true,
+        outlineColor: outline,
+        perPositionHeight: false,
+    };
+    if (height > 0) {
+        graphics.height = height;
+    } else {
+        (graphics as any).heightReference = Cesium.HeightReference.CLAMP_TO_GROUND;
+    }
+    return graphics;
+}
+
 function normalizeOpenSpyBbox(values: number[]): [number, number, number, number] | null {
     if (!Array.isArray(values) || values.length < 4) return null;
     let [west, south, east, north] = values.slice(0, 4).map(Number);
@@ -1987,20 +2012,13 @@ function drawGeometryOverlay(
         rings.forEach((coords, index) => {
             viewer.entities.add({
                 id: rings.length > 1 ? `${id}:${index}` : id,
-                polygon: {
-                    hierarchy: Cesium.Cartesian3.fromDegreesArray(coords.flat()),
-                    material: fill,
-                    outline: true,
-                    outlineColor: outline,
-                    height,
-                    perPositionHeight: false,
-                },
+                polygon: polygonGraphics(coords, fill, outline, height),
             });
         });
         const center = east < west
             ? { lng: ((west + ((east + 360 - west) / 2) + 540) % 360) - 180, lat: (south + north) / 2 }
             : centerOfCoordinates(rings[0]);
-        if (center && (payload.label || payload.text || label)) {
+        if (center && shouldShowGeometryLabel(payload) && (payload.label || payload.text || label)) {
             drawPointOrLabel(viewer, { ...payload, ...center, pixelSize: 6 }, label, color);
         }
         return;
@@ -2025,10 +2043,10 @@ function drawGeometryOverlay(
                 material: fill,
                 outline: true,
                 outlineColor: outline,
-                height,
+                ...(height > 0 ? { height } : { heightReference: Cesium.HeightReference.CLAMP_TO_GROUND }),
             },
         });
-        if (payload.label || payload.text || label) drawPointOrLabel(viewer, { ...payload, lat, lng, pixelSize: 6 }, label, color);
+        if (shouldShowGeometryLabel(payload) && (payload.label || payload.text || label)) drawPointOrLabel(viewer, { ...payload, lat, lng, pixelSize: 6 }, label, color);
         return;
     }
 
@@ -2054,7 +2072,7 @@ function drawGeometryOverlay(
             },
         });
         const lineCenter = centerOfCoordinates(lineCoordinates);
-        if (lineCenter && (payload.label || payload.text || label)) {
+        if (lineCenter && shouldShowGeometryLabel(payload) && (payload.label || payload.text || label)) {
             drawPointOrLabel(viewer, { ...payload, ...lineCenter, pixelSize: 6 }, label, color);
         }
         return;
@@ -2066,17 +2084,10 @@ function drawGeometryOverlay(
     if (polygonCoordinates.length >= 3) {
         viewer.entities.add({
             id,
-            polygon: {
-                hierarchy: Cesium.Cartesian3.fromDegreesArray(polygonCoordinates.flat()),
-                material: fill,
-                outline: true,
-                outlineColor: outline,
-                height,
-                perPositionHeight: false,
-            },
+            polygon: polygonGraphics(polygonCoordinates, fill, outline, height),
         });
         const polygonCenter = centerOfCoordinates(polygonCoordinates);
-        if (polygonCenter && (payload.label || payload.text || label)) {
+        if (polygonCenter && shouldShowGeometryLabel(payload) && (payload.label || payload.text || label)) {
             drawPointOrLabel(viewer, { ...payload, ...polygonCenter, pixelSize: 6 }, label, color);
         }
         return;
@@ -2480,9 +2491,19 @@ function compactPresentationText(value: any, maxLength = 180): string {
     return `${text.slice(0, Math.max(0, maxLength - 1)).trim()}...`;
 }
 
+function humanizePresentationTitle(action: AgentAction, value: any): string {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    if (!text) return formatActionType(action.type);
+    if (/^aoi[\s_-]*(b-?box|bbox|bounds?)$/i.test(text)) return 'Area of interest';
+    if (/^(bbox|bounds?)$/i.test(text)) return 'Area of interest';
+    if (/^map[\s._-]*add[\s._-]*aoi$/i.test(text)) return 'Area of interest';
+    return text;
+}
+
 function presentationStepTitle(action: AgentAction, index: number, total: number): string {
     const payload = normalizedActionPayload(action);
-    const title = payload.title || payload.heading || action.label || payload.label || formatActionType(action.type);
+    const rawTitle = payload.title || payload.heading || action.label || payload.label || formatActionType(action.type);
+    const title = humanizePresentationTitle(action, rawTitle);
     return `${index + 1}/${Math.max(total, 1)} ${compactPresentationText(title, 72)}`;
 }
 
@@ -2542,32 +2563,7 @@ function clearPresentationStepCallout(): void {
     replayMetaMap.delete(id);
 }
 
-function showPresentationStepCallout(action: AgentAction, index: number, total: number): void {
-    const viewer = getViewer();
-    if (!viewer) return;
-    const point = presentationStepPoint(action);
-    if (!point) {
-        clearPresentationStepCallout();
-        return;
-    }
-    const title = presentationStepTitle(action, index, total).replace(/^\d+\/\d+\s+/, '');
-    drawPointOrLabel(
-        viewer,
-        {
-            id: `${AGENT_ENTITY_PREFIX}presentation-current-callout`,
-            lat: point.lat,
-            lng: point.lng,
-            label: compactPresentationText(title, 82),
-            pixelSize: 14,
-            color: 'blue',
-        },
-        compactPresentationText(title, 82),
-        Cesium.Color.CYAN,
-    );
-    viewer.scene.requestRender();
-}
-
-function PresentationGuideOverlay({
+function PresentationGuideCard({
     guide,
     onStep,
     onClose,
@@ -2594,11 +2590,7 @@ function PresentationGuideOverlay({
     return (
         <div
             data-agent-presentation-guide="true"
-            style={{
-                left: 'clamp(160px, calc((100vw - min(456px, calc(100vw - 24px))) / 2), 50vw)',
-                width: 'min(560px, max(280px, calc(100vw - min(456px, calc(100vw - 24px)) - 48px)))',
-            }}
-            className="fixed bottom-6 z-50 -translate-x-1/2 rounded border border-cyan-900/80 bg-black/88 px-3 py-2 text-zinc-100 shadow-2xl backdrop-blur-xl"
+            className="mt-2 rounded border border-cyan-900/80 bg-cyan-950/15 px-3 py-2 text-zinc-100"
         >
             <div className="flex items-start gap-2">
                 <MapPin size={14} className="mt-0.5 shrink-0 text-cyan-300" />
@@ -3635,7 +3627,6 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         setPresentationGuide(nextGuide);
         const action = nextGuide.actions[boundedIndex];
         if (action) {
-            showPresentationStepCallout(action, boundedIndex, nextGuide.actions.length);
             publishPresentationState({
                 key: nextGuide.key,
                 sessionId: nextGuide.sessionId,
@@ -3790,14 +3781,6 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
 
     return (
         <>
-        <PresentationGuideOverlay
-            guide={presentationGuide}
-            onStep={(index) => void applyPresentationGuideStep(index)}
-            onClose={() => {
-                clearPresentationStepCallout();
-                setPresentationGuide(null);
-            }}
-        />
         <div
             data-agent-panel="true"
             className="absolute top-4 right-4 bottom-4 z-40 w-[min(456px,calc(100vw-24px))] rounded-lg border border-zinc-800 bg-black/85 backdrop-blur-xl shadow-2xl flex flex-col overflow-hidden"
@@ -3987,6 +3970,16 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                                         {presentationRunning ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
                                         Replay presentation
                                     </button>
+                                    {presentationGuide?.key === presentationKey && (
+                                        <PresentationGuideCard
+                                            guide={presentationGuide}
+                                            onStep={(index) => void applyPresentationGuideStep(index)}
+                                            onClose={() => {
+                                                clearPresentationStepCallout();
+                                                setPresentationGuide(null);
+                                            }}
+                                        />
+                                    )}
                                     <details className="mt-2 rounded border border-zinc-800 bg-zinc-950/60 px-2 py-1 text-[10px] font-mono text-zinc-500">
                                         <summary className="cursor-pointer select-none text-zinc-400">
                                             Presentation steps ({actions.length})
@@ -4034,6 +4027,16 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                                     {runningPresentationKey === `${activeSessionId}:latest-actions` ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
                                     Replay presentation
                                 </button>
+                            )}
+                            {activeSessionId && presentationGuide?.key === `${activeSessionId}:latest-actions` && (
+                                <PresentationGuideCard
+                                    guide={presentationGuide}
+                                    onStep={(index) => void applyPresentationGuideStep(index)}
+                                    onClose={() => {
+                                        clearPresentationStepCallout();
+                                        setPresentationGuide(null);
+                                    }}
+                                />
                             )}
                             <details className="rounded border border-zinc-800 bg-zinc-950/60 px-2 py-1 text-[10px] font-mono text-zinc-500">
                                 <summary className="cursor-pointer select-none text-zinc-400">

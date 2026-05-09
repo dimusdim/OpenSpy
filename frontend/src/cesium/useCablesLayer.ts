@@ -7,10 +7,13 @@ import { API_URL } from '../lib/config';
 // Submarine internet cables from TeleGeography. GeoJSON LineString /
 // MultiLineString features running along the ocean floor.
 //
-// Rendered via GroundPolylinePrimitive — a GPU-batched primitive that draws
-// thousands of ground-clamped lines in a single draw call. Previously we
+// Rendered via a batched Polyline Primitive. Previously we
 // used the Entity API with `polyline.clampToGround: true`, which forces
 // per-frame ground clamping for every entity and kills interactive perf.
+// We also avoid GroundPolylinePrimitive here: submarine cables are oceanic
+// map overlays, and globe-scale ground clamping is substantially more
+// expensive than geodesic polyline geometry while not adding useful visual
+// precision for this layer.
 //
 // Lifecycle split (HIGH 1 fix):
 //   Effect 1 [viewer]             — owns the primitive's scene lifetime.
@@ -65,7 +68,7 @@ export function useCablesLayer(viewer: Cesium.Viewer | null) {
     const isVisible = useTimelineStore(s => s.visibility.cables);
     const mode = useTimelineStore(s => s.mode);
     const isolatedEntityId = useTimelineStore(s => s.isolatedEntityId);
-    const primitiveRef = useRef<Cesium.GroundPolylinePrimitive | null>(null);
+    const primitiveRef = useRef<Cesium.Primitive | null>(null);
     // True once the one-shot TeleGeography fetch has finished and the
     // primitive is in the scene. Reset to false on source-off so
     // re-enabling the source fetches and rebuilds from scratch.
@@ -92,7 +95,7 @@ export function useCablesLayer(viewer: Cesium.Viewer | null) {
             cableMetaMap.clear();
             cableInstanceToLogical.clear();
             if (!viewer.isDestroyed() && primitiveRef.current) {
-                viewer.scene.groundPrimitives.remove(primitiveRef.current);
+                viewer.scene.primitives.remove(primitiveRef.current);
             }
             primitiveRef.current = null;
             loadedRef.current = false;
@@ -153,7 +156,7 @@ export function useCablesLayer(viewer: Cesium.Viewer | null) {
                 cableInstanceToLogical.clear();
 
                 // Build GeometryInstance[] in one pass so we can feed the
-                // whole batch to a single GroundPolylinePrimitive.
+                // whole batch to a single Primitive.
                 const instances: Cesium.GeometryInstance[] = [];
                 const features: any[] = geojson.features;
                 for (let fi = 0; fi < features.length; fi++) {
@@ -205,9 +208,10 @@ export function useCablesLayer(viewer: Cesium.Viewer | null) {
                         }
 
                         instances.push(new Cesium.GeometryInstance({
-                            geometry: new Cesium.GroundPolylineGeometry({
+                            geometry: new Cesium.PolylineGeometry({
                                 positions: Cesium.Cartesian3.fromDegreesArray(degreesFlat),
-                                width: 2.0,
+                                width: 1.5,
+                                vertexFormat: Cesium.PolylineColorAppearance.VERTEX_FORMAT,
                             }),
                             attributes: {
                                 // Per-instance colour feeds PolylineColorAppearance.
@@ -232,9 +236,11 @@ export function useCablesLayer(viewer: Cesium.Viewer | null) {
                     return;
                 }
 
-                const primitive = new Cesium.GroundPolylinePrimitive({
+                const primitive = new Cesium.Primitive({
                     geometryInstances: instances,
-                    appearance: new Cesium.PolylineColorAppearance(),
+                    appearance: new Cesium.PolylineColorAppearance({
+                        translucent: true,
+                    }),
                     // We keep a ref for visibility toggle; no releasing the
                     // geometry instances because we never rebuild per tile.
                     releaseGeometryInstances: false,
@@ -243,7 +249,7 @@ export function useCablesLayer(viewer: Cesium.Viewer | null) {
                 if (viewer.isDestroyed()) return;
                 if (myGen !== genRef.current) return;
                 if (!useTimelineStore.getState().sources.cables) return;
-                viewer.scene.groundPrimitives.add(primitive);
+                viewer.scene.primitives.add(primitive);
                 primitiveRef.current = primitive;
                 loadedRef.current = true;
                 // Read visibility fresh from the store so a toggle-off that
@@ -257,7 +263,7 @@ export function useCablesLayer(viewer: Cesium.Viewer | null) {
                     count: cableMetaMap.size,
                     status: 'streaming',
                 });
-                console.log(`[Cables] Rendered ${instances.length} segments (${cableMetaMap.size} cables) via GroundPolylinePrimitive`);
+                console.log(`[Cables] Rendered ${instances.length} segments (${cableMetaMap.size} cables) via Polyline Primitive`);
             } catch (err: any) {
                 if (axios.isCancel(err) || err?.code === 'ERR_CANCELED') return;
                 console.warn('[Cables] Fetch failed:', err?.message || err);
@@ -311,7 +317,7 @@ export function useCablesLayer(viewer: Cesium.Viewer | null) {
     useEffect(() => {
         if (isSourceOn) return;
         if (primitiveRef.current && viewer && !viewer.isDestroyed()) {
-            viewer.scene.groundPrimitives.remove(primitiveRef.current);
+            viewer.scene.primitives.remove(primitiveRef.current);
         }
         primitiveRef.current = null;
         loadedRef.current = false;
