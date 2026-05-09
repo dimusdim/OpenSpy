@@ -160,8 +160,11 @@ class SatelliteApplyManager {
         // even after the cartoScratch fix removed the per-slot allocation.
         // Hover panels don't need 60 fps metadata freshness.
         const META_THROTTLE_MS = 250;
-        const APPLY_BUDGET_MS = 10;
-        const APPLY_CHECK_EVERY = 256;
+        // Keep satellite position application below one frame slice. The full
+        // catalog can be ~20k billboards; applying it in fewer, longer chunks
+        // makes globe rotation stutter even when average FPS still looks OK.
+        const APPLY_BUDGET_MS = 6;
+        const APPLY_CHECK_EVERY = 128;
         const startCursor = progress.cursor;
         for (let slotIndex = progress.cursor; slotIndex < slots.length; slotIndex += 1) {
             const slot = slots[slotIndex];

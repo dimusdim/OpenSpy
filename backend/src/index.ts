@@ -7167,6 +7167,10 @@ app.get('/api/status', async (_req, res) => {
         };
 
     const statusPayload = {
+        runtime: {
+            liveIngestEnabled,
+            replayRenderPrewarmEnabled: process.env.REPLAY_RENDER_PREWARM_DISABLED !== 'true',
+        },
         database: databaseService.getHealth(),
         satellites: satelliteService.getHealth(),
         aviation: adsbHealth.aviation,
