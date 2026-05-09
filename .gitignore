@@ -68,6 +68,7 @@ marketing/
 # Playwright/test artifacts
 test-results/
 frontend/test-results/
+reports/
 
 # Agent session runtime state
 .remember/
