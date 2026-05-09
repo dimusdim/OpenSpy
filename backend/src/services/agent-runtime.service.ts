@@ -767,6 +767,14 @@ export class AgentRuntimeService {
         const interrupted = await this.repository.interruptRunningRuns(reason);
         for (const run of interrupted) {
             this.killRecordedProcessGroup(run.metadata?.pid, run.metadata?.command);
+            await this.repository.updateSession(run.agent_session_id, {
+                status: 'active',
+                metadata: {
+                    activeRunId: null,
+                    lastRunId: run.agent_run_id,
+                    lastRunStatus: 'error',
+                },
+            });
             await this.repository.appendRunEvent(run.agent_run_id, 'run.failed', {
                 status: 'error',
                 reason,
@@ -937,7 +945,39 @@ export class AgentRuntimeService {
 
     async cancelRun(runId: string): Promise<void> {
         const live = this.liveRuns.get(runId);
-        if (!live) return;
+        if (!live) {
+            const run = await this.repository.getRun(runId);
+            if (!run) return;
+            if (['completed', 'cancelled', 'error'].includes(run.status)) {
+                await this.repository.updateSession(run.agent_session_id, {
+                    status: run.status === 'error' ? 'error' : 'active',
+                    metadata: {
+                        activeRunId: null,
+                        lastRunId: runId,
+                        lastRunStatus: run.status,
+                    },
+                });
+                return;
+            }
+            await this.repository.completeRun(runId, 'cancelled', {
+                cancelledBy: 'frontend',
+                cancelledWithoutLiveProcess: true,
+            });
+            await this.repository.updateSession(run.agent_session_id, {
+                status: 'active',
+                metadata: {
+                    activeRunId: null,
+                    lastRunId: runId,
+                    lastRunStatus: 'cancelled',
+                },
+            });
+            await this.repository.appendRunEvent(runId, 'run.failed', {
+                status: 'cancelled',
+                cancelledBy: 'frontend',
+                cancelledWithoutLiveProcess: true,
+            });
+            return;
+        }
         live.cancelling = true;
         this.killProcessGroup(live.process, 'SIGTERM');
         setTimeout(() => this.killProcessGroup(live.process, 'SIGKILL'), 5_000).unref();
