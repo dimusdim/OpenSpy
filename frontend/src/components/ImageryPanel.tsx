@@ -167,6 +167,7 @@ export function ImageryContextBadge() {
 }
 
 export default function ImageryPanel({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
+    const tileMode = useTimelineStore((state) => state.tileMode);
     const setTileMode = useTimelineStore((state) => state.setTileMode);
     const [source, setSource] = useState<ImagerySource>('nasa_gibs');
     const [layer, setLayer] = useState('viirs_true_color');
@@ -175,10 +176,12 @@ export default function ImageryPanel({ isOpen, onClose }: { isOpen: boolean; onC
     const [opacity, setOpacity] = useState(0.72);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [notice, setNotice] = useState<string | null>(null);
     const [scenes, setScenes] = useState<ImageryScene[]>([]);
     const [selectedIndex, setSelectedIndex] = useState(0);
     const selectedScene = scenes[selectedIndex] || null;
     const copernicusRadar = source === 'copernicus' && layer === 'radar_vv';
+    const google3dHidesImageryOverlays = tileMode === 'google';
     const providerNote = useMemo(() => (
         source === 'copernicus'
             ? 'Sentinel search uses backend-owned credentials and cached bounded renders. Sentinel-1 radar works through clouds but is not a natural-color photo.'
@@ -189,13 +192,26 @@ export default function ImageryPanel({ isOpen, onClose }: { isOpen: boolean; onC
         setScenes([]);
         setSelectedIndex(0);
         setError(null);
+        setNotice(null);
     }, [source, layer]);
 
     if (!isOpen) return null;
 
+    const imageryBaseSwitchPayload = () => (
+        google3dHidesImageryOverlays
+            ? { switchBase: true, switch_base: true }
+            : { switchBase: false, switch_base: false }
+    );
+
+    const noteBaseSwitchIfNeeded = () => {
+        if (!google3dHidesImageryOverlays) return;
+        setNotice('Google 3D hides globe imagery overlays. Switched to MODIS base imagery so this satellite snapshot is visible.');
+    };
+
     const search = async () => {
         setLoading(true);
         setError(null);
+        setNotice(null);
         setScenes([]);
         setSelectedIndex(0);
         try {
@@ -258,7 +274,9 @@ export default function ImageryPanel({ isOpen, onClose }: { isOpen: boolean; onC
             if (source === 'copernicus' && selectedScene.render_supported === false && !selectedScene.action_payloads?.show_scene?.payload) {
                 throw new Error(selectedScene.render_unsupported_reason || 'This Copernicus scene is metadata-only and cannot be rendered yet.');
             }
-            showOpenSpyImageryLayer(viewer, { ...payload, switchBase: false, switch_base: false, opacity });
+            setError(null);
+            showOpenSpyImageryLayer(viewer, { ...payload, ...imageryBaseSwitchPayload(), opacity });
+            noteBaseSwitchIfNeeded();
         } catch (err: any) {
             setError(err?.message || 'Failed to show imagery');
         }
@@ -271,7 +289,8 @@ export default function ImageryPanel({ isOpen, onClose }: { isOpen: boolean; onC
             setError('Cesium viewer is not ready');
             return;
         }
-        const after = { ...sceneActionPayload(selectedScene, { source, layer, opacity }), switchBase: false, switch_base: false };
+        const baseSwitchPayload = imageryBaseSwitchPayload();
+        const after = { ...sceneActionPayload(selectedScene, { source, layer, opacity }), ...baseSwitchPayload };
         if (source === 'copernicus' && selectedScene.render_supported === false && !selectedScene.action_payloads?.show_scene?.payload) {
             setError(selectedScene.render_unsupported_reason || 'This Copernicus scene is metadata-only and cannot be rendered yet.');
             return;
@@ -286,17 +305,20 @@ export default function ImageryPanel({ isOpen, onClose }: { isOpen: boolean; onC
             : null;
         const beforeScene = scenes[selectedIndex + 1] || scenes.find((_, index) => index !== selectedIndex) || null;
         const before = beforeScene
-            ? { ...sceneActionPayload(beforeScene, { source, layer, opacity: 0.4 }), switchBase: false, switch_base: false }
+            ? { ...sceneActionPayload(beforeScene, { source, layer, opacity: 0.4 }), ...baseSwitchPayload }
             : fallbackBefore;
         if (!before) {
             setError('No second scene is available for comparison.');
             return;
         }
         try {
+            setError(null);
             showOpenSpyImageryCompare(viewer, {
                 before: { ...before, opacity: 0.42 },
                 after: { ...after, opacity },
+                ...baseSwitchPayload,
             });
+            noteBaseSwitchIfNeeded();
         } catch (err: any) {
             setError(err?.message || 'Failed to compare imagery');
         }
@@ -306,6 +328,7 @@ export default function ImageryPanel({ isOpen, onClose }: { isOpen: boolean; onC
         const viewer = getViewer();
         if (!viewer) return;
         clearOpenSpyImageryLayers(viewer);
+        setNotice(null);
         viewer.scene.requestRender();
     };
 
@@ -382,6 +405,12 @@ export default function ImageryPanel({ isOpen, onClose }: { isOpen: boolean; onC
                         {providerNote}
                     </div>
 
+                    {google3dHidesImageryOverlays && (
+                        <div className="rounded border border-amber-900/60 bg-amber-950/30 px-2 py-2 text-[11px] leading-relaxed text-amber-100">
+                            Google 3D hides satellite overlays. Show or Compare will switch to MODIS base imagery so the selected snapshot is visible.
+                        </div>
+                    )}
+
                     <div className="flex gap-2">
                         <button onClick={search} disabled={loading} className="flex flex-1 items-center justify-center gap-2 rounded border border-cyan-700 bg-cyan-950/40 px-3 py-2 text-cyan-100 hover:bg-cyan-900/50 disabled:opacity-50">
                             {loading ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
@@ -405,6 +434,7 @@ export default function ImageryPanel({ isOpen, onClose }: { isOpen: boolean; onC
                     )}
 
                     {error && <div className="rounded border border-red-900/70 bg-red-950/40 px-2 py-2 text-red-200">{error}</div>}
+                    {notice && <div className="rounded border border-cyan-900/70 bg-cyan-950/30 px-2 py-2 text-cyan-100">{notice}</div>}
 
                     {selectedScene && (
                         <div className="rounded border border-zinc-800 bg-zinc-950/70 px-2 py-2 text-[11px] leading-relaxed text-zinc-500">
