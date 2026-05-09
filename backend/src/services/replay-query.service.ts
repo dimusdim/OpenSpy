@@ -1132,6 +1132,59 @@ export class ReplayQueryService {
         return items;
     }
 
+    async listSatelliteStateAtSamples(
+        filters: Omit<ReplayStateFilters, 'at'> & { atTimes: string[] },
+    ): Promise<Array<{ at: string; rows: ReplayEntityRow[] }>> {
+        const atTimes = [...new Set((filters.atTimes || []).filter(Boolean))]
+            .sort((left, right) => new Date(left).getTime() - new Date(right).getTime());
+        if (atTimes.length === 0) return [];
+
+        // Fetch the latest available TLE set once for the whole sample window.
+        // The caller is doing an AOI/time candidate screen, not authoritative
+        // sensor tasking; repeated SQL per sample dominates runtime while using
+        // the same local orbital source basis.
+        const rows = await this.listSatelliteTleAt({
+            ...filters,
+            at: atTimes[atTimes.length - 1],
+        });
+
+        return atTimes.map((sampleAt) => {
+            const items: ReplayEntityRow[] = [];
+            for (const row of rows) {
+                if (!row.tle_line1 || !row.tle_line2) continue;
+                const position = this.propagateSatellitePosition(row.tle_line1, row.tle_line2, sampleAt);
+                if (!position) continue;
+                if (filters.bbox && !this.bboxContains(filters.bbox, position.lat, position.lng)) continue;
+                items.push({
+                    entity_id: row.entity_id,
+                    layer_id: row.layer_id,
+                    source_id: row.source_id,
+                    entity_kind: row.entity_kind,
+                    subtype: row.subtype,
+                    display_name: row.display_name,
+                    first_observed_at: row.first_observed_at,
+                    last_observed_at: row.last_observed_at,
+                    updated_at: row.updated_at,
+                    entity_observed_at: row.entity_observed_at,
+                    entity_properties: row.entity_properties,
+                    position_observed_at: sampleAt,
+                    geometry: null,
+                    display_lat: position.lat,
+                    display_lng: position.lng,
+                    altitude_m: position.altitudeM,
+                    heading_deg: null,
+                    speed_mps: null,
+                    position_properties: {
+                        replay_basis: 'propagated_from_tle',
+                        orbital_observed_at: row.orbital_observed_at,
+                        ...(row.orbital_properties || {}),
+                    },
+                });
+            }
+            return { at: sampleAt, rows: items };
+        });
+    }
+
     async listSatelliteTleAt(filters: ReplayStateFilters): Promise<ReplaySatelliteTleRow[]> {
         const params: unknown[] = [filters.at];
         const orbitalTimeExpr = 'COALESCE(oe.tle_epoch_at, oe.observed_at)';

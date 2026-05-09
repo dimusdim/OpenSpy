@@ -1007,6 +1007,7 @@ export class AgentToolService {
         const samplingPlan = sampledTimes(from, to, stepSeconds, maxSamples);
         const sampleTimes = samplingPlan.times;
         const center = bboxCenter(bbox);
+        const replayBbox: [number, number, number, number] = [bbox[1], bbox[0], bbox[3], bbox[2]];
 
         type GroupedOverpass = {
             entity_id: string;
@@ -1032,14 +1033,15 @@ export class AgentToolService {
         };
 
         const grouped = new Map<string, GroupedOverpass>();
-        for (const sampleAt of sampleTimes) {
-            const rows = await this.replayQueryService.listEntityStateAt({
-                at: sampleAt,
-                layerId: 'satellite',
-                entityKind,
-                subtype,
-                bbox,
-            });
+        const sampleRows = await this.replayQueryService.listSatelliteStateAtSamples({
+            atTimes: sampleTimes,
+            layerId: 'satellite',
+            entityKind,
+            subtype,
+            bbox: replayBbox,
+        });
+        for (const sampleBatch of sampleRows) {
+            const rows = sampleBatch.rows;
             for (const row of rows) {
                 const rowLat = Number(row.display_lat);
                 const rowLng = Number(row.display_lng);
@@ -1048,7 +1050,7 @@ export class AgentToolService {
                 const orbitalObservedAt = row.position_properties?.orbital_observed_at || null;
                 const existing = grouped.get(row.entity_id);
                 const sample = {
-                    at: sampleAt,
+                    at: sampleBatch.at,
                     lat: rowLat,
                     lng: rowLng,
                     altitude_m: Number.isFinite(Number(row.altitude_m)) ? Number(row.altitude_m) : null,
