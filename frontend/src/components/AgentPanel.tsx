@@ -1653,19 +1653,44 @@ function polygonGraphics(
     outline: Cesium.Color,
     height: number,
 ): Cesium.PolygonGraphics.ConstructorOptions {
+    const clampToGround = height <= 0;
     const graphics: Cesium.PolygonGraphics.ConstructorOptions = {
         hierarchy: Cesium.Cartesian3.fromDegreesArray(coords.flat()),
         material: fill,
-        outline: true,
+        outline: !clampToGround,
         outlineColor: outline,
         perPositionHeight: false,
     };
-    if (height > 0) {
-        graphics.height = height;
-    } else {
+    if (clampToGround) {
+        graphics.height = 0;
         (graphics as any).heightReference = Cesium.HeightReference.CLAMP_TO_GROUND;
+    } else {
+        graphics.height = height;
     }
     return graphics;
+}
+
+function drawGroundPolygonOutline(
+    viewer: Cesium.Viewer,
+    id: string,
+    coords: Array<[number, number]>,
+    outline: Cesium.Color,
+    width = 3,
+): void {
+    const closed = coords.length > 0
+        && (coords[0][0] !== coords[coords.length - 1][0] || coords[0][1] !== coords[coords.length - 1][1])
+        ? [...coords, coords[0]]
+        : coords;
+    if (closed.length < 2) return;
+    viewer.entities.add({
+        id: `${id}:outline`,
+        polyline: {
+            positions: Cesium.Cartesian3.fromDegreesArray(closed.flat()),
+            width,
+            material: outline,
+            clampToGround: true,
+        },
+    });
 }
 
 function normalizeOpenSpyBbox(values: number[]): [number, number, number, number] | null {
@@ -2010,10 +2035,14 @@ function drawGeometryOverlay(
             ]
             : [[[west, south], [east, south], [east, north], [west, north]]];
         rings.forEach((coords, index) => {
+            const entityId = rings.length > 1 ? `${id}:${index}` : id;
             viewer.entities.add({
-                id: rings.length > 1 ? `${id}:${index}` : id,
+                id: entityId,
                 polygon: polygonGraphics(coords, fill, outline, height),
             });
+            if (height <= 0) {
+                drawGroundPolygonOutline(viewer, entityId, coords, outline, Number(payload.outlineWidth ?? payload.outline_width ?? 3));
+            }
         });
         const center = east < west
             ? { lng: ((west + ((east + 360 - west) / 2) + 540) % 360) - 180, lat: (south + north) / 2 }
@@ -2041,9 +2070,9 @@ function drawGeometryOverlay(
                 semiMajorAxis: radius,
                 semiMinorAxis: radius,
                 material: fill,
-                outline: true,
+                outline: height > 0,
                 outlineColor: outline,
-                ...(height > 0 ? { height } : { heightReference: Cesium.HeightReference.CLAMP_TO_GROUND }),
+                ...(height > 0 ? { height } : { height: 0, heightReference: Cesium.HeightReference.CLAMP_TO_GROUND }),
             },
         });
         if (shouldShowGeometryLabel(payload) && (payload.label || payload.text || label)) drawPointOrLabel(viewer, { ...payload, lat, lng, pixelSize: 6 }, label, color);
@@ -2086,6 +2115,9 @@ function drawGeometryOverlay(
             id,
             polygon: polygonGraphics(polygonCoordinates, fill, outline, height),
         });
+        if (height <= 0) {
+            drawGroundPolygonOutline(viewer, id, polygonCoordinates, outline, Number(payload.outlineWidth ?? payload.outline_width ?? 3));
+        }
         const polygonCenter = centerOfCoordinates(polygonCoordinates);
         if (polygonCenter && shouldShowGeometryLabel(payload) && (payload.label || payload.text || label)) {
             drawPointOrLabel(viewer, { ...payload, ...polygonCenter, pixelSize: 6 }, label, color);
