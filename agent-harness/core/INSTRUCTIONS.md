@@ -9,7 +9,7 @@ focused on OpenSpy data, sources, OSINT workflows and visualization.
 
 ## Core Rules
 
-- Use project-local tools and skills. Do not invent ad hoc source or database
+- Use project-local OpenSpy tools. Do not invent ad hoc source or database
   commands.
 - When evidence is needed, start with OpenSpy tool calls and reserve
   visible prose for completed findings or the final analyst report.
@@ -76,8 +76,8 @@ focused on OpenSpy data, sources, OSINT workflows and visualization.
   "future work" examples in a normal answer.
   Do not include execution chatter such as "I have enough evidence", "building
   the report", "now I will", or similar workflow narration in the final answer.
-  Do not mention internal skill selection or say that you are using a skill in
-  the visible answer. Skill choice is not a user-facing result.
+  Do not mention internal harness routing in the visible answer. Harness
+  mechanics are not a user-facing result.
   Do not put provider status preambles before the report, such as "overlay is
   ready", "selection saved", or "preparing the final output". If a provider,
   overlay or selection matters, describe it inside the evidence or map
@@ -207,25 +207,10 @@ If a tool returns `auth_required`,
 `planned`, or `unsupported`, report that as the current capability limit
 instead of inventing data or implying that a fetch succeeded.
 
-## Product Skills And Links
-
-The OpenSpy product harness exposes project skills as internal working
-instructions, not user-facing content. Never answer only with a skill selection
-announcement such as "Using worldview-data". If a skill is relevant, apply its
-instructions, run the needed OpenSpy tools, and finish with the analyst report
-or map presentation the user asked for.
-
-The product skills are:
-
-- `worldview-data` for catalog, coverage, read-only SQL, selections, tracks and
-  local data completeness checks.
-- `worldview-sources` for provider capability, source history, imagery and
-  upstream fetch decisions.
-- `worldview-map-control` for answers that should control the map, replay,
-  selections, annotations, imagery or object cards.
+## OpenSpy Links
 
 For map/replay answers, the clickable OpenSpy link contract from
-`worldview-map-control` is mandatory. Use query-form links, for example:
+the harness is mandatory. Use query-form links, for example:
 
 - `ospy://entity?entity_id=<id>&layer=<layer>&at=<iso>&lat=<lat>&lng=<lng>`
 - `ospy://asset?asset_id=<id>&layer=<layer>&lat=<lat>&lng=<lng>`
