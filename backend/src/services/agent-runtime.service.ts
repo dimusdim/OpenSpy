@@ -1098,21 +1098,21 @@ export class AgentRuntimeService {
         const providerDirName = provider === 'claude_code' ? 'claude' : 'codex';
         const workdir = path.join(baseDir, repoHash, providerDirName);
         fs.mkdirSync(workdir, { recursive: true });
-        this.ensureSymlink(path.join(harnessRoot, 'tools'), path.join(workdir, 'tools'), 'dir');
+        this.ensureRuntimeCopy(path.join(harnessRoot, 'tools'), path.join(workdir, 'tools'), 'dir');
         if (provider === 'claude_code') {
-            this.ensureSymlink(coreInstructions, path.join(workdir, 'CLAUDE.md'), 'file');
+            this.ensureRuntimeCopy(coreInstructions, path.join(workdir, 'CLAUDE.md'), 'file');
             const claudeDir = path.join(workdir, '.claude');
             this.ensureDirectory(claudeDir);
-            this.ensureSymlink(coreSkills, path.join(claudeDir, 'skills'), 'dir');
-            this.ensureSymlink(path.join(coreDir, 'claude-settings.json'), path.join(claudeDir, 'settings.json'), 'file');
+            this.ensureRuntimeCopy(coreSkills, path.join(claudeDir, 'skills'), 'dir');
+            this.ensureRuntimeCopy(path.join(coreDir, 'claude-settings.json'), path.join(claudeDir, 'settings.json'), 'file');
         } else if (provider === 'codex_cli') {
-            this.ensureSymlink(coreInstructions, path.join(workdir, 'AGENTS.md'), 'file');
+            this.ensureRuntimeCopy(coreInstructions, path.join(workdir, 'AGENTS.md'), 'file');
             const agentsDir = path.join(workdir, '.agents');
             this.ensureDirectory(agentsDir);
-            this.ensureSymlink(coreSkills, path.join(agentsDir, 'skills'), 'dir');
-            // Temporary compatibility link for local inspection and older smoke
+            this.ensureRuntimeCopy(coreSkills, path.join(agentsDir, 'skills'), 'dir');
+            // Temporary compatibility copy for local inspection and older smoke
             // checks; Codex discovers product skills through `.agents/skills`.
-            this.ensureSymlink(coreSkills, path.join(workdir, 'skills'), 'dir');
+            this.ensureRuntimeCopy(coreSkills, path.join(workdir, 'skills'), 'dir');
         }
         return workdir;
     }
@@ -1143,24 +1143,23 @@ export class AgentRuntimeService {
         }
     }
 
-    private ensureSymlink(target: string, linkPath: string, kind: 'file' | 'dir'): void {
-        if (!fs.existsSync(target)) {
-            throw new Error(`OpenSpy product agent harness target is missing: ${target}`);
+    private ensureRuntimeCopy(source: string, destination: string, kind: 'file' | 'dir'): void {
+        if (!fs.existsSync(source)) {
+            throw new Error(`OpenSpy product agent harness source is missing: ${source}`);
         }
         try {
-            const stat = fs.lstatSync(linkPath);
-            if (stat.isSymbolicLink()) {
-                const current = fs.readlinkSync(linkPath);
-                const resolved = path.resolve(path.dirname(linkPath), current);
-                if (resolved === path.resolve(target)) return;
-                fs.unlinkSync(linkPath);
-            } else {
-                fs.rmSync(linkPath, { recursive: true, force: true });
-            }
+            const stat = fs.lstatSync(destination);
+            if (stat.isSymbolicLink()) fs.unlinkSync(destination);
+            else if (stat.isDirectory() || stat.isFile()) fs.rmSync(destination, { recursive: true, force: true });
         } catch (err: any) {
             if (err?.code !== 'ENOENT') throw err;
         }
-        fs.symlinkSync(target, linkPath, kind === 'dir' && process.platform === 'win32' ? 'junction' : kind);
+        fs.mkdirSync(path.dirname(destination), { recursive: true });
+        if (kind === 'file') {
+            fs.copyFileSync(source, destination);
+            return;
+        }
+        fs.cpSync(source, destination, { recursive: true, force: true, dereference: true });
     }
 
     private ensureDirectory(dirPath: string): void {
