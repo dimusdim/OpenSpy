@@ -426,7 +426,7 @@ function finalAssistantTextAfterLastTool(events: AgentRunEventRow[], fallback: s
         .filter((event) => event.event_type === 'message.delta' && Number(event.sequence_no || 0) > lastToolSequence)
         .map((event) => String(event.payload?.text || ''))
         .join('');
-    return finalText.trim() ? finalText : fallback;
+    return finalText.trim() ? finalText : '';
 }
 
 function sanitizeJsonForPrompt(value: any, maxChars = 6000): Record<string, any> | null {
@@ -1682,6 +1682,14 @@ export class AgentRuntimeService {
             ? actionContract.contentJson
             : null;
         const finalActions = normalizeAgentActions(finalContentJson?.actions);
+        const usedTools = runEvents.some((event) => event.event_type === 'tool.started' || event.event_type === 'tool.completed');
+        if (usedTools && !finalAssistantText && finalActions.length === 0) {
+            await this.emitRunEvent(runId, emitter, 'status.updated', {
+                level: 'warning',
+                source: 'agent-runtime',
+                message: 'provider completed after tool calls without a post-tool final answer',
+            });
+        }
         if (finalAssistantText || finalActions.length > 0) {
             await this.repository.addMessage({
                 sessionId,

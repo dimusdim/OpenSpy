@@ -28,6 +28,11 @@ window, animate evidence, highlight/focus objects, filter layers, or prepare a
 presentation, the answer must include `ACTIONS_JSON`. A prose-only answer is
 not complete for a visual request. A normal investigation presentation contains
 4-8 actions:
+Do not emit a visible planning/status message before the investigation is
+finished. If tools are needed to prepare the map or replay, keep the visible
+assistant answer for the final report plus action block; the UI already shows
+tool execution separately. Do not write partial findings and then continue
+calling tools; finish the tool work first, then answer once.
 
 - camera or context geometry: `map.fly_to`, `map.add_aoi`, `map.annotate` or
   `map.highlight`;
