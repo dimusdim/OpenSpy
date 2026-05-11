@@ -7,6 +7,8 @@ import { perfLog } from '../lib/perf-log';
 import { getAviIcon, getShipIcon, DARK_VESSEL_ICON } from '../icons/map-icons';
 import { getViewerAltitudeMeters, safeCartesianFromDegrees } from './position-utils';
 import { TrailBatcher } from './TrailBatcher';
+import { applyBillboardScreenSpaceHeading, createBillboardScreenHeadingScratch, headingFallbackRotation, screenSpaceRotationForHeading } from './billboardScreenHeading';
+import { pointScaleForStyle } from './renderStyleRegistry';
 
 declare global {
     interface Window {
@@ -34,6 +36,9 @@ const getShipSVG = getShipIcon;
 
 const LIVE_APPLY_BUDGET_MS = 8;
 const LIVE_APPLY_YIELD_EVERY = 500;
+const AIRCRAFT_SCREEN_ROTATION_INTERVAL_MS = 50;
+const LIVE_AIRCRAFT_ICON_SCALE = pointScaleForStyle('aircraft', { subtype: 'general' });
+const LIVE_VESSEL_ICON_SCALE = pointScaleForStyle('vessel', { subtype: 'unknown' });
 
 function yieldToBrowser(): Promise<void> {
     return new Promise(resolve => {
@@ -587,6 +592,28 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
             }, 120);
         };
         const removeMoveEnd = viewer.camera.moveEnd.addEventListener(onCameraMoveEnd);
+        const aircraftRotationScratch = createBillboardScreenHeadingScratch();
+        let lastAircraftRotationAt = 0;
+        const refreshAircraftScreenRotations = (force = false): boolean => {
+            const state = useTimelineStore.getState();
+            if (state.mode === 'playback' || liveRenderModeRef.current !== 'raw') return false;
+            if (!state.sources.aviation || !state.visibility.aviation) return false;
+            const nowMs = performance.now();
+            if (!force && nowMs - lastAircraftRotationAt < AIRCRAFT_SCREEN_ROTATION_INTERVAL_MS) return false;
+            lastAircraftRotationAt = nowMs;
+            let touched = false;
+            billboardMap.forEach((bb, id) => {
+                if (!bb.show) return;
+                const meta = aircraftMetaMap.get(id);
+                if (!meta) return;
+                touched = applyBillboardScreenSpaceHeading(viewer.scene, bb, meta.heading, aircraftRotationScratch) || touched;
+            });
+            return touched;
+        };
+        const handlePreRender = () => {
+            if (refreshAircraftScreenRotations()) viewer.scene.requestRender();
+        };
+        viewer.scene.preRender.addEventListener(handlePreRender);
 
         const processLiveUpdate = async (data: any) => {
             if (!active) return;
@@ -653,7 +680,9 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                     if (!currentSources.aviation) break;
                     const ac = aircrafts[ai];
                     const pos = Cesium.Cartesian3.fromDegrees(ac.lng, ac.lat, ac.alt * 0.3048);
-                    const rotation = Cesium.Math.toRadians(-(ac.heading || 0));
+                    const heading = Number(ac.heading || 0);
+                    const rotation = screenSpaceRotationForHeading(viewer.scene, pos, heading, aircraftRotationScratch)
+                        ?? headingFallbackRotation(heading);
 
                     aviLastSeen.set(ac.id, now);
 
@@ -663,7 +692,7 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                         bb = aviBillboards.add({
                             position: pos,
                             image: getAviSVG(ac.type),
-                            scale: 0.7,
+                            scale: LIVE_AIRCRAFT_ICON_SCALE,
                             rotation,
                             id: ac.id,
                             show,
@@ -744,7 +773,7 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                     bb = maritimeBillboards.add({
                         position: pos,
                         image: getShipSVG(v.type),
-                        scale: 0.7,
+                        scale: LIVE_VESSEL_ICON_SCALE,
                         rotation,
                         alignedAxis: Cesium.Cartesian3.UNIT_Z,
                         id: v.id,
@@ -952,6 +981,7 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
             unsubscribeModeAbort();
             if (clusterRefreshTimer) clearTimeout(clusterRefreshTimer);
             removeMoveEnd();
+            try { viewer.scene.preRender.removeEventListener(handlePreRender); } catch {}
             clearInterval(speedInterval);
             clearInterval(staleCleanup);
             socket.disconnect();

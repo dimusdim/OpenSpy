@@ -4,6 +4,7 @@ import { applyFastBillboardPosition, type SatelliteApplySlot } from './satellite
 import { ReplayDenseGeometryPrimitive, writeDenseColor } from './replayDenseGeometryPrimitive';
 import { baseColorForSatellite, colorForStyle, featureFamilyForLayer, getReplayApplyChunkSize, getReplayHydrationStage, pointIconForStyle, pointScaleForStyle, toHudLayerName } from './renderStyleRegistry';
 import { replayHttpGet } from './replayHttp';
+import { createBillboardScreenHeadingScratch, headingFallbackRotation, screenSpaceRotationForHeading } from './billboardScreenHeading';
 
 export const REPLAY_RENDER_BATCH_ID_PREFIX = 'rb:';
 
@@ -667,6 +668,7 @@ export class ReplayRenderBatchManager {
     private readonly chunkDataInFlight = new Map<string, Promise<ArrayBuffer>>();
     private readonly featureRefsCache = new Map<string, { layerId: string; refs: RenderFeatureRefsResponse }>();
     private readonly featureRefsInFlight = new Map<string, Promise<RenderFeatureRefsResponse>>();
+    private readonly pointRotationScratch = createBillboardScreenHeadingScratch();
 
     constructor(options: {
         scene: Cesium.Scene;
@@ -684,6 +686,12 @@ export class ReplayRenderBatchManager {
 
     setVisibilityResolver(resolveVisible: RenderBatchVisibilityResolver): void {
         this.resolveVisible = resolveVisible;
+    }
+
+    private pointRotation(layerId: string, position: Cesium.Cartesian3, headingDeg: number | null | undefined): number {
+        const fallback = headingFallbackRotation(headingDeg);
+        if (layerId !== 'aircraft') return fallback;
+        return screenSpaceRotationForHeading(this.scene, position, headingDeg, this.pointRotationScratch) ?? fallback;
     }
 
     private async getRenderChunkIndex(url: string): Promise<RenderChunksResponse> {
@@ -1171,7 +1179,8 @@ export class ReplayRenderBatchManager {
                 const icon = await pointImageForReplayStyle(options.layerId, style);
                 if (isCancelled()) return cancelledResult();
                 const scale = pointScaleForStyle(options.layerId, style);
-                const rotation = Number.isFinite(heading) ? Cesium.Math.toRadians(-heading) : 0;
+                const position = new Cesium.Cartesian3(x, y, z);
+                const rotation = this.pointRotation(options.layerId, position, Number.isFinite(heading) ? heading : null);
                 const visibilityId = featureId || pickId;
                 const visible = this.resolveVisible(visibilityId, options.layerId, subtype, sourceId);
                 if (!visible) {
@@ -1180,7 +1189,7 @@ export class ReplayRenderBatchManager {
                 }
                 const billboard = collection.add({
                     id: pickId,
-                    position: new Cesium.Cartesian3(x, y, z),
+                    position,
                     image: icon,
                     scale,
                     rotation,
@@ -1246,7 +1255,10 @@ export class ReplayRenderBatchManager {
                 if (isCancelled()) return cancelledResult();
                 (slot.billboard as any).image = refreshedIcon;
             }
-            slot.billboard.rotation = Number.isFinite(heading) ? Cesium.Math.toRadians(-heading) : 0;
+            slot.scratch.x = x;
+            slot.scratch.y = y;
+            slot.scratch.z = z;
+            slot.billboard.rotation = this.pointRotation(options.layerId, slot.scratch, Number.isFinite(heading) ? heading : null);
             const meta = existingMeta;
             if (meta) {
                 meta.subtype = effectiveSubtype;
@@ -1422,7 +1434,6 @@ export class ReplayRenderBatchManager {
                     : pointIconForStyle(manifest.layerId, style);
                 if (isCancelled()) return cleanupPartialRender();
                 const scale = pointScaleForStyle(manifest.layerId, style);
-                const rotation = props.headingDeg != null ? Cesium.Math.toRadians(-props.headingDeg) : 0;
                 const pickId = makeRenderId(manifest.chunkId, row.featureIndex);
                 const visibilityId = ref?.id || pickId;
                 const visible = this.resolveVisible(
@@ -1470,13 +1481,15 @@ export class ReplayRenderBatchManager {
                         collection = createPointCollection();
                     }
                     const offset = (row.pointStart + i) * 3;
+                    const position = new Cesium.Cartesian3(
+                        decoded.pointPositions[offset],
+                        decoded.pointPositions[offset + 1],
+                        decoded.pointPositions[offset + 2],
+                    );
+                    const rotation = this.pointRotation(manifest.layerId, position, props.headingDeg);
                     const billboard = collection.add({
                         id: pickId,
-                        position: new Cesium.Cartesian3(
-                            decoded.pointPositions[offset],
-                            decoded.pointPositions[offset + 1],
-                            decoded.pointPositions[offset + 2],
-                        ),
+                        position,
                         image: icon,
                         scale,
                         rotation,

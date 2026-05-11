@@ -57,7 +57,7 @@
         "hudName": "Aircraft",
         "color": "#38bdf8",
         "pointIcon": "aircraft",
-        "pointScale": 1.0
+        "pointScale": 0.7
       }
     },
     {
@@ -93,7 +93,7 @@
         "hudName": "Vessel",
         "color": "#22d3ee",
         "pointIcon": "vessel",
-        "pointScale": 1.05
+        "pointScale": 0.7
       }
     },
     {

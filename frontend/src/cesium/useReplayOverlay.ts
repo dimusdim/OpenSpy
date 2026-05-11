@@ -12,6 +12,7 @@ import { applyFastBillboardPosition, clearSatelliteApplySource, setSatelliteAppl
 import { useReplayTrailsOverlay } from './useReplayTrailsOverlay';
 import { satelliteFootprintMetaMap, type SatelliteFootprintMeta } from './useSatellitesLayer';
 import { ReplayRenderBatchManager, replayRenderBatchMetaMap, type ReplayRenderBatchFootprint, type ReplayRenderBatchMotionTrack } from './replayRenderBatch';
+import { applyBillboardScreenSpaceHeading, createBillboardScreenHeadingScratch, headingFallbackRotation, screenSpaceRotationForHeading } from './billboardScreenHeading';
 import {
     canReplayPointDelta,
     canReplayPointDeltaBeforeFullSync,
@@ -252,6 +253,7 @@ const REPLAY_STORE_KEY_BY_LAYER = new Map<string, LayerName>(
 );
 const REPLAY_MOTION_APPLY_BUDGET_MS = 4;
 const REPLAY_MOTION_APPLY_CHECK_INTERVAL = 32;
+const REPLAY_AIRCRAFT_SCREEN_ROTATION_INTERVAL_MS = 50;
 const REPLAY_FOOTPRINT_UPDATE_MS = 250;
 const REPLAY_FOOTPRINT_RAY_COUNT = 8;
 const REPLAY_POINT_DELTA_FULL_SYNC_EVERY = 10;
@@ -390,6 +392,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
     const pointCollectionRef = useRef<Cesium.BillboardCollection | null>(null);
     const pointMapRef = useRef<Map<string, Cesium.Billboard>>(new Map());
     const renderBatchPointMapRef = useRef<Map<string, Cesium.Billboard>>(new Map());
+    const pointRotationScratchRef = useRef(createBillboardScreenHeadingScratch());
     const pointSignatureRef = useRef<Map<string, string>>(new Map());
     const shapeBatchRef = useRef<Map<string, ReplayShapeBatch>>(new Map());
     const renderBatchManagerRef = useRef<ReplayRenderBatchManager | null>(null);
@@ -1958,7 +1961,6 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
         const headingDeg = 'heading_deg' in item && Number.isFinite(item.heading_deg)
             ? Number(item.heading_deg)
             : null;
-        const rotation = headingDeg != null ? Cesium.Math.toRadians(-headingDeg) : 0;
         const sampleAtMs = 'position_observed_at' in item && item.position_observed_at
             ? new Date(item.position_observed_at).getTime()
             : Number.NaN;
@@ -1988,6 +1990,10 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
             position = safeCartesianFromDegrees(lng, lat, altitude);
             if (!position) return;
         }
+        const rotation = item.layer_id === 'aircraft' && position && viewer
+            ? (screenSpaceRotationForHeading(viewer.scene, position, headingDeg, pointRotationScratchRef.current)
+                ?? headingFallbackRotation(headingDeg))
+            : headingFallbackRotation(headingDeg);
         if (existing) {
             if (!staticPointUnchanged && position) {
                 existing.position = position;
@@ -2293,6 +2299,29 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
 
     useEffect(() => {
         if (!viewer) return;
+        const aircraftRotationScratch = createBillboardScreenHeadingScratch();
+        let lastAircraftRotationAt = 0;
+        const refreshAircraftScreenRotations = (force = false): boolean => {
+            const state = useTimelineStore.getState();
+            if (state.mode !== 'playback' || state.playbackKind !== 'historical') return false;
+            const nowMs = performance.now();
+            if (!force && nowMs - lastAircraftRotationAt < REPLAY_AIRCRAFT_SCREEN_ROTATION_INTERVAL_MS) return false;
+            lastAircraftRotationAt = nowMs;
+            let touched = false;
+            pointMapRef.current.forEach((bb, targetId) => {
+                if (!bb.show) return;
+                const meta = replayMetaMap.get(targetId) || replayMetaMap.get(normalizeReplayId(targetId));
+                if (meta?.layerId !== 'aircraft') return;
+                touched = applyBillboardScreenSpaceHeading(viewer.scene, bb, meta.heading, aircraftRotationScratch) || touched;
+            });
+            renderBatchPointMapRef.current.forEach((bb, targetId) => {
+                if (!bb.show) return;
+                const meta = replayRenderBatchMetaMap.get(targetId);
+                if (meta?.layerId !== 'aircraft') return;
+                touched = applyBillboardScreenSpaceHeading(viewer.scene, bb, meta.heading, aircraftRotationScratch) || touched;
+            });
+            return touched;
+        };
         const handlePreRender = () => {
             // Codex round-7 instrumentation (2026-04-21): the replay
             // motion preRender loop iterates billboards on main and was
@@ -2384,6 +2413,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                 runtimePerfRef.current.lastDrainOps = 0;
                 runtimePerfRef.current.lastDrainMs = 0;
                 updateReplayFootprints();
+                touched = refreshAircraftScreenRotations() || touched;
             }
             if (touched) {
                 viewer.scene.requestRender();
