@@ -57,6 +57,10 @@ Implemented backend operations:
   `--dry-run` is used.
 - `cloudflare-outages`: Cloudflare Radar outage annotations by `--from` and
   optional `--to`; requires backend `CLOUDFLARE_API_TOKEN`.
+  Cloudflare accepts at most 24 hours per provider request. The
+  `source-fetch.sh` wrapper splits longer requested windows into provider-safe
+  chunks and returns a combined JSON result, so you may request the user's
+  evidence window directly.
 - `gfw-events`: Global Fishing Watch events by `--from` and `--to`; requires
   backend `GFW_TOKEN`.
 - `acled-conflicts`: explicit ACLED capability answer. ACLED incremental ingest
@@ -161,6 +165,11 @@ redirect, chain commands, create temporary files, or read internal harness
 `tool-results` files to post-process JSON. Python/jq are acceptable only in
 contexts where they are explicitly available as tools; otherwise use the
 visible JSON result or a semantic OpenSpy command.
+When the shell tool supports a wait/yield parameter, give source-fetch commands
+enough time to finish, normally at least 10 seconds. If a command returns a live
+session id or says it is still running, poll that same session with the shell
+continuation tool until it reaches a terminal exit code before using the
+result, starting dependent commands, or finalizing the answer.
 
 `capabilities` returns one envelope:
 
