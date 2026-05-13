@@ -83,14 +83,16 @@ type ProviderLineState = {
 };
 
 const DEFAULT_CLAUDE_ALLOWED_TOOLS = [
+    'Skill',
+    'Task',
     'Bash(./tools/worldview-cli.sh *)',
     'Bash(./tools/backend-api.sh *)',
     'Bash(./tools/sql-readonly.sh *)',
     'Bash(./tools/source-fetch.sh *)',
     'Bash(./tools/map-command.sh *)',
 ].join(',');
-const DEFAULT_CLAUDE_TOOLS = 'Bash';
 const DEFAULT_CLAUDE_DISALLOWED_TOOLS = [
+    'AskUserQuestion',
     'Read',
     'Write',
     'Edit',
@@ -1005,13 +1007,14 @@ export class AgentRuntimeService {
                 '--strict-mcp-config',
                 '--permission-mode',
                 process.env.AGENT_CLAUDE_PERMISSION_MODE || 'dontAsk',
-                '--tools',
-                process.env.AGENT_CLAUDE_TOOLS || DEFAULT_CLAUDE_TOOLS,
                 '--allowed-tools',
                 process.env.AGENT_CLAUDE_ALLOWED_TOOLS || DEFAULT_CLAUDE_ALLOWED_TOOLS,
                 '--disallowed-tools',
                 process.env.AGENT_CLAUDE_DISALLOWED_TOOLS || DEFAULT_CLAUDE_DISALLOWED_TOOLS,
             ];
+            if (process.env.AGENT_CLAUDE_TOOLS) {
+                args.push('--tools', process.env.AGENT_CLAUDE_TOOLS);
+            }
             if (useBare) {
                 args.splice(2, 0, '--bare');
             } else {
@@ -1110,9 +1113,7 @@ export class AgentRuntimeService {
             const agentsDir = path.join(workdir, '.agents');
             this.ensureDirectory(agentsDir);
             this.ensureRuntimeCopy(coreSkills, path.join(agentsDir, 'skills'), 'dir');
-            // Temporary compatibility copy for local inspection and older smoke
-            // checks; Codex discovers product skills through `.agents/skills`.
-            this.ensureRuntimeCopy(coreSkills, path.join(workdir, 'skills'), 'dir');
+            fs.rmSync(path.join(workdir, 'skills'), { recursive: true, force: true });
         }
         return workdir;
     }

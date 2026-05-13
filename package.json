@@ -30,6 +30,7 @@
     "test:agents:real-osint-scenarios": "node tests/agent-real-osint-scenarios.mjs",
     "test:agents:real-analytic-osint": "node tests/agent-real-analytic-osint-scenarios.mjs",
     "test:agents:real-claude": "node tests/agent-real-claude-smoke.mjs",
+    "test:agents:real-codex": "node tests/agent-real-codex-smoke.mjs",
     "test:agents:real-browser": "node tests/agent-real-browser-product-smoke.mjs",
     "test:agents:real-hormuz-demo": "node tests/agent-real-hormuz-marketing-browser.mjs",
     "test:agents:real-demo-browser": "node tests/agent-real-demo-browser-scenarios.mjs",

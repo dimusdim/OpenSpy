@@ -45,6 +45,15 @@ Use this skill when the task requires data from OpenSpy.
 7. Report data limitations explicitly and attach them to the affected finding.
 8. Treat missing rows as missing local coverage, not proof that no real-world
    event happened.
+   Sparse or absent observations are still analytically useful when checked
+   against controls. For live/current tracking layers, compare the AOI with
+   global ingest recency, adjacent control areas, prior local baseline, or
+   another relevant layer before interpreting the absence. If the AOI goes quiet
+   while the control is alive, present it as an observed anomaly such as an
+   suppressed signal, avoidance pattern, coverage gap, or operational
+   disruption according to the source semantics. Do not make the main
+   conclusion "there is no data"; extract the strongest insight supported by
+   the pattern and put limitations after that insight.
 9. Do not make provider-side absence claims for sources such as GFW,
    Cloudflare, ACLED or imagery unless a visible tool call checked that source
    or layer for the same AOI/window. If only local rows were queried, describe
@@ -66,6 +75,11 @@ In product OSINT runs, call one direct OpenSpy entrypoint per Bash tool call.
 Do not pipe, redirect, chain commands, create temporary files, or read internal
 harness `tool-results`, `/private/tmp/*/tasks/*.output`, or similar files to
 post-process JSON.
+When the shell tool supports a wait/yield parameter, give OpenSpy CLI commands
+enough time to finish, normally at least 10 seconds. If a command returns a live
+session id or says it is still running, poll that same session with the shell
+continuation tool until it reaches a terminal exit code before using the
+result, starting dependent commands, or finalizing the answer.
 Python/jq are acceptable only when the active harness explicitly grants them as tools; otherwise use the visible JSON result or a semantic OpenSpy command.
 If a source result was clipped or unclear, rerun the relevant OpenSpy tool with a
 narrower AOI/window/query instead of reading internal task files.
@@ -94,6 +108,15 @@ When the user names a place, use `resolver region` instead of asking for
 coordinates. When the user says "here", call
 `./tools/worldview-cli.sh view request_context`; it returns the current
 camera, ground target and visible bbox captured at Send time.
+Use one primary analysis AOI for the main findings, counts, selections and
+replay. This is an analyst-chosen evidence scope for the current run, not a
+fixed product boundary. Derive it from the user's explicit place, current view
+context, selected object/corridor, or resolver output for the named place. You
+remain free to widen, narrow or add controls when the evidence requires it; just
+keep the main counts tied to the primary AOI you report.
+Sub-AOIs are allowed for chokepoints, port approaches, anchorages or corridors,
+but label them as sub-AOIs and do not compare or merge counts from different
+AOIs as if they were the same evidence set.
 If the visible bbox is much wider than the task, narrow the AOI with the named
 place, ground target, corridor/asset context, or `resolver region` before
 making local data claims. Keep raw bbox tuples and numeric AOI coordinate
@@ -403,11 +426,18 @@ give a fixed time window:
 
 Use data tools to do the work, then answer in final-state language:
 
-- what local coverage contains
+- what local coverage contains and what pattern or anomaly it implies
 - which rows/entities/events/assets were found
 - which interpretation is direct evidence and which is correlation
 - what confidence limits come from coverage, provider status or source cadence
 - what map/replay actions were prepared
+
+If a user asked for insight, do not lead with apologies, "no data", or a generic
+request for more sources. Lead with the operational interpretation supported by
+the available OpenSpy evidence. State the observed pattern, the control check
+that makes it meaningful, and the plausible interpretations. Mention extra
+sources only as confidence boundaries or when the user asks for follow-up
+collection.
 
 Avoid turning the final answer into a command transcript. If a tool path needs a
 retry or an alternate entrypoint, the user should see the relevant data outcome,
