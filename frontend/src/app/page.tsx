@@ -1,20 +1,19 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import dynamic from 'next/dynamic';
-import { Settings } from 'lucide-react';
+import { Activity, Bot, ChevronDown, ChevronUp, History, Image as ImageIcon, Layers, Settings, Sparkles, X } from 'lucide-react';
 import TimelinePlayer from '../components/TimelinePlayer';
 import SearchBar from '../components/SearchBar';
 import Legend from '../components/Legend';
 import EntityHUD from '../components/EntityHUD';
-import TileModeToggle from '../components/TileModeToggle';
 import TrackReplay from '../components/TrackReplay';
 import CameraHUD from '../components/CameraHUD';
 import SettingsPanel from '../components/SettingsPanel';
 import SystemStorageStatus from '../components/SystemStorageStatus';
 import RenderPerfStatus from '../components/RenderPerfStatus';
-import AIImagePanel, { AIImageToggle } from '../components/AIImagePanel';
-import AgentPanel, { AgentToggle } from '../components/AgentPanel';
-import ImageryPanel, { ImageryContextBadge, ImageryToggle } from '../components/ImageryPanel';
+import AIImagePanel from '../components/AIImagePanel';
+import AgentPanel from '../components/AgentPanel';
+import ImageryPanel, { ImageryContextBadge } from '../components/ImageryPanel';
 import { useAIImageStore } from '../store/useAIImageStore';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { useStatusPoller } from '../hooks/useStatusPoller';
@@ -24,13 +23,43 @@ const GlobeDynamic = dynamic(() => import('../components/Globe'), {
   ssr: false,
 });
 
+type LeftDock = 'layers' | 'imagery' | 'replay' | null;
+type RightDock = 'agent' | 'vision' | 'status' | null;
+type OpenSpyWindow = Window & {
+  __openspyTimelineStore?: typeof useTimelineStore;
+};
+
 export default function Home() {
   const aiActive = useAIImageStore((s) => s.isActive);
+  const setAIActive = useAIImageStore((s) => s.setActive);
+  const sources = useTimelineStore((s) => s.sources);
+  const visibility = useTimelineStore((s) => s.visibility);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [agentsOpen, setAgentsOpen] = useState(false);
-  const [imageryOpen, setImageryOpen] = useState(false);
+  const [activeLeft, setActiveLeft] = useState<LeftDock>('layers');
+  const [activeRight, setActiveRight] = useState<RightDock>('agent');
+  const [timelineHidden, setTimelineHidden] = useState(false);
   const [settingsHydrated, setSettingsHydrated] = useState(false);
   const [uiMounted, setUiMounted] = useState(false);
+  const activeLayerCount = useMemo(() => (
+    Object.keys(visibility).filter((layerKey) => {
+      const layer = layerKey as keyof typeof visibility;
+      return Boolean(visibility[layer]) && Boolean(sources[layer]);
+    }).length
+  ), [sources, visibility]);
+  const leftTitle = activeLeft === 'layers'
+    ? 'Layers'
+    : activeLeft === 'imagery'
+      ? 'Imagery'
+      : activeLeft === 'replay'
+        ? 'Track replay'
+        : '';
+  const rightTitle = activeRight === 'agent'
+    ? 'Agent'
+    : activeRight === 'vision'
+      ? 'AI Vision'
+      : activeRight === 'status'
+        ? 'Status'
+        : '';
 
   // Status polling — always-on, independent of which panels are open
   useStatusPoller();
@@ -85,7 +114,7 @@ export default function Home() {
         if (saved.activeIconSet === 'default' || saved.activeIconSet === 'enhanced') {
           patch.activeIconSet = saved.activeIconSet;
         }
-        if (Object.keys(patch).length > 0) useTimelineStore.setState(patch as any);
+        if (Object.keys(patch).length > 0) useTimelineStore.setState(patch);
       })
       .catch(() => { /* no saved settings, use defaults */ })
       .finally(() => {
@@ -100,66 +129,153 @@ export default function Home() {
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    (window as any).__openspyTimelineStore = useTimelineStore;
+    (window as OpenSpyWindow).__openspyTimelineStore = useTimelineStore;
     return () => {
-      delete (window as any).__openspyTimelineStore;
+      delete (window as OpenSpyWindow).__openspyTimelineStore;
     };
   }, []);
 
+  useEffect(() => {
+    if (!aiActive && activeRight === 'vision') {
+      setActiveRight(null);
+    }
+  }, [activeRight, aiActive]);
+
+  const toggleLeft = (panel: Exclude<LeftDock, null>) => {
+    setActiveLeft((current) => current === panel ? null : panel);
+  };
+
+  const toggleRight = (panel: Exclude<RightDock, null>) => {
+    const next = activeRight === panel ? null : panel;
+    setActiveRight(next);
+    setAIActive(next === 'vision');
+  };
+
   return (
-    <main className="relative w-screen h-screen overflow-hidden bg-zinc-950 text-white selection:bg-cyan-500 selection:text-black">
+    <main className="os-app selection:bg-cyan-500 selection:text-black">
         {settingsHydrated ? <GlobeDynamic /> : null}
 
-        {aiActive ? (
-            /* AI Vision mode — only the panel, globe stays interactive */
-            <AIImagePanel />
-        ) : (
+        {uiMounted ? (
             <>
-                {/* Left column: hierarchical legend (self-positioned top-left) */}
-                {uiMounted ? <Legend /> : null}
-
-                {/* Right column: controls stacked vertically, no overlap */}
-                {uiMounted ? (
-                    <div className="absolute top-4 right-4 z-10 flex flex-col gap-2 max-h-[calc(100vh-100px)] w-80">
-                        <SystemStorageStatus />
-                        <RenderPerfStatus />
-                        <SearchBar />
-                        <TileModeToggle />
-                        <ImageryToggle onClick={() => setImageryOpen(true)} />
-                        <ImageryContextBadge />
-                        <AIImageToggle />
-                        <AgentToggle onClick={() => setAgentsOpen(true)} />
-                        <button
-                            onClick={() => setSettingsOpen(true)}
-                            className="flex items-center gap-2 px-3 py-2 bg-black/70 backdrop-blur-xl border border-zinc-800 rounded-lg text-zinc-400 hover:text-white hover:border-zinc-700 transition-colors text-xs font-mono"
-                            title="Settings"
-                        >
-                            <Settings size={14} />
-                            <span>Settings</span>
-                        </button>
-                        <TrackReplay />
+                <div className="os-topbar">
+                    <div className="os-brand">
+                        <span className="os-brand__dot" />
+                        <span>OpenSpy</span>
+                        <span className="os-brand__sub">R0.1</span>
                     </div>
-                ) : null}
+                    <div className="flex-1" />
+                    <div className="os-topbar__search">
+                        <SearchBar variant="topbar" />
+                    </div>
+                    <div className="flex-1" />
+                    <div className="os-topbar__chips">
+                        <div className="os-chip"><Activity size={12} /> Live OSINT</div>
+                    </div>
+                </div>
 
-                {/* Bottom bar */}
-                {uiMounted ? <TimelinePlayer /> : null}
+                <div className="os-rail os-rail--left">
+                    <div className="os-rail__inner">
+                        <button className="os-rail-btn" data-active={activeLeft === 'layers'} title="Layers" onClick={() => toggleLeft('layers')}>
+                            <Layers size={18} />
+                            {activeLayerCount > 0 && <span className="os-rail-count">{Math.min(activeLayerCount, 99)}</span>}
+                        </button>
+                        <button className="os-rail-btn" data-active={activeLeft === 'imagery'} title="Imagery" onClick={() => toggleLeft('imagery')}>
+                            <ImageIcon size={18} />
+                        </button>
+                        <button className="os-rail-btn" data-active={activeLeft === 'replay'} title="Track replay" onClick={() => toggleLeft('replay')}>
+                            <History size={18} />
+                        </button>
+                        <div className="os-rail__spacer" />
+                        <button className="os-rail-btn" title="Settings" onClick={() => setSettingsOpen(true)}>
+                            <Settings size={18} />
+                        </button>
+                    </div>
+                </div>
 
-                {/* Bottom-left: camera altitude + infra loading */}
-                {uiMounted ? <CameraHUD /> : null}
+                <div className="os-dock os-dock--left" data-open={Boolean(activeLeft)}>
+                    <div className="os-dock__header">
+                        <span className="os-dock__title">{leftTitle}</span>
+                    </div>
+                    <div className="os-dock__body">
+                        {activeLeft === 'layers' && (
+                            <Legend embedded />
+                        )}
+                        {activeLeft === 'imagery' && (
+                            <ImageryPanel isOpen embedded onClose={() => setActiveLeft(null)} />
+                        )}
+                        {activeLeft === 'replay' && (
+                            <div className="p-3">
+                                <TrackReplay />
+                            </div>
+                        )}
+                    </div>
+                </div>
 
-                {/* Overlay: entity info panel */}
-                {uiMounted ? <EntityHUD avoidRightPx={agentsOpen ? 472 : 0} /> : null}
+                <div className="os-rail os-rail--right">
+                    <div className="os-rail__inner">
+                        <button className="os-rail-btn" data-active={activeRight === 'agent'} title="Agent" onClick={() => toggleRight('agent')}>
+                            <Bot size={18} />
+                        </button>
+                        <button className="os-rail-btn" data-active={activeRight === 'vision'} title="AI Vision" onClick={() => toggleRight('vision')}>
+                            <Sparkles size={18} />
+                        </button>
+                        <div className="os-rail__divider" />
+                        <button className="os-rail-btn" data-active={activeRight === 'status'} title="System status" onClick={() => toggleRight('status')}>
+                            <Activity size={18} />
+                        </button>
+                    </div>
+                </div>
 
-                {/* Settings modal */}
-                {uiMounted ? (
-                    <>
-                        <ImageryPanel isOpen={imageryOpen} onClose={() => setImageryOpen(false)} />
-                        <SettingsPanel isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
-                        <AgentPanel isOpen={agentsOpen} onClose={() => setAgentsOpen(false)} />
-                    </>
-                ) : null}
+                <div className="os-dock os-dock--right" data-open={Boolean(activeRight)}>
+                    <div className="os-dock__header">
+                        <span className="os-dock__title">{rightTitle}</span>
+                        <button className="os-rail-btn" style={{ width: 28, height: 28 }} onClick={() => {
+                            setAIActive(false);
+                            setActiveRight(null);
+                        }} title="Close panel">
+                            <X size={14} />
+                        </button>
+                    </div>
+                    <div className={activeRight === 'status' ? 'os-dock__body' : 'os-dock__body os-dock__body--flush'}>
+                        {activeRight === 'agent' && (
+                            <AgentPanel isOpen embedded onClose={() => setActiveRight(null)} />
+                        )}
+                        {activeRight === 'vision' && (
+                            <AIImagePanel embedded />
+                        )}
+                        {activeRight === 'status' && (
+                            <div className="os-status-dock">
+                                <SystemStorageStatus />
+                                <RenderPerfStatus />
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                <div className="os-floating-context">
+                    <ImageryContextBadge />
+                </div>
+
+                <div className="os-bottombar" data-hidden={timelineHidden}>
+                    {!timelineHidden && (
+                        <div className="os-timeline-shell">
+                            <TimelinePlayer embedded />
+                        </div>
+                    )}
+                    <button
+                        className="os-rail-btn border border-zinc-800 bg-[#131315]"
+                        title={timelineHidden ? 'Show timeline' : 'Hide timeline'}
+                        onClick={() => setTimelineHidden((current) => !current)}
+                    >
+                        {timelineHidden ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                    </button>
+                </div>
+
+                <CameraHUD />
+                <EntityHUD avoidRightPx={activeRight ? 384 : 72} />
+                <SettingsPanel isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
             </>
-        )}
+        ) : null}
     </main>
   );
 }

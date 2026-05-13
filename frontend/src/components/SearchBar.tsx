@@ -4,7 +4,7 @@ import { useState } from 'react';
 import axios from 'axios';
 import { Search, Loader2 } from 'lucide-react';
 
-export default function SearchBar() {
+export default function SearchBar({ variant = 'floating' }: { variant?: 'floating' | 'topbar' }) {
     const [query, setQuery] = useState('');
     const [loading, setLoading] = useState(false);
 
@@ -28,6 +28,22 @@ export default function SearchBar() {
             setLoading(false);
         }
     };
+
+    if (variant === 'topbar') {
+        return (
+            <form onSubmit={handleSearch} className="os-search">
+                <Search size={14} />
+                <input
+                    id="os-search-input"
+                    type="text"
+                    value={query}
+                    onChange={e => setQuery(e.target.value)}
+                    placeholder="Fly to location, callsign, MMSI, NORAD…"
+                />
+                {loading ? <Loader2 size={14} className="animate-spin" /> : <kbd>/</kbd>}
+            </form>
+        );
+    }
 
     return (
         <div className="w-full">

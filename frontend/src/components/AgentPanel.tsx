@@ -198,6 +198,7 @@ type TrackPoint = {
 type AgentPanelProps = {
     isOpen: boolean;
     onClose: () => void;
+    embedded?: boolean;
 };
 
 function providerLabel(provider: string, providers: ProviderInfo[]): string {
@@ -2687,7 +2688,7 @@ export function AgentToggle({ onClick }: { onClick: () => void }) {
     );
 }
 
-export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
+export default function AgentPanel({ isOpen, onClose, embedded = false }: AgentPanelProps) {
     const [providers, setProviders] = useState<ProviderInfo[]>([]);
     const [sessions, setSessions] = useState<AgentSession[]>([]);
     const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -3815,9 +3816,11 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
         <>
         <div
             data-agent-panel="true"
-            className="absolute top-4 right-4 bottom-4 z-40 w-[min(456px,calc(100vw-24px))] rounded-lg border border-zinc-800 bg-black/85 backdrop-blur-xl shadow-2xl flex flex-col overflow-hidden"
+            className={embedded
+                ? 'relative z-auto flex h-full min-h-0 w-full flex-col overflow-hidden bg-transparent'
+                : 'absolute top-4 right-4 bottom-4 z-40 w-[min(456px,calc(100vw-24px))] rounded-lg border border-zinc-800 bg-black/85 backdrop-blur-xl shadow-2xl flex flex-col overflow-hidden'}
         >
-            <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800">
+            <div className={embedded ? 'hidden' : 'flex items-center justify-between px-3 py-2 border-b border-zinc-800'}>
                 <div className="flex items-center gap-2 min-w-0">
                     <Bot size={15} className="text-cyan-300 shrink-0" />
                     <div className="min-w-0">
@@ -3836,7 +3839,13 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                 </button>
             </div>
 
-            <div ref={sessionPickerRef} className="relative flex gap-2 p-2 border-b border-zinc-800" data-agent-active-session-id={activeSessionId || ''}>
+            <div
+                ref={sessionPickerRef}
+                className={embedded
+                    ? 'flex items-center gap-2 border-b border-zinc-800 px-2 py-1.5'
+                    : 'relative flex gap-2 p-2 border-b border-zinc-800'}
+                data-agent-active-session-id={activeSessionId || ''}
+            >
                 <button
                     type="button"
                     data-agent-session-picker="true"
@@ -3849,16 +3858,19 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                         if (presentationUiLocked) return;
                         setSessionPickerOpen((current) => !current);
                     }}
-                    className="min-w-0 flex-1 flex items-center justify-between gap-2 rounded border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] font-mono text-zinc-300 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                    className={embedded
+                        ? 'btn shrink-0 px-2 py-1 text-[11px] disabled:cursor-not-allowed disabled:opacity-50'
+                        : 'min-w-0 flex-1 flex items-center justify-between gap-2 rounded border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] font-mono text-zinc-300 hover:text-white disabled:cursor-not-allowed disabled:opacity-50'}
                 >
                     <span className="flex min-w-0 items-center gap-1.5">
                         <History size={12} className="shrink-0 text-zinc-500" />
-                        <span className="truncate">{activeSessionTitle}</span>
+                        <span className="truncate">{embedded ? (sessionPickerOpen ? 'Back to chat' : 'History') : activeSessionTitle}</span>
                     </span>
-                    <span className="flex shrink-0 items-center gap-1 text-zinc-500">
+                    <span className={embedded ? 'hidden' : 'flex shrink-0 items-center gap-1 text-zinc-500'}>
                         <ChevronDown size={12} className={sessionPickerOpen ? 'rotate-180 transition-transform' : 'transition-transform'} />
                     </span>
                 </button>
+                {embedded && <span className="flex-1" />}
                 <select
                     data-agent-provider-select="true"
                     value={selectedProvider}
@@ -3881,7 +3893,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                     {loading ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
                     New
                 </button>
-                {sessionPickerOpen && (
+                {!embedded && sessionPickerOpen && (
                     <div
                         id="agent-session-list"
                         role="listbox"
@@ -3944,8 +3956,51 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                 </div>
             )}
 
-            <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
-                {messages.length === 0 ? (
+            <div className={embedded ? 'chat__messages' : 'flex-1 min-h-0 overflow-y-auto p-3 space-y-3'}>
+                {embedded && sessionPickerOpen ? (
+                    <div className="section w-full !border-b-0 !p-0">
+                        <h4>Recent sessions</h4>
+                        {visibleSessions.length === 0 ? (
+                            <div className="py-3 text-[11px] font-mono text-zinc-500">No chats yet</div>
+                        ) : pickerSessions.map((session) => {
+                            const title = sessionPromptTitle(session, messagesBySession[session.agent_session_id] || []);
+                            const running = Boolean(runningRunsBySession[session.agent_session_id]);
+                            const active = session.agent_session_id === activeSessionId;
+                            return (
+                                <button
+                                    key={session.agent_session_id}
+                                    type="button"
+                                    data-agent-session-id={session.agent_session_id}
+                                    data-agent-session-active={active ? 'true' : 'false'}
+                                    disabled={presentationUiLocked}
+                                    onClick={() => {
+                                        if (presentationUiLocked) return;
+                                        setActiveSessionId(session.agent_session_id);
+                                        setSessionPickerOpen(false);
+                                    }}
+                                    className="flex w-full items-start gap-2 border-b border-zinc-900 py-2 text-left last:border-b-0 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    <MessageSquare size={14} className={`mt-0.5 shrink-0 ${active ? 'text-cyan-300' : 'text-zinc-500'}`} />
+                                    <span className="min-w-0 flex-1">
+                                        <span className={`block truncate text-xs ${active ? 'text-cyan-200' : 'text-zinc-300'}`}>{title}</span>
+                                        <span className="mt-0.5 block truncate font-mono text-[10px] text-zinc-500">
+                                            {sessionSecondaryLabel(session, providers)}
+                                        </span>
+                                    </span>
+                                    {running ? <Loader2 size={12} className="mt-0.5 shrink-0 animate-spin text-cyan-300" /> : null}
+                                </button>
+                            );
+                        })}
+                        <button
+                            className="btn mt-3 w-full justify-center"
+                            onClick={() => void createSession(selectedProvider || defaultProvider)}
+                            disabled={loading || availableProviders.length === 0 || presentationUiLocked}
+                        >
+                            {loading ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
+                            New session
+                        </button>
+                    </div>
+                ) : messages.length === 0 ? (
                     <div className="text-[11px] font-mono text-zinc-500 leading-relaxed">
                         Ask an OSINT question. The agent can inspect local data, create replay actions, and return map buttons.
                     </div>
@@ -3959,13 +4014,16 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                     return (
                         <div
                             key={message.agent_message_id}
-                            className={`rounded-lg border px-3 py-2 ${
-                                message.role === 'user'
-                                    ? 'ml-8 border-zinc-700 bg-zinc-900/80 text-zinc-100'
-                                    : 'mr-8 border-zinc-800 bg-zinc-950/80 text-zinc-300'
-                            }`}
+                            className={embedded
+                                ? `chat__bubble ${message.role === 'user' ? 'chat__bubble--user' : 'chat__bubble--ai'}`
+                                : `rounded-lg border px-3 py-2 ${
+                                    message.role === 'user'
+                                        ? 'ml-8 border-zinc-700 bg-zinc-900/80 text-zinc-100'
+                                        : 'mr-8 border-zinc-800 bg-zinc-950/80 text-zinc-300'
+                                }`}
                         >
-                            <div className="mb-1 text-[10px] uppercase font-mono text-zinc-500">
+                            <div className={embedded && message.role !== 'user' ? 'meta' : 'mb-1 text-[10px] uppercase font-mono text-zinc-500'}>
+                                {embedded && message.role !== 'user' ? <Bot size={11} /> : null}
                                 {message.role}
                             </div>
                             {streamParts.length > 0 ? (
@@ -4096,7 +4154,7 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                 )}
             </div>
 
-            <div className="p-2 border-t border-zinc-800">
+            <div className={embedded ? (sessionPickerOpen ? 'hidden' : 'chat__compose') : 'p-2 border-t border-zinc-800'}>
                 <textarea
                     value={draft}
                     onChange={(e) => setDraft(e.target.value)}
@@ -4107,10 +4165,12 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                         }
                     }}
                     placeholder="Ask about vessels, cables, replay, sources..."
-                    className="w-full h-20 resize-none rounded border border-zinc-800 bg-zinc-950 px-2 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 outline-none focus:border-cyan-800"
+                    className={embedded
+                        ? ''
+                        : 'w-full h-20 resize-none rounded border border-zinc-800 bg-zinc-950 px-2 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 outline-none focus:border-cyan-800'}
                 />
-                <div className="mt-2 flex items-center justify-between gap-2">
-                    <div className="text-[10px] font-mono text-zinc-600">
+                <div className={embedded ? 'contents' : 'mt-2 flex items-center justify-between gap-2'}>
+                    <div className={embedded ? 'hidden' : 'text-[10px] font-mono text-zinc-600'}>
                         {runningRunId ? 'running' : Object.keys(runningRunsBySession).length > 0 ? `${Object.keys(runningRunsBySession).length} running in background` : 'ready'}
                     </div>
                     {runningRunId ? (
@@ -4125,10 +4185,12 @@ export default function AgentPanel({ isOpen, onClose }: AgentPanelProps) {
                         <button
                             onClick={() => void sendMessage()}
                             disabled={!draft.trim() || (!activeSessionId && availableProviders.length === 0)}
-                            className="flex items-center gap-1.5 px-3 py-1.5 rounded bg-cyan-950/60 border border-cyan-900 text-[11px] font-mono text-cyan-100 hover:border-cyan-500 disabled:opacity-50"
+                            className={embedded
+                                ? 'disabled:cursor-not-allowed disabled:opacity-50'
+                                : 'flex items-center gap-1.5 px-3 py-1.5 rounded bg-cyan-950/60 border border-cyan-900 text-[11px] font-mono text-cyan-100 hover:border-cyan-500 disabled:opacity-50'}
                         >
                             <Send size={12} />
-                            Send
+                            {!embedded && 'Send'}
                         </button>
                     )}
                 </div>

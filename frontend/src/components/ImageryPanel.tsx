@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import * as Cesium from 'cesium';
 import { Image as ImageIcon, Layers, Loader2, Search, SlidersHorizontal, X } from 'lucide-react';
 import { API_URL } from '../lib/config';
@@ -23,11 +23,20 @@ type ImageryScene = {
     bbox_order?: string;
     render_supported?: boolean;
     render_unsupported_reason?: string | null;
-    render?: Record<string, any> | null;
+    render?: Record<string, unknown> | null;
     action_payloads?: {
-        show_layer?: { payload: Record<string, any> };
-        show_scene?: { payload: Record<string, any> };
+        show_layer?: { payload: Record<string, unknown> };
+        show_scene?: { payload: Record<string, unknown> };
     };
+};
+
+type TimelineSnapshot = {
+    visibility: ReturnType<typeof useTimelineStore.getState>['visibility'];
+    subtypeVisibility: ReturnType<typeof useTimelineStore.getState>['subtypeVisibility'];
+    tileMode: ReturnType<typeof useTimelineStore.getState>['tileMode'];
+    showTrajectories: boolean;
+    activeFilter: ReturnType<typeof useTimelineStore.getState>['activeFilter'];
+    activePreset: ReturnType<typeof useTimelineStore.getState>['activePreset'];
 };
 
 const MAX_IMAGERY_AOI_SPAN_DEG = 4.5;
@@ -51,7 +60,7 @@ function boundedBboxAround(lat: number, lng: number): [number, number, number, n
 
 function getViewer(): Cesium.Viewer | null {
     if (typeof window === 'undefined') return null;
-    return (window as any).viewerContext || null;
+    return (window as Window & { viewerContext?: Cesium.Viewer }).viewerContext || null;
 }
 
 function currentViewBbox(): [number, number, number, number] | null {
@@ -101,7 +110,12 @@ function sceneLabel(scene: ImageryScene): string {
     return `${provider} ${date}${layer ? ` · ${layer}` : ''}${cloud}`;
 }
 
-function sceneActionPayload(scene: ImageryScene, fallback: Record<string, any>): Record<string, any> {
+function sceneKey(scene: ImageryScene | null, index: number): string | null {
+    if (!scene) return null;
+    return scene.scene_id || `${scene.source || scene.provider || 'imagery'}:${scene.datetime || scene.date || 'latest'}:${index}`;
+}
+
+function sceneActionPayload(scene: ImageryScene, fallback: Record<string, unknown>): Record<string, unknown> {
     return scene.action_payloads?.show_scene?.payload
         || scene.action_payloads?.show_layer?.payload
         || {
@@ -115,6 +129,35 @@ function sceneActionPayload(scene: ImageryScene, fallback: Record<string, any>):
         };
 }
 
+function normalizeSceneBbox(raw: unknown, order?: string | null): [number, number, number, number] | null {
+    const bbox = Array.isArray(raw) ? raw.map(Number) : null;
+    if (!bbox || bbox.length !== 4 || bbox.some((value) => !Number.isFinite(value))) return null;
+    const normalizedOrder = String(order || 'west,south,east,north').toLowerCase();
+    const [a, b, c, d] = bbox;
+    return normalizedOrder.includes('south,west,north,east')
+        ? [b, a, d, c]
+        : [a, b, c, d];
+}
+
+function flyToImageryPayload(viewer: Cesium.Viewer, payload: Record<string, unknown>) {
+    const scene = payload.scene && typeof payload.scene === 'object'
+        ? payload.scene as Record<string, unknown>
+        : null;
+    const render = scene?.render && typeof scene.render === 'object'
+        ? scene.render as Record<string, unknown>
+        : null;
+    const bbox = normalizeSceneBbox(
+        payload.bbox || scene?.bbox || render?.bbox,
+        String(payload.bbox_order || scene?.bbox_order || render?.bbox_order || 'west,south,east,north'),
+    );
+    if (!bbox) return;
+    const [west, south, east, north] = bbox;
+    viewer.camera.flyTo({
+        destination: Cesium.Rectangle.fromDegrees(west, south, east, north),
+        duration: 0.8,
+    });
+}
+
 function offsetIsoDate(value: string | undefined | null, days: number): string {
     const date = value ? new Date(value) : new Date();
     if (Number.isNaN(date.getTime())) return isoDaysAgo(days);
@@ -126,12 +169,16 @@ function copernicusCollectionForLayer(layer: string): string {
     return layer === 'radar_vv' ? 'sentinel-1-grd' : 'sentinel-2-l2a';
 }
 
+function errorMessage(error: unknown, fallback: string): string {
+    return error instanceof Error ? error.message : fallback;
+}
+
 export function ImageryToggle({ onClick }: { onClick: () => void }) {
     return (
         <button
             onClick={onClick}
             title="Fresh satellite imagery"
-            className="flex items-center gap-1.5 px-3 py-2 text-xs font-mono rounded-lg border shadow-2xl backdrop-blur-xl transition-colors bg-black/80 text-zinc-500 hover:text-zinc-300 border-zinc-800"
+            className="flex items-center gap-1.5 rounded-md border border-zinc-800 bg-black/80 px-3 py-2 font-mono text-xs text-zinc-500 shadow-2xl backdrop-blur-xl transition-colors hover:border-zinc-700 hover:text-zinc-300"
         >
             <ImageIcon size={14} />
             <span>Imagery</span>
@@ -149,8 +196,8 @@ export function ImageryContextBadge() {
     const replayMismatch = mode === 'playback' && context.acquisitionLabel !== replayDate;
 
     return (
-        <div className="rounded-lg border border-cyan-900/70 bg-black/80 px-3 py-2 text-[11px] leading-relaxed text-zinc-400 shadow-2xl backdrop-blur-xl">
-            <div className="flex items-center gap-1.5 font-mono uppercase text-cyan-200">
+        <div className="rounded-md border border-cyan-900/70 bg-black/80 px-3 py-2 text-[11px] leading-relaxed text-zinc-400 shadow-2xl backdrop-blur-xl">
+            <div className="flex items-center gap-1.5 font-mono uppercase tracking-wider text-cyan-200">
                 <ImageIcon size={13} />
                 <span>Imagery context</span>
             </div>
@@ -166,22 +213,24 @@ export function ImageryContextBadge() {
     );
 }
 
-export default function ImageryPanel({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
+export default function ImageryPanel({ isOpen, onClose, embedded = false }: { isOpen: boolean; onClose: () => void; embedded?: boolean }) {
     const tileMode = useTimelineStore((state) => state.tileMode);
     const setTileMode = useTimelineStore((state) => state.setTileMode);
     const [source, setSource] = useState<ImagerySource>('nasa_gibs');
     const [layer, setLayer] = useState('viirs_true_color');
     const [days, setDays] = useState(7);
     const [maxCloudCover, setMaxCloudCover] = useState(40);
-    const [opacity, setOpacity] = useState(0.72);
+    const [opacity, setOpacity] = useState(1);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [notice, setNotice] = useState<string | null>(null);
     const [scenes, setScenes] = useState<ImageryScene[]>([]);
     const [selectedIndex, setSelectedIndex] = useState(0);
+    const [activeAction, setActiveAction] = useState<{ mode: 'single' | 'compare'; key: string } | null>(null);
+    const focusRestoreRef = useRef<TimelineSnapshot | null>(null);
     const selectedScene = scenes[selectedIndex] || null;
+    const selectedSceneKey = sceneKey(selectedScene, selectedIndex);
     const copernicusRadar = source === 'copernicus' && layer === 'radar_vv';
-    const google3dHidesImageryOverlays = tileMode === 'google';
     const providerNote = useMemo(() => (
         source === 'copernicus'
             ? 'Sentinel search uses backend-owned credentials and cached bounded renders. Sentinel-1 radar works through clouds but is not a natural-color photo.'
@@ -191,21 +240,52 @@ export default function ImageryPanel({ isOpen, onClose }: { isOpen: boolean; onC
     useEffect(() => {
         setScenes([]);
         setSelectedIndex(0);
+        setActiveAction(null);
         setError(null);
         setNotice(null);
     }, [source, layer]);
 
     if (!isOpen) return null;
 
-    const imageryBaseSwitchPayload = () => (
-        google3dHidesImageryOverlays
-            ? { switchBase: true, switch_base: true }
-            : { switchBase: false, switch_base: false }
-    );
+    const imageryBaseSwitchPayload = () => ({ switchBase: true, switch_base: true });
 
-    const noteBaseSwitchIfNeeded = () => {
-        if (!google3dHidesImageryOverlays) return;
-        setNotice('Google 3D hides globe imagery overlays. Switched to MODIS base imagery so this satellite snapshot is visible.');
+    const enterImageryFocus = (label: string) => {
+        const timeline = useTimelineStore.getState();
+        if (!focusRestoreRef.current) {
+            focusRestoreRef.current = {
+                visibility: { ...timeline.visibility },
+                subtypeVisibility: { ...timeline.subtypeVisibility },
+                tileMode: timeline.tileMode,
+                showTrajectories: timeline.showTrajectories,
+                activeFilter: timeline.activeFilter,
+                activePreset: timeline.activePreset,
+            };
+        }
+        const hiddenVisibility = Object.keys(timeline.visibility).reduce((next, key) => {
+            next[key as keyof typeof timeline.visibility] = false;
+            return next;
+        }, { ...timeline.visibility });
+        useTimelineStore.setState({
+            visibility: hiddenVisibility,
+            showTrajectories: false,
+            tileMode: 'modis',
+            activeFilter: { type: 'solo', label },
+            activePreset: null,
+        });
+    };
+
+    const restoreImageryFocus = () => {
+        const snapshot = focusRestoreRef.current;
+        focusRestoreRef.current = null;
+        if (!snapshot) return;
+        useTimelineStore.setState({
+            visibility: snapshot.visibility,
+            subtypeVisibility: snapshot.subtypeVisibility,
+            tileMode: snapshot.tileMode,
+            showTrajectories: snapshot.showTrajectories,
+            activeFilter: snapshot.activeFilter,
+            activePreset: snapshot.activePreset,
+        });
     };
 
     const search = async () => {
@@ -249,14 +329,14 @@ export default function ImageryPanel({ isOpen, onClose }: { isOpen: boolean; onC
             if (json.status !== 'ok') {
                 throw new Error(json.warnings?.[0] || `Imagery source is ${json.status}`);
             }
-            const found = Array.isArray(json.data?.scenes)
+            const found: ImageryScene[] = Array.isArray(json.data?.scenes)
                 ? json.data.scenes
                 : json.data?.scene ? [json.data.scene] : [];
             setScenes(found);
             setSelectedIndex(0);
             if (found.length === 0) setError('No scenes returned for the current view and time window.');
-        } catch (err: any) {
-            setError(err?.message || 'Imagery search failed');
+        } catch (err: unknown) {
+            setError(errorMessage(err, 'Imagery search failed'));
         } finally {
             setLoading(false);
         }
@@ -276,9 +356,13 @@ export default function ImageryPanel({ isOpen, onClose }: { isOpen: boolean; onC
             }
             setError(null);
             showOpenSpyImageryLayer(viewer, { ...payload, ...imageryBaseSwitchPayload(), opacity });
-            noteBaseSwitchIfNeeded();
-        } catch (err: any) {
-            setError(err?.message || 'Failed to show imagery');
+            flyToImageryPayload(viewer, payload);
+            const key = selectedSceneKey || sceneLabel(selectedScene);
+            enterImageryFocus(`Imagery: ${sceneLabel(selectedScene)}`);
+            setActiveAction({ mode: 'single', key });
+            setNotice('Satellite imagery focus is active. Other map layers, clouds, trajectories and 3D tiles are hidden until Clear.');
+        } catch (err: unknown) {
+            setError(errorMessage(err, 'Failed to show imagery'));
         }
     };
 
@@ -318,9 +402,13 @@ export default function ImageryPanel({ isOpen, onClose }: { isOpen: boolean; onC
                 after: { ...after, opacity },
                 ...baseSwitchPayload,
             });
-            noteBaseSwitchIfNeeded();
-        } catch (err: any) {
-            setError(err?.message || 'Failed to compare imagery');
+            flyToImageryPayload(viewer, after);
+            const key = selectedSceneKey || sceneLabel(selectedScene);
+            enterImageryFocus(`Imagery compare: ${sceneLabel(selectedScene)}`);
+            setActiveAction({ mode: 'compare', key });
+            setNotice('Satellite imagery comparison is active. Other map layers, clouds, trajectories and 3D tiles are hidden until Clear.');
+        } catch (err: unknown) {
+            setError(errorMessage(err, 'Failed to compare imagery'));
         }
     };
 
@@ -328,119 +416,156 @@ export default function ImageryPanel({ isOpen, onClose }: { isOpen: boolean; onC
         const viewer = getViewer();
         if (!viewer) return;
         clearOpenSpyImageryLayers(viewer);
+        restoreImageryFocus();
+        setActiveAction(null);
         setNotice(null);
         viewer.scene.requestRender();
     };
 
     return (
-        <div className="fixed inset-0 z-40 pointer-events-none">
-            <div className="absolute top-4 right-[21rem] w-[22rem] max-w-[calc(100vw-2rem)] pointer-events-auto rounded-lg border border-zinc-800 bg-black/90 backdrop-blur-xl shadow-2xl text-zinc-200">
-                <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
-                    <div className="flex items-center gap-2 text-xs font-mono uppercase tracking-wide text-zinc-400">
-                        <Layers size={14} />
-                        <span>Imagery</span>
+        <div className={embedded ? 'flex h-full min-h-0 flex-col text-zinc-200' : 'fixed inset-0 z-40 pointer-events-none'}>
+            <div className={embedded
+                ? 'flex h-full min-h-0 flex-col overflow-hidden bg-transparent text-zinc-200'
+                : 'absolute right-[21rem] top-4 max-h-[calc(100vh-2rem)] w-[23rem] max-w-[calc(100vw-2rem)] overflow-hidden rounded-lg border border-zinc-800 bg-[#131315]/95 text-zinc-200 shadow-[0_24px_80px_rgba(0,0,0,0.5)] backdrop-blur-xl pointer-events-auto'}
+            >
+                <div className={embedded ? 'hidden' : 'flex items-center justify-between border-b border-zinc-800 px-3 py-2.5'}>
+                    <div className="min-w-0">
+                        <div className="flex items-center gap-2 font-mono text-xs uppercase tracking-wider text-zinc-300">
+                            <Layers size={14} className="text-cyan-300" />
+                            <span>Imagery</span>
+                        </div>
+                        <div className="mt-0.5 truncate text-[10px] text-zinc-600">
+                            Current map view · {scenes.length > 0 ? `${scenes.length} scenes` : 'no scene selected'}
+                        </div>
                     </div>
-                    <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200" title="Close imagery panel">
+                    <button onClick={onClose} className="flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200" title="Close imagery panel">
                         <X size={15} />
                     </button>
                 </div>
 
-                <div className="space-y-3 p-3 text-xs">
-                    <div className="grid grid-cols-2 gap-2">
+                <div className={embedded ? 'min-h-0 flex-1 overflow-y-auto text-xs' : 'max-h-[calc(100vh-5rem)] overflow-y-auto text-xs'}>
+                    <div className="border-b border-zinc-800 p-3">
+                        <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-zinc-500">Source</div>
+                        <div className="flex overflow-hidden rounded border border-zinc-800">
                         <button
                             onClick={() => { setSource('nasa_gibs'); setLayer('viirs_true_color'); }}
-                            className={`rounded border px-2 py-2 text-left ${source === 'nasa_gibs' ? 'border-cyan-500 bg-cyan-950/40 text-cyan-100' : 'border-zinc-800 bg-zinc-950/70 text-zinc-400 hover:text-zinc-200'}`}
+                                className={`flex-1 border-r border-zinc-800 px-3 py-2 text-center font-mono text-[11px] transition-colors ${source === 'nasa_gibs' ? 'bg-cyan-950/40 text-cyan-200' : 'bg-black/25 text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300'}`}
                         >
                             NASA GIBS
                         </button>
                         <button
                             onClick={() => { setSource('copernicus'); setLayer('true_color'); }}
-                            className={`rounded border px-2 py-2 text-left ${source === 'copernicus' ? 'border-cyan-500 bg-cyan-950/40 text-cyan-100' : 'border-zinc-800 bg-zinc-950/70 text-zinc-400 hover:text-zinc-200'}`}
+                                className={`flex-1 px-3 py-2 text-center font-mono text-[11px] transition-colors ${source === 'copernicus' ? 'bg-cyan-950/40 text-cyan-200' : 'bg-black/25 text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300'}`}
                         >
                             Copernicus
                         </button>
+                        </div>
                     </div>
 
-                    <label className="block">
-                        <span className="mb-1 block text-zinc-500">Layer</span>
-                        <select
-                            value={layer}
-                            onChange={(event) => setLayer(event.target.value)}
-                            className="w-full rounded border border-zinc-800 bg-zinc-950 px-2 py-2 text-zinc-200 outline-none focus:border-cyan-600"
-                        >
-                            {source === 'nasa_gibs' ? (
-                                <>
-                                    <option value="viirs_true_color">VIIRS true color</option>
-                                    <option value="viirs_noaa20_true_color">VIIRS NOAA-20 true color</option>
-                                    <option value="viirs_noaa21_true_color">VIIRS NOAA-21 true color</option>
-                                    <option value="modis_true_color">MODIS Terra true color</option>
-                                    <option value="aqua_true_color">MODIS Aqua true color</option>
-                                </>
-                            ) : (
-                                <>
-                                    <option value="true_color">Sentinel-2 true color</option>
-                                    <option value="false_color">Sentinel-2 false color</option>
-                                    <option value="radar_vv">Sentinel-1 radar VV</option>
-                                </>
-                            )}
-                        </select>
-                    </label>
+                    <div className="space-y-3 border-b border-zinc-800 p-3">
+                        <label className="block">
+                            <span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-zinc-500">Layer</span>
+                            <select
+                                value={layer}
+                                onChange={(event) => setLayer(event.target.value)}
+                                className="h-9 w-full rounded border border-zinc-800 bg-black/35 px-2 text-zinc-200 outline-none focus:border-cyan-700"
+                            >
+                                {source === 'nasa_gibs' ? (
+                                    <>
+                                        <option value="viirs_true_color">VIIRS true color</option>
+                                        <option value="viirs_noaa20_true_color">VIIRS NOAA-20 true color</option>
+                                        <option value="viirs_noaa21_true_color">VIIRS NOAA-21 true color</option>
+                                        <option value="modis_true_color">MODIS Terra true color</option>
+                                        <option value="aqua_true_color">MODIS Aqua true color</option>
+                                    </>
+                                ) : (
+                                    <>
+                                        <option value="true_color">Sentinel-2 true color</option>
+                                        <option value="false_color">Sentinel-2 false color</option>
+                                        <option value="radar_vv">Sentinel-1 radar VV</option>
+                                    </>
+                                )}
+                            </select>
+                        </label>
 
-                    <div className="grid grid-cols-3 gap-2">
-                        <label>
-                            <span className="mb-1 block text-zinc-500">Days</span>
-                            <input type="number" min={1} max={14} value={days} onChange={(event) => setDays(Number(event.target.value) || 1)} disabled={source !== 'copernicus'} className="w-full rounded border border-zinc-800 bg-zinc-950 px-2 py-2 text-zinc-200 outline-none focus:border-cyan-600 disabled:text-zinc-700" />
-                        </label>
-                        <label>
-                            <span className="mb-1 block text-zinc-500">Cloud %</span>
-                            <input type="number" min={0} max={100} value={maxCloudCover} onChange={(event) => setMaxCloudCover(Number(event.target.value) || 0)} disabled={source !== 'copernicus' || copernicusRadar} className="w-full rounded border border-zinc-800 bg-zinc-950 px-2 py-2 text-zinc-200 outline-none focus:border-cyan-600 disabled:text-zinc-700" />
-                        </label>
-                        <label>
-                            <span className="mb-1 flex items-center gap-1 text-zinc-500"><SlidersHorizontal size={12} /> Opacity</span>
-                            <input type="number" min={0.1} max={1} step={0.05} value={opacity} onChange={(event) => setOpacity(Number(event.target.value) || 0.72)} className="w-full rounded border border-zinc-800 bg-zinc-950 px-2 py-2 text-zinc-200 outline-none focus:border-cyan-600" />
-                        </label>
+                        <div className="grid grid-cols-3 gap-2">
+                            <label>
+                                <span className="mb-1 block font-mono text-[10px] text-zinc-500">Days</span>
+                                <input type="number" min={1} max={14} value={days} onChange={(event) => setDays(Number(event.target.value) || 1)} disabled={source !== 'copernicus'} className="h-9 w-full rounded border border-zinc-800 bg-black/35 px-2 text-zinc-200 outline-none focus:border-cyan-700 disabled:text-zinc-700" />
+                            </label>
+                            <label>
+                                <span className="mb-1 block font-mono text-[10px] text-zinc-500">Cloud %</span>
+                                <input type="number" min={0} max={100} value={maxCloudCover} onChange={(event) => setMaxCloudCover(Number(event.target.value) || 0)} disabled={source !== 'copernicus' || copernicusRadar} className="h-9 w-full rounded border border-zinc-800 bg-black/35 px-2 text-zinc-200 outline-none focus:border-cyan-700 disabled:text-zinc-700" />
+                            </label>
+                            <label>
+                                <span className="mb-1 flex items-center gap-1 font-mono text-[10px] text-zinc-500"><SlidersHorizontal size={12} /> Opacity</span>
+                                <input type="number" min={0.1} max={1} step={0.05} value={opacity} onChange={(event) => setOpacity(Number(event.target.value) || 0.72)} className="h-9 w-full rounded border border-zinc-800 bg-black/35 px-2 text-zinc-200 outline-none focus:border-cyan-700" />
+                            </label>
+                        </div>
                     </div>
 
-                    <div className="rounded border border-zinc-800 bg-zinc-950/60 px-2 py-2 text-[11px] leading-relaxed text-zinc-500">
+                    <div className="space-y-2 border-b border-zinc-800 p-3">
+                    <div className="rounded border border-zinc-800 bg-zinc-950/70 px-2 py-2 text-[11px] leading-relaxed text-zinc-500">
                         {providerNote}
                     </div>
 
-                    {google3dHidesImageryOverlays && (
-                        <div className="rounded border border-amber-900/60 bg-amber-950/30 px-2 py-2 text-[11px] leading-relaxed text-amber-100">
-                            Google 3D hides satellite overlays. Show or Compare will switch to MODIS base imagery so the selected snapshot is visible.
+                    <div className="rounded border border-cyan-900/50 bg-cyan-950/20 px-2 py-2 text-[11px] leading-relaxed text-cyan-100/80">
+                        <div>Show opens a focused satellite-imagery view: MODIS surface on, other map layers off, selected scene overlaid on the current AOI.</div>
+                        {tileMode !== 'modis' && (
+                            <button onClick={() => setTileMode('modis')} className="mt-2 rounded border border-cyan-800/60 bg-black/30 px-2 py-1 font-mono text-[10px] uppercase tracking-wider text-cyan-100 hover:bg-cyan-900/30">
+                                Preview MODIS surface
+                            </button>
+                        )}
+                    </div>
+
+                    {activeAction && (
+                        <div className="rounded border border-cyan-700/70 bg-cyan-950/35 px-2 py-2 text-[11px] leading-relaxed text-cyan-100">
+                            Active: {activeAction.mode === 'compare' ? 'comparison' : 'shown scene'}.
                         </div>
                     )}
 
                     <div className="flex gap-2">
-                        <button onClick={search} disabled={loading} className="flex flex-1 items-center justify-center gap-2 rounded border border-cyan-700 bg-cyan-950/40 px-3 py-2 text-cyan-100 hover:bg-cyan-900/50 disabled:opacity-50">
+                        <button onClick={search} disabled={loading} className="flex flex-1 items-center justify-center gap-2 rounded border border-cyan-700/70 bg-cyan-950/40 px-3 py-2 text-cyan-100 hover:bg-cyan-900/50 disabled:opacity-50">
                             {loading ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
                             <span>Find latest</span>
                         </button>
-                        <button onClick={showSelected} disabled={!selectedScene || (source === 'copernicus' && selectedScene.render_supported === false)} className="rounded border border-zinc-700 bg-zinc-900 px-3 py-2 text-zinc-200 hover:bg-zinc-800 disabled:opacity-40">
-                            Show
+                        <button
+                            onClick={showSelected}
+                            disabled={!selectedScene || (source === 'copernicus' && selectedScene.render_supported === false)}
+                            className={`rounded border px-3 py-2 transition-colors disabled:opacity-40 ${
+                                activeAction?.mode === 'single' && activeAction.key === selectedSceneKey
+                                    ? 'border-cyan-500 bg-cyan-800/50 text-cyan-50 shadow-[0_0_0_1px_rgba(34,211,238,0.25)]'
+                                    : 'border-zinc-700 bg-zinc-900 text-zinc-200 hover:bg-zinc-800'
+                            }`}
+                        >
+                            {activeAction?.mode === 'single' && activeAction.key === selectedSceneKey ? 'Shown' : 'Show'}
                         </button>
-                        <button onClick={compareSelected} disabled={!selectedScene || (source === 'copernicus' && selectedScene.render_supported === false)} className="rounded border border-zinc-700 bg-zinc-900 px-3 py-2 text-zinc-200 hover:bg-zinc-800 disabled:opacity-40">
-                            Compare
+                        <button
+                            onClick={compareSelected}
+                            disabled={!selectedScene || (source === 'copernicus' && selectedScene.render_supported === false)}
+                            className={`rounded border px-3 py-2 transition-colors disabled:opacity-40 ${
+                                activeAction?.mode === 'compare' && activeAction.key === selectedSceneKey
+                                    ? 'border-purple-500 bg-purple-800/50 text-purple-50 shadow-[0_0_0_1px_rgba(168,85,247,0.25)]'
+                                    : 'border-zinc-700 bg-zinc-900 text-zinc-200 hover:bg-zinc-800'
+                            }`}
+                        >
+                            {activeAction?.mode === 'compare' && activeAction.key === selectedSceneKey ? 'Comparing' : 'Compare'}
                         </button>
                         <button onClick={clear} className="rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-zinc-400 hover:text-zinc-100">
                             Clear
                         </button>
                     </div>
+                    </div>
 
-                    {source === 'nasa_gibs' && (
-                        <button onClick={() => setTileMode('modis')} className="w-full rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-zinc-400 hover:text-zinc-100">
-                            Set MODIS as base imagery
-                        </button>
-                    )}
-
+                    <div className="space-y-2 p-3">
                     {error && <div className="rounded border border-red-900/70 bg-red-950/40 px-2 py-2 text-red-200">{error}</div>}
                     {notice && <div className="rounded border border-cyan-900/70 bg-cyan-950/30 px-2 py-2 text-cyan-100">{notice}</div>}
 
                     {selectedScene && (
                         <div className="rounded border border-zinc-800 bg-zinc-950/70 px-2 py-2 text-[11px] leading-relaxed text-zinc-500">
-                            <div className="text-zinc-300">{sceneLabel(selectedScene)}</div>
+                            <div className="font-medium text-zinc-200">{sceneLabel(selectedScene)}</div>
                             {selectedScene.scene_id && <div className="truncate">Scene: {selectedScene.scene_id}</div>}
-                            {selectedScene.bbox && <div>AOI render is bounded to the current view.</div>}
+                            {selectedScene.bbox && <div>Rendered for the current map view.</div>}
                             {selectedScene.render_supported === false && (
                                 <div className="mt-1 text-amber-200">{selectedScene.render_unsupported_reason || 'Metadata-only scene.'}</div>
                             )}
@@ -453,13 +578,14 @@ export default function ImageryPanel({ isOpen, onClose }: { isOpen: boolean; onC
                                 <button
                                     key={scene.scene_id || index}
                                     onClick={() => setSelectedIndex(index)}
-                                    className={`w-full rounded border px-2 py-2 text-left leading-snug ${index === selectedIndex ? 'border-cyan-600 bg-cyan-950/30 text-cyan-100' : 'border-zinc-800 bg-zinc-950/70 text-zinc-400 hover:text-zinc-200'}`}
+                                    className={`w-full rounded border px-2 py-2 text-left leading-snug transition-colors ${index === selectedIndex ? 'border-cyan-700/70 bg-cyan-950/30 text-cyan-100' : 'border-zinc-800 bg-zinc-950/70 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200'}`}
                                 >
                                     {sceneLabel(scene)}
                                 </button>
                             ))}
                         </div>
                     )}
+                    </div>
                 </div>
             </div>
         </div>

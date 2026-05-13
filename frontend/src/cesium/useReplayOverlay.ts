@@ -2689,10 +2689,11 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                     lastAppliedTimeRef.current = currentIso;
                     lastAppliedSeekVersionRef.current = replaySeekVersion;
                     layersKeyRef.current = layersKey;
-                    // Intentionally do NOT setReplayHydrating(false) here.
-                    // Primary layers are visible now, but blocking background
-                    // layers are still being fetched+applied in the deferred
-                    // IIFE below.
+                    // `replayHydrating` gates user playback, so release it as
+                    // soon as the first visible replay frame is ready. Deferred
+                    // layers continue hydrating in the background and update
+                    // the globe incrementally; they must not keep Play locked.
+                    setReplayHydrating(false);
                     requestSceneRender();
                     publishReplayStats();
                     replayInteractive = true;
@@ -2716,6 +2717,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                         if (applied && !visibleMarked && !isCancelled()) {
                             visibleMarked = true;
                             markVisibleReplayFrame(currentIso, replaySeekVersion);
+                            releaseReplayInteraction();
                             publishReplayStats();
                             perfLog('replay.first_visible', { layer: layerId, ms: Math.round(t1 - seekStartedAt) });
                         }

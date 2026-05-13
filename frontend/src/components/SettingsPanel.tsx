@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { Settings, X, Radio, Database, Eye, EyeOff, Save, ChevronDown, ChevronRight } from 'lucide-react';
-import { useTimelineStore } from '../store/useTimelineStore';
+import { useTimelineStore, type LayerName } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
 
 // ---------------------------------------------------------------------------
@@ -36,6 +36,52 @@ const getStatusLabel = (status: string) => {
     }
 };
 
+const getStatusBadgeClass = (status: string) => {
+    switch (status) {
+        case 'streaming':
+        case 'limited':
+            return 'border-emerald-700/50 bg-emerald-950/30 text-emerald-300';
+        case 'auth-missing':
+        case 'rate-limited':
+            return 'border-amber-700/50 bg-amber-950/30 text-amber-300';
+        case 'error':
+            return 'border-red-800/60 bg-red-950/40 text-red-300';
+        case 'disabled':
+            return 'border-zinc-700/60 bg-zinc-900/60 text-zinc-500';
+        default:
+            return 'border-zinc-700/60 bg-zinc-900/50 text-zinc-400';
+    }
+};
+
+const formatCount = (value: number | undefined) => (value ?? 0).toLocaleString();
+
+function ToggleSwitch({ enabled, onClick, title, disabled = false }: {
+    enabled: boolean;
+    onClick: () => void;
+    title?: string;
+    disabled?: boolean;
+}) {
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            disabled={disabled}
+            title={title}
+            className={`relative h-4 w-8 shrink-0 rounded-full border transition-colors ${
+                enabled
+                    ? 'border-cyan-500 bg-cyan-500'
+                    : 'border-zinc-700 bg-zinc-800'
+            } ${disabled ? 'cursor-not-allowed opacity-40' : 'hover:border-zinc-500'}`}
+        >
+            <span
+                className={`absolute top-0.5 h-3 w-3 rounded-full transition-transform ${
+                    enabled ? 'translate-x-4 bg-black' : 'translate-x-0.5 bg-zinc-300'
+                }`}
+            />
+        </button>
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Provider definitions — atomic data sources, NOT layer groupings
 // ---------------------------------------------------------------------------
@@ -48,7 +94,7 @@ interface ProviderDef {
     type: string;
     poll: string;
     // Which layer(s) this provider feeds
-    layers: string[];
+    layers: LayerName[];
     // API key env vars (if any)
     envVars?: string[];
     envVarNote?: string;
@@ -114,6 +160,12 @@ interface KeyInfo {
     keys: Record<string, { set: boolean; masked: string }>;
 }
 
+interface ProviderStatus {
+    status: string;
+    count: number;
+    note?: string;
+}
+
 interface SettingsPanelProps {
     isOpen: boolean;
     onClose: () => void;
@@ -150,7 +202,7 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
     // Derive provider status from streamMetrics
     const providerStatuses = useMemo(() => {
-        const result: Record<string, { status: string; count: number; note?: string }> = {};
+        const result: Record<string, ProviderStatus> = {};
         for (const p of PROVIDERS) {
             // Aggregate status from all layers this provider feeds
             let bestStatus = 'connecting';
@@ -185,56 +237,69 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
     if (!isOpen) return null;
 
     const TABS: { key: Tab; label: string; icon: typeof Database }[] = [
-        { key: 'sources', label: 'Data Sources', icon: Database },
+        { key: 'sources', label: 'Sources & keys', icon: Database },
         { key: 'display', label: 'Display', icon: Eye },
     ];
 
     return (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center" onClick={onClose}>
-            <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
-            <div className="relative bg-black/95 backdrop-blur-xl border border-zinc-800 rounded-xl w-full max-w-[750px] h-[70vh] flex shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
-                {/* Left sidebar */}
-                <div className="w-44 shrink-0 border-r border-zinc-800 flex flex-col bg-zinc-900/50">
-                    <div className="flex items-center gap-2 px-4 py-4 border-b border-zinc-800">
-                        <Settings className="w-4 h-4 text-zinc-400" />
-                        <span className="text-xs font-mono font-bold uppercase tracking-widest text-zinc-400">Settings</span>
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4" onClick={onClose}>
+            <div className="absolute inset-0 bg-black/65 backdrop-blur-sm" />
+            <div
+                className="relative flex h-[84vh] w-full max-w-[820px] flex-col overflow-hidden rounded-xl border border-zinc-800 bg-[#131315]/95 text-zinc-100 shadow-[0_24px_80px_rgba(0,0,0,0.55)] backdrop-blur-xl"
+                onClick={e => e.stopPropagation()}
+            >
+                <div className="flex shrink-0 items-center gap-3 border-b border-zinc-800 px-4 py-3">
+                    <div className="flex h-8 w-8 items-center justify-center rounded-md border border-zinc-800 bg-zinc-950 text-cyan-300">
+                        <Settings className="h-4 w-4" />
                     </div>
-                    <nav className="flex-1 py-2">
-                        {TABS.map(t => {
-                            const Icon = t.icon;
-                            return (
-                                <button key={t.key} onClick={() => setTab(t.key)}
-                                    className={`w-full flex items-center gap-2.5 px-4 py-2.5 text-xs font-mono transition-colors ${
-                                        tab === t.key ? 'text-cyan-400 bg-cyan-900/20 border-r-2 border-cyan-400' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50'
-                                    }`}>
-                                    <Icon size={14} />{t.label}
-                                </button>
-                            );
-                        })}
-                    </nav>
+                    <div className="min-w-0 flex-1">
+                        <h2 className="m-0 text-sm font-semibold text-zinc-100">Settings</h2>
+                        <p className="mt-0.5 truncate text-[11px] text-zinc-500">Provider status, source toggles, credentials, and display controls</p>
+                    </div>
+                    <button
+                        onClick={onClose}
+                        className="flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
+                        title="Close settings"
+                    >
+                        <X className="h-4 w-4" />
+                    </button>
                 </div>
-                {/* Right content */}
-                <div className="flex-1 flex flex-col min-w-0">
-                    <div className="flex items-center justify-between px-5 py-3 border-b border-zinc-800 shrink-0">
-                        <h2 className="text-sm font-semibold text-zinc-200">{TABS.find(t => t.key === tab)?.label}</h2>
-                        <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200"><X className="w-4 h-4" /></button>
-                    </div>
-                    <div className="flex-1 overflow-y-auto p-4">
-                        {tab === 'sources' && (
+
+                <div className="flex shrink-0 gap-1 border-b border-zinc-800 px-4">
+                    {TABS.map(t => {
+                        const Icon = t.icon;
+                        return (
+                            <button
+                                key={t.key}
+                                onClick={() => setTab(t.key)}
+                                className={`mb-[-1px] flex items-center gap-2 border-b-2 px-3 py-2 text-xs transition-colors ${
+                                    tab === t.key
+                                        ? 'border-cyan-400 text-zinc-100'
+                                        : 'border-transparent text-zinc-500 hover:text-zinc-200'
+                                }`}
+                            >
+                                <Icon size={13} />
+                                {t.label}
+                            </button>
+                        );
+                    })}
+                </div>
+
+                <div className="min-h-0 flex-1 overflow-y-auto p-4">
+                    {tab === 'sources' && (
                         <SourcesTab providers={PROVIDERS} providerStatuses={providerStatuses} sources={sources} toggleSource={toggleSource} apiKeys={apiKeys}
-                                onKeysChanged={() => { fetch(`${API_URL}/api/keys`).then(r => r.json()).then(d => setApiKeys(d)).catch(() => {}); }} />
-                        )}
-                        {tab === 'display' && (
-                            <DisplayTab
-                                showTrajectories={showTrajectories}
-                                toggleTrajectories={toggleTrajectories}
-                                tileMode={tileMode}
-                                setTileMode={setTileMode}
-                                satelliteRenderLimit={satelliteRenderLimit}
-                                setSatelliteRenderLimit={setSatelliteRenderLimit}
-                            />
-                        )}
-                    </div>
+                            onKeysChanged={() => { fetch(`${API_URL}/api/keys`).then(r => r.json()).then(d => setApiKeys(d)).catch(() => {}); }} />
+                    )}
+                    {tab === 'display' && (
+                        <DisplayTab
+                            showTrajectories={showTrajectories}
+                            toggleTrajectories={toggleTrajectories}
+                            tileMode={tileMode}
+                            setTileMode={setTileMode}
+                            satelliteRenderLimit={satelliteRenderLimit}
+                            setSatelliteRenderLimit={setSatelliteRenderLimit}
+                        />
+                    )}
                 </div>
             </div>
         </div>
@@ -245,7 +310,7 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 // Sources Tab — per-provider rows
 // ---------------------------------------------------------------------------
 function SourcesTab({ providers, providerStatuses, sources, toggleSource, apiKeys, onKeysChanged }: {
-    providers: ProviderDef[]; providerStatuses: Record<string, any>; sources: any; toggleSource: (k: any) => void;
+    providers: ProviderDef[]; providerStatuses: Record<string, ProviderStatus>; sources: Record<LayerName, boolean>; toggleSource: (k: LayerName) => void;
     apiKeys: Record<string, KeyInfo>; onKeysChanged: () => void;
 }) {
     const active = providers.filter(p => providerStatuses[p.id]?.status !== 'auth-missing');
@@ -258,9 +323,9 @@ function SourcesTab({ providers, providerStatuses, sources, toggleSource, apiKey
             ))}
             {needsSetup.length > 0 && (
                 <>
-                    <div className="flex items-center gap-2 pt-2 pb-1">
+                    <div className="flex items-center gap-2 pb-1 pt-3">
                         <div className="flex-1 border-t border-zinc-800" />
-                        <span className="text-[10px] font-mono text-orange-500 uppercase tracking-wider">Needs Setup</span>
+                        <span className="font-mono text-[10px] uppercase tracking-wider text-amber-400">Needs setup</span>
                         <div className="flex-1 border-t border-zinc-800" />
                     </div>
                     {needsSetup.map(p => (
@@ -273,12 +338,18 @@ function SourcesTab({ providers, providerStatuses, sources, toggleSource, apiKey
 }
 
 function ProviderRow({ provider, status, sources, toggleSource, apiKeys, onKeysChanged }: {
-    provider: ProviderDef; status: any; sources: any; toggleSource: (k: any) => void;
+    provider: ProviderDef; status?: ProviderStatus; sources: Record<LayerName, boolean>; toggleSource: (k: LayerName) => void;
     apiKeys: Record<string, KeyInfo>; onKeysChanged: () => void;
 }) {
     const [expanded, setExpanded] = useState(false);
     const st = status?.status || 'connecting';
     const isOn = provider.layers.some(l => sources[l]);
+    const toggleProvider = () => {
+        const next = !isOn;
+        for (const layer of provider.layers) {
+            if (Boolean(sources[layer]) !== next) toggleSource(layer);
+        }
+    };
 
     // Find relevant API key info for this provider
     const providerKeyInfo = useMemo(() => {
@@ -300,34 +371,50 @@ function ProviderRow({ provider, status, sources, toggleSource, apiKeys, onKeysC
     }, [provider.envVars, apiKeys]);
 
     return (
-        <div className={`rounded-lg border transition-colors ${isOn ? 'border-zinc-700/60 bg-zinc-900/30' : 'border-zinc-800/40 bg-zinc-950/30 opacity-60'}`}>
-            <button onClick={() => setExpanded(!expanded)} className="w-full flex items-center gap-2 px-3 py-2.5 text-left hover:bg-zinc-800/30 transition-colors">
-                {expanded ? <ChevronDown size={12} className="text-zinc-600 shrink-0" /> : <ChevronRight size={12} className="text-zinc-600 shrink-0" />}
-                <span className={`w-2 h-2 rounded-full shrink-0 ${getStatusColor(st)}`} />
-                <span className="text-sm text-zinc-200 flex-1 truncate">{provider.name}</span>
-                {provider.free && <span className="text-[8px] font-mono text-green-600 border border-green-800/40 rounded px-1 py-0.5">FREE</span>}
-                <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded border ${
-                    st === 'streaming' ? 'border-green-800/50 text-green-400 bg-green-900/20'
-                    : st === 'auth-missing' ? 'border-orange-800/50 text-orange-400 bg-orange-900/20'
-                    : st === 'error' ? 'border-red-800/50 text-red-400 bg-red-900/20'
-                    : 'border-zinc-700/50 text-zinc-500 bg-zinc-800/20'
-                }`}>{getStatusLabel(st)}</span>
-            </button>
+        <div className={`overflow-hidden rounded-md border transition-colors ${isOn ? 'border-zinc-700/70 bg-zinc-950/60' : 'border-zinc-800/50 bg-black/35 opacity-70'}`}>
+            <div className="flex items-stretch">
+                <button
+                    onClick={() => setExpanded(!expanded)}
+                    className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-zinc-900/60"
+                >
+                    {expanded ? <ChevronDown size={13} className="shrink-0 text-zinc-600" /> : <ChevronRight size={13} className="shrink-0 text-zinc-600" />}
+                    <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${getStatusColor(st)}`} />
+                    <div className="min-w-0 flex-1">
+                        <div className="flex min-w-0 items-center gap-2">
+                            <span className="truncate text-sm font-medium text-zinc-100">{provider.name}</span>
+                            {provider.free && <span className="rounded border border-emerald-800/50 px-1.5 py-0.5 font-mono text-[8px] uppercase tracking-wider text-emerald-400">Free</span>}
+                            <span className={`rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider ${getStatusBadgeClass(st)}`}>{getStatusLabel(st)}</span>
+                        </div>
+                        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[10px] text-zinc-500">
+                            <span><span className="text-zinc-600">objects</span> <span className="text-zinc-300">{formatCount(status?.count)}</span></span>
+                            <span><span className="text-zinc-600">poll</span> <span className="text-zinc-300">{provider.poll}</span></span>
+                            <span><span className="text-zinc-600">layers</span> <span className="text-zinc-300">{provider.layers.join(', ')}</span></span>
+                        </div>
+                    </div>
+                </button>
+                <div className="flex items-center border-l border-zinc-800 px-3">
+                    <ToggleSwitch
+                        enabled={isOn}
+                        onClick={toggleProvider}
+                        title={isOn ? `Disable ${provider.name}` : `Enable ${provider.name}`}
+                    />
+                </div>
+            </div>
 
             {expanded && (
-                <div className="px-4 pb-3 pt-1 space-y-2.5 border-t border-zinc-800/40">
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px]">
-                        <div><span className="text-zinc-600">URL</span><p className="text-zinc-400">{provider.url}</p></div>
-                        <div><span className="text-zinc-600">Type</span><p className="text-zinc-400">{provider.type}</p></div>
-                        <div><span className="text-zinc-600">Poll</span><p className="text-zinc-400">{provider.poll}</p></div>
-                        <div><span className="text-zinc-600">Entities</span><p className="text-zinc-400">{(status?.count ?? 0).toLocaleString()}</p></div>
+                <div className="space-y-3 border-t border-zinc-800/70 px-4 pb-3 pt-3">
+                    <div className="grid grid-cols-2 gap-2 text-[10px] md:grid-cols-4">
+                        <div className="rounded border border-zinc-800 bg-zinc-950/70 px-2 py-1.5"><span className="block text-zinc-600">URL</span><p className="truncate text-zinc-300">{provider.url}</p></div>
+                        <div className="rounded border border-zinc-800 bg-zinc-950/70 px-2 py-1.5"><span className="block text-zinc-600">Type</span><p className="truncate text-zinc-300">{provider.type}</p></div>
+                        <div className="rounded border border-zinc-800 bg-zinc-950/70 px-2 py-1.5"><span className="block text-zinc-600">Poll</span><p className="truncate text-zinc-300">{provider.poll}</p></div>
+                        <div className="rounded border border-zinc-800 bg-zinc-950/70 px-2 py-1.5"><span className="block text-zinc-600">Objects</span><p className="truncate text-zinc-300">{formatCount(status?.count)}</p></div>
                     </div>
-                    <p className="text-[10px] text-zinc-600 leading-relaxed">{provider.description}</p>
+                    <p className="text-[11px] leading-relaxed text-zinc-500">{provider.description}</p>
 
                     {status?.note && (
-                        <div className="flex items-start gap-1.5">
-                            <Radio className="w-3 h-3 text-orange-400 mt-0.5 shrink-0" />
-                            <span className="text-[10px] text-orange-400 break-words">{status.note}</span>
+                        <div className="flex items-start gap-2 rounded border border-amber-900/50 bg-amber-950/20 px-2 py-2">
+                            <Radio className="mt-0.5 h-3 w-3 shrink-0 text-amber-300" />
+                            <span className="break-words text-[10px] text-amber-200">{status.note}</span>
                         </div>
                     )}
 
@@ -338,11 +425,9 @@ function ProviderRow({ provider, status, sources, toggleSource, apiKeys, onKeysC
 
                     {/* Source toggle per layer */}
                     {provider.layers.map(l => (
-                        <div key={l} className="flex items-center justify-between">
-                            <span className="text-[10px] text-zinc-500">{l} layer</span>
-                            <button onClick={() => toggleSource(l)} className={`relative w-8 h-4 rounded-full transition-colors ${sources[l] ? 'bg-green-600' : 'bg-zinc-700'}`}>
-                                <span className={`absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-white transition-transform ${sources[l] ? 'translate-x-4' : ''}`} />
-                            </button>
+                        <div key={l} className="flex items-center justify-between rounded border border-zinc-800 bg-black/25 px-2 py-1.5">
+                            <span className="font-mono text-[10px] text-zinc-500">{l} layer</span>
+                            <ToggleSwitch enabled={Boolean(sources[l])} onClick={() => toggleSource(l)} title={sources[l] ? `Disable ${l}` : `Enable ${l}`} />
                         </div>
                     ))}
                 </div>
@@ -375,20 +460,20 @@ function ApiKeyFields({ envVars, note, registrationUrl, registrationLabel, onKey
     };
 
     return (
-        <div className="space-y-1.5 pt-1 border-t border-zinc-800/40">
-            <div className="text-[9px] font-mono text-zinc-600 uppercase tracking-wider">API Keys</div>
-            {note && <p className="text-[10px] text-zinc-500 leading-relaxed">{note}</p>}
+        <div className="space-y-2 rounded border border-zinc-800 bg-zinc-950/60 p-2">
+            <div className="font-mono text-[9px] uppercase tracking-wider text-zinc-500">API keys</div>
+            {note && <p className="text-[10px] leading-relaxed text-zinc-500">{note}</p>}
             {Object.entries(envVars).map(([envVar, info]) => (
                 <div key={envVar} className="flex items-center gap-2">
-                    <span className="text-[9px] font-mono text-zinc-500 w-36 truncate" title={envVar}>{envVar}</span>
+                    <span className="w-36 truncate font-mono text-[9px] text-zinc-500" title={envVar}>{envVar}</span>
                     <input
                         type={revealed[envVar] ? 'text' : 'password'}
                         value={envVar in editing ? editing[envVar] : (info.set ? info.masked : '')}
                         placeholder={info.set ? '' : 'Not configured'}
                         onChange={e => setEditing(prev => ({ ...prev, [envVar]: e.target.value }))}
-                        className="flex-1 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-[10px] font-mono text-zinc-300 placeholder-zinc-600 focus:outline-none focus:border-cyan-700"
+                        className="h-7 min-w-0 flex-1 rounded border border-zinc-800 bg-black/40 px-2 font-mono text-[10px] text-zinc-300 placeholder-zinc-600 outline-none focus:border-cyan-700"
                     />
-                    <button onClick={() => setRevealed(prev => ({ ...prev, [envVar]: !prev[envVar] }))} className="text-zinc-600 hover:text-zinc-400" title={revealed[envVar] ? 'Hide' : 'Reveal'}>
+                    <button onClick={() => setRevealed(prev => ({ ...prev, [envVar]: !prev[envVar] }))} className="text-zinc-600 hover:text-zinc-300" title={revealed[envVar] ? 'Hide' : 'Reveal'}>
                         {revealed[envVar] ? <EyeOff size={12} /> : <Eye size={12} />}
                     </button>
                 </div>
@@ -396,12 +481,12 @@ function ApiKeyFields({ envVars, note, registrationUrl, registrationLabel, onKey
             {registrationUrl && !Object.values(envVars).every(v => v.set) && (
                 <div className="text-[10px]">
                     <span className="text-zinc-500">Register at </span>
-                    <a href={registrationUrl} target="_blank" rel="noopener noreferrer" className="text-cyan-400 hover:text-cyan-300 underline">{registrationLabel || registrationUrl}</a>
+                    <a href={registrationUrl} target="_blank" rel="noopener noreferrer" className="text-cyan-300 underline hover:text-cyan-200">{registrationLabel || registrationUrl}</a>
                 </div>
             )}
             {hasEdits && (
                 <button onClick={handleSave} disabled={saving}
-                    className="flex items-center gap-1.5 px-2.5 py-1 rounded text-[10px] font-mono uppercase tracking-wider bg-cyan-900/30 text-cyan-400 border border-cyan-700/50 hover:bg-cyan-800/40 disabled:opacity-50 transition-colors">
+                    className="flex items-center gap-1.5 rounded border border-cyan-700/50 bg-cyan-950/40 px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider text-cyan-300 transition-colors hover:bg-cyan-900/50 disabled:opacity-50">
                     <Save size={10} />{saving ? 'Saving...' : 'Save Keys'}
                 </button>
             )}
@@ -431,41 +516,34 @@ function DisplayTab({ showTrajectories, toggleTrajectories, tileMode, setTileMod
         modis: 'MODIS',
     };
     return (
-        <div className="space-y-4">
-            <div className="rounded-lg border border-zinc-800/60 p-3">
-                <label className="flex items-center justify-between cursor-pointer">
+        <div className="space-y-3">
+            <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
+                <label className="flex cursor-pointer items-center justify-between">
                     <div>
-                        <div className="text-sm text-zinc-200">Orbital / Flight Trajectories</div>
-                        <div className="text-[10px] text-zinc-500 mt-0.5">Show vessel wakes and satellite orbital trails</div>
+                        <div className="text-sm text-zinc-100">Orbital / Flight Trajectories</div>
+                        <div className="mt-0.5 text-[10px] text-zinc-500">Show vessel wakes and satellite orbital trails</div>
                     </div>
-                    <button onClick={toggleTrajectories} className={`relative w-8 h-4 rounded-full transition-colors ${showTrajectories ? 'bg-green-600' : 'bg-zinc-700'}`}>
-                        <span className={`absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-white transition-transform ${showTrajectories ? 'translate-x-4' : ''}`} />
-                    </button>
+                    <ToggleSwitch enabled={showTrajectories} onClick={toggleTrajectories} />
                 </label>
             </div>
-            <div className="rounded-lg border border-zinc-800/60 p-3">
-                <div className="text-sm text-zinc-200 mb-2">Base Map</div>
-                <div className="flex gap-2">
+            <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
+                <div className="mb-2 text-sm text-zinc-100">Base Map</div>
+                <div className="flex overflow-hidden rounded border border-zinc-800">
                     {(['google', 'osm', 'modis'] as const).map(mode => (
                         <button key={mode} onClick={() => setTileMode(mode)}
-                            className={`flex-1 px-3 py-2 rounded-md text-xs font-mono uppercase tracking-wider transition-colors ${
-                                tileMode === mode ? 'bg-cyan-900/30 text-cyan-400 border border-cyan-700/50' : 'bg-zinc-900/30 text-zinc-500 border border-zinc-800 hover:text-zinc-300'
+                            className={`flex-1 border-r border-zinc-800 px-3 py-2 font-mono text-xs uppercase tracking-wider transition-colors last:border-r-0 ${
+                                tileMode === mode ? 'bg-cyan-950/40 text-cyan-300' : 'bg-black/25 text-zinc-500 hover:bg-zinc-900/70 hover:text-zinc-300'
                             }`}>{MODE_LABELS[mode]}</button>
                     ))}
                 </div>
             </div>
-            <div className="rounded-lg border border-zinc-800/60 p-3">
+            <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
                 <div className="flex items-start justify-between gap-3">
                     <div>
-                        <div className="text-sm text-zinc-200">Satellite render limit</div>
-                        <div className="text-[10px] text-zinc-500 mt-0.5">Explicit visible cap. Type labels are still derived heuristics from TLE names.</div>
+                        <div className="text-sm text-zinc-100">Satellite render limit</div>
+                        <div className="mt-0.5 text-[10px] text-zinc-500">Explicit visible cap. Type labels are still derived heuristics from TLE names.</div>
                     </div>
-                    <button
-                        onClick={() => setSatelliteRenderLimit(satelliteRenderLimit == null ? 5000 : null)}
-                        className={`relative w-8 h-4 rounded-full transition-colors ${satelliteRenderLimit != null ? 'bg-green-600' : 'bg-zinc-700'}`}
-                    >
-                        <span className={`absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-white transition-transform ${satelliteRenderLimit != null ? 'translate-x-4' : ''}`} />
-                    </button>
+                    <ToggleSwitch enabled={satelliteRenderLimit != null} onClick={() => setSatelliteRenderLimit(satelliteRenderLimit == null ? 5000 : null)} />
                 </div>
                 <div className="mt-3 flex items-center gap-2">
                     <input
@@ -483,7 +561,7 @@ function DisplayTab({ showTrajectories, toggleTrajectories, tileMode, setTileMod
                                 setSatelliteLimitInput(satelliteRenderLimit == null ? '5000' : String(satelliteRenderLimit));
                             }
                         }}
-                        className="w-28 px-3 py-2 rounded-md text-xs font-mono bg-zinc-900/30 text-zinc-200 border border-zinc-800 disabled:opacity-40"
+                        className="w-28 rounded border border-zinc-800 bg-black/30 px-3 py-2 font-mono text-xs text-zinc-200 disabled:opacity-40"
                     />
                     <span className="text-[10px] text-zinc-500">Disable the toggle to render the full visible catalog.</span>
                 </div>
@@ -496,10 +574,10 @@ function DisplayTab({ showTrajectories, toggleTrajectories, tileMode, setTileMod
                                 setSatelliteRenderLimit(value);
                             }}
                             disabled={satelliteRenderLimit == null}
-                            className={`px-3 py-1.5 rounded-md text-[10px] font-mono uppercase tracking-wider transition-colors ${
+                            className={`rounded border px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider transition-colors ${
                                 satelliteRenderLimit === value
-                                    ? 'bg-cyan-900/30 text-cyan-400 border border-cyan-700/50'
-                                    : 'bg-zinc-900/30 text-zinc-500 border border-zinc-800 hover:text-zinc-300 disabled:opacity-40'
+                                    ? 'border-cyan-700/50 bg-cyan-950/40 text-cyan-300'
+                                    : 'border-zinc-800 bg-black/25 text-zinc-500 hover:text-zinc-300 disabled:opacity-40'
                             }`}
                         >
                             {value}

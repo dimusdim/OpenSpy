@@ -189,8 +189,45 @@ function showGibsImageryLayer(viewer: Cesium.Viewer, payload: Record<string, any
     if (Number.isNaN(date.getTime())) throw new Error('imagery.show_layer requires a valid date/time');
     const time = date.toISOString().slice(0, 10);
     const opacity = Number(payload.opacity ?? payload.alpha ?? 0.65);
+    const normalizedBbox = normalizeBboxToOpenSpy(
+        payload.bbox || scene?.bbox || scene?.coverage?.bbox,
+        payload.bbox_order || scene?.bbox_order || scene?.coverage?.bbox_order || 'west,south,east,north',
+    );
 
     if (!viewer.imageryLayers?.addImageryProvider) {
+        return;
+    }
+
+    if (normalizedBbox) {
+        const [west, south, east, north] = normalizedBbox;
+        const renderSize = imageryRenderSizeForBbox(
+            normalizedBbox,
+            Number(payload.maxPixels || payload.max_pixels || 1024),
+        );
+        const params = new URLSearchParams({
+            SERVICE: 'WMS',
+            VERSION: '1.1.1',
+            REQUEST: 'GetMap',
+            LAYERS: layerName,
+            STYLES: '',
+            FORMAT: 'image/png',
+            TRANSPARENT: 'true',
+            BBOX: `${west},${south},${east},${north}`,
+            SRS: 'EPSG:4326',
+            WIDTH: String(renderSize.width),
+            HEIGHT: String(renderSize.height),
+            TIME: time,
+        });
+        const provider = new Cesium.SingleTileImageryProvider({
+            url: `https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?${params.toString()}`,
+            rectangle: bboxToRectangle(normalizedBbox, 'west,south,east,north'),
+            tileWidth: renderSize.width,
+            tileHeight: renderSize.height,
+            credit: `NASA GIBS ${layerName}`,
+        });
+        const imageryLayer = viewer.imageryLayers.addImageryProvider(provider);
+        imageryLayer.alpha = Number.isFinite(opacity) ? Math.max(0, Math.min(opacity, 1)) : 0.65;
+        openSpyImageryLayers.push(imageryLayer);
         return;
     }
 

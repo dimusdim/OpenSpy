@@ -5,7 +5,7 @@ import {
     ShieldAlert, ChevronDown, ChevronRight, PanelRightClose, PanelRight,
     Camera, Zap, Factory, Droplets, Shield, Fuel, WifiOff, Car, Ban,
     Bomb, Swords, Search, X, Globe2, Target, List, Wifi,
-    Anchor, Eye, EyeOff, Skull,
+    Anchor, Eye, EyeOff, Skull, Building2,
 } from 'lucide-react';
 import { useTimelineStore, MISSION_PRESETS } from '../store/useTimelineStore';
 import type { LayerName } from '../store/useTimelineStore';
@@ -263,7 +263,7 @@ for (const d of DOMAIN_TREE) {
 
 type Tab = 'domains' | 'missions' | 'all';
 
-export default function Legend() {
+export default function Legend({ embedded = false }: { embedded?: boolean }) {
     const sources = useTimelineStore(s => s.sources);
     const visibility = useTimelineStore(s => s.visibility);
     const counts = useTimelineStore(s => s.subtypeCounts);
@@ -281,6 +281,10 @@ export default function Legend() {
     const applyMissionPreset = useTimelineStore(s => s.applyMissionPreset);
     const showTrajectories = useTimelineStore(s => s.showTrajectories);
     const toggleTrajectories = useTimelineStore(s => s.toggleTrajectories);
+    const tileMode = useTimelineStore(s => s.tileMode);
+    const setTileMode = useTimelineStore(s => s.setTileMode);
+    const clusteringEnabled = useTimelineStore(s => s.clusteringEnabled);
+    const toggleClustering = useTimelineStore(s => s.toggleClustering);
 
     const [collapsed, setCollapsed] = useState(false);
     const [tab, setTab] = useState<Tab>('domains');
@@ -326,7 +330,24 @@ export default function Legend() {
         );
     }, [searchQuery]);
 
+    const filteredDomains = useMemo(() => {
+        const q = searchQuery.trim().toLowerCase();
+        if (!q) return DOMAIN_TREE;
+        return DOMAIN_TREE
+            .map((domain) => ({
+                ...domain,
+                children: domain.children.filter((layer) => (
+                    domain.label.toLowerCase().includes(q)
+                    || layer.label.toLowerCase().includes(q)
+                    || layer.subtypes.some((sub) => sub.label.toLowerCase().includes(q))
+                    || layer.sources?.some((source) => source.label.toLowerCase().includes(q))
+                )),
+            }))
+            .filter((domain) => domain.children.length > 0);
+    }, [searchQuery]);
+
     if (collapsed) {
+        if (embedded) return null;
         return (
             <button
                 onClick={() => setCollapsed(false)}
@@ -338,10 +359,120 @@ export default function Legend() {
         );
     }
 
+    if (embedded) {
+        return (
+            <div className="flex h-full min-h-0 w-full flex-col bg-transparent text-xs font-medium">
+                <div className="section">
+                    <h4>Mission preset</h4>
+                    <div className="missions">
+                        {MISSION_PRESETS.map((preset) => (
+                            <button
+                                key={preset.name}
+                                type="button"
+                                className="mission-pill"
+                                data-active={activePreset === preset.name ? 'true' : 'false'}
+                                onClick={() => applyMissionPreset(preset.name)}
+                            >
+                                {preset.name}
+                            </button>
+                        ))}
+                    </div>
+                </div>
+
+                <div className="section">
+                    <h4>Base map</h4>
+                    <div className="seg mb-2">
+                        <button data-active={tileMode === 'google' ? 'true' : 'false'} onClick={() => setTileMode('google')}>
+                            <Globe2 size={13} /> Google 3D
+                        </button>
+                        <button data-active={tileMode === 'osm' ? 'true' : 'false'} onClick={() => setTileMode('osm')}>
+                            <Building2 size={13} /> OSM 3D
+                        </button>
+                        <button data-active={tileMode === 'modis' ? 'true' : 'false'} onClick={() => setTileMode('modis')}>
+                            <Satellite size={13} /> MODIS
+                        </button>
+                    </div>
+                    <div className="setting-row py-1.5">
+                        <div className="label">
+                            <b className="!text-xs">Clustering</b>
+                            <small>Merge nearby icons</small>
+                        </div>
+                        <button
+                            type="button"
+                            className="toggle"
+                            data-on={clusteringEnabled ? 'true' : 'false'}
+                            onClick={toggleClustering}
+                            aria-label="Toggle clustering"
+                        />
+                    </div>
+                    <div className="setting-row py-1.5">
+                        <div className="label">
+                            <b className="!text-xs">Trajectories</b>
+                            <small>Past tracks for aircraft / vessels</small>
+                        </div>
+                        <button
+                            type="button"
+                            className="toggle"
+                            data-on={showTrajectories ? 'true' : 'false'}
+                            onClick={toggleTrajectories}
+                            aria-label="Toggle trajectories"
+                        />
+                    </div>
+                </div>
+
+                {activeFilter && (
+                    <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-1.5">
+                        <span className="font-mono text-[10px] text-cyan-400">Filter: {activeFilter.label}</span>
+                        <button onClick={clearFilter} className="text-zinc-500 hover:text-white" title="Clear filter">
+                            <X size={12} />
+                        </button>
+                    </div>
+                )}
+
+                <div className="filter">
+                    <input
+                        value={searchQuery}
+                        onChange={(event) => setSearchQuery(event.target.value)}
+                        placeholder="Filter layers..."
+                    />
+                </div>
+
+                <div className="min-h-0 flex-1 overflow-y-auto">
+                    <DomainsTab
+                        domains={filteredDomains}
+                        forceExpand={Boolean(searchQuery)}
+                        expandedDomains={expandedDomains}
+                        expandedLayers={expandedLayers}
+                        toggleDomain={toggleDomain}
+                        toggleLayerExpand={toggleLayerExpand}
+                        toggleDomainVisibility={toggleDomainVisibility}
+                        sources={sources}
+                        visibility={visibility}
+                        subtypeVisibility={subtypeVisibility}
+                        sourceVisibility={sourceVisibility}
+                        counts={counts}
+                        sourceCounts={sourceCounts}
+                        streamMetrics={streamMetrics}
+                        toggleVisibility={toggleVisibility}
+                        toggleSubtype={toggleSubtype}
+                        toggleSourceVisibility={toggleSourceVisibility}
+                        layerCount={layerCount}
+                        showTrajectories={showTrajectories}
+                        toggleTrajectories={toggleTrajectories}
+                        mode={mode}
+                    />
+                </div>
+            </div>
+        );
+    }
+
     return (
-        <div className="absolute top-4 left-4 z-10 w-80 max-h-[90vh] bg-black/80 backdrop-blur-xl border border-zinc-800 rounded-xl shadow-[0_0_40px_rgba(0,0,0,0.8)] text-xs font-medium flex flex-col">
+        <div className={embedded
+            ? 'h-full min-h-0 w-full bg-transparent text-xs font-medium flex flex-col'
+            : 'absolute top-4 left-4 z-10 w-80 max-h-[90vh] bg-black/80 backdrop-blur-xl border border-zinc-800 rounded-xl shadow-[0_0_40px_rgba(0,0,0,0.8)] text-xs font-medium flex flex-col'}
+        >
             {/* Header */}
-            <div className="flex items-center justify-between p-3 border-b border-zinc-800/60">
+            <div className={embedded ? 'hidden' : 'flex items-center justify-between p-3 border-b border-zinc-800/60'}>
                 <div className="flex items-center gap-1.5">
                     <Radio size={11} className="text-cyan-500" />
                     <span className="text-[10px] uppercase font-mono tracking-widest text-zinc-500 font-bold">Legend</span>
@@ -433,10 +564,13 @@ export default function Legend() {
 // Domains Tab
 // ---------------------------------------------------------------------------
 function DomainsTab({
+    domains = DOMAIN_TREE, forceExpand = false,
     expandedDomains, expandedLayers, toggleDomain, toggleLayerExpand,
     toggleDomainVisibility, sources, visibility, subtypeVisibility, sourceVisibility, counts, sourceCounts, streamMetrics,
     toggleVisibility, toggleSubtype, toggleSourceVisibility, layerCount, showTrajectories, toggleTrajectories, mode,
 }: {
+    domains?: DomainNode[];
+    forceExpand?: boolean;
     expandedDomains: Record<string, boolean>;
     expandedLayers: Record<string, boolean>;
     toggleDomain: (d: string) => void;
@@ -459,8 +593,8 @@ function DomainsTab({
 }) {
     return (
         <div className="p-2 flex flex-col gap-0.5">
-            {DOMAIN_TREE.map(domain => {
-                const isExpanded = expandedDomains[domain.domain] !== false;
+            {domains.map(domain => {
+                const isExpanded = forceExpand || expandedDomains[domain.domain] !== false;
                 const allOn = DOMAIN_LAYERS[domain.domain].every(l => sources[l] && visibility[l]);
                 const someOn = DOMAIN_LAYERS[domain.domain].some(l => sources[l] && visibility[l]);
                 const DomainIcon = domain.icon;

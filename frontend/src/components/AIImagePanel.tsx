@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useCallback, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
     useAIImageStore,
     GalleryEntry,
@@ -139,34 +140,34 @@ function ImageOverlayComparison({
             <img
                 src={beforeSrc}
                 alt="Source"
-                className="absolute inset-0 w-full h-full object-cover"
+                className="absolute inset-0 h-full w-full object-contain object-center"
                 draggable={false}
             />
             <img
                 src={afterSrc}
                 alt="Generated"
-                className="absolute inset-0 w-full h-full object-cover"
+                className="absolute inset-0 h-full w-full object-contain object-center"
                 style={{ opacity: opacityFraction }}
                 draggable={false}
             />
 
             {/* Labels */}
-            <span className="absolute top-4 left-4 px-2 py-1 text-[11px] font-mono text-white/70 bg-black/50 rounded pointer-events-none">
+            <span className="absolute left-4 top-4 z-20 px-2 py-1 text-[11px] font-mono text-white/70 bg-black/50 rounded pointer-events-none">
                 Source
             </span>
-            <span className="absolute top-4 left-20 px-2 py-1 text-[11px] font-mono text-purple-200/80 bg-purple-950/60 rounded pointer-events-none">
+            <span className="absolute left-20 top-4 z-20 px-2 py-1 text-[11px] font-mono text-purple-200/80 bg-purple-950/60 rounded pointer-events-none">
                 Result {overlayOpacity}%
             </span>
 
             <button
                 onClick={(e) => { e.stopPropagation(); onClose(); }}
-                className="absolute top-4 right-4 flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-mono text-zinc-300 bg-black/70 hover:bg-black/90 rounded-lg border border-zinc-700 transition-colors cursor-pointer"
+                className="absolute right-4 top-4 z-20 flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-mono text-zinc-300 bg-black/70 hover:bg-black/90 rounded-lg border border-zinc-700 transition-colors cursor-pointer"
             >
                 <X size={14} />
                 Close
             </button>
 
-            <div className="absolute bottom-5 left-1/2 -translate-x-1/2 w-[min(520px,calc(100vw-32px))] rounded-lg border border-zinc-700 bg-black/75 backdrop-blur-xl px-3 py-2">
+            <div className="absolute bottom-5 left-1/2 z-20 w-[min(560px,calc(100vw-32px))] -translate-x-1/2 rounded-lg border border-zinc-700 bg-black/75 backdrop-blur-xl px-3 py-2">
                 <div className="flex items-center gap-3">
                     <SlidersHorizontal size={14} className="text-purple-300 shrink-0" />
                     <input
@@ -205,7 +206,7 @@ function FullscreenOverlay() {
         return () => document.removeEventListener('keydown', handler);
     }, [entry, setEntry]);
 
-    if (!entry) return null;
+    if (!entry || typeof document === 'undefined') return null;
 
     const originalSrc =
         entry.localScreenshot ||
@@ -218,12 +219,13 @@ function FullscreenOverlay() {
 
     // Both available → comparison slider
     if (originalSrc && generatedSrc) {
-        return (
+        return createPortal(
             <ImageOverlayComparison
                 beforeSrc={originalSrc}
                 afterSrc={generatedSrc}
                 onClose={() => setEntry(null)}
-            />
+            />,
+            document.body,
         );
     }
 
@@ -231,12 +233,12 @@ function FullscreenOverlay() {
     const src = generatedSrc || originalSrc;
     if (!src) return null;
 
-    return (
+    return createPortal(
         <div className="fixed inset-0 z-[9500] bg-black">
             <img
                 src={src}
                 alt="Fullscreen"
-                className="w-full h-full object-cover"
+                className="h-full w-full object-contain object-center"
             />
             <button
                 onClick={() => setEntry(null)}
@@ -245,7 +247,8 @@ function FullscreenOverlay() {
                 <X size={14} />
                 Close
             </button>
-        </div>
+        </div>,
+        document.body,
     );
 }
 
@@ -834,7 +837,7 @@ function getCameraContext(viewer: Cesium.Viewer | null): AIImageCameraContext {
 // Main panel
 // ===========================================================================
 
-export default function AIImagePanel() {
+export default function AIImagePanel({ embedded = false }: { embedded?: boolean }) {
     const isActive = useAIImageStore((s) => s.isActive);
     const setActive = useAIImageStore((s) => s.setActive);
     const hideObjects = useAIImageStore((s) => s.hideObjects);
@@ -1094,9 +1097,12 @@ export default function AIImagePanel() {
 
     return (
         <>
-            <div className="absolute top-4 right-4 z-20 w-80 max-h-[calc(100vh-32px)] flex flex-col bg-black/80 backdrop-blur-xl border border-zinc-800 rounded-lg shadow-2xl overflow-hidden">
+            <div className={embedded
+                ? 'relative z-auto flex h-full min-h-0 w-full flex-col overflow-hidden bg-transparent'
+                : 'absolute top-4 right-4 z-20 w-80 max-h-[calc(100vh-32px)] flex flex-col bg-black/80 backdrop-blur-xl border border-zinc-800 rounded-lg shadow-2xl overflow-hidden'}
+            >
                 {/* Header */}
-                <div className="flex items-center justify-between px-3 py-2.5 border-b border-zinc-800 shrink-0">
+                <div className={embedded ? 'hidden' : 'flex items-center justify-between px-3 py-2.5 border-b border-zinc-800 shrink-0'}>
                     <div className="flex items-center gap-2">
                         <Sparkles size={14} className="text-purple-400" />
                         <span className="text-xs font-mono font-semibold text-purple-300">

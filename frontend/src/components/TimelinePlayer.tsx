@@ -1,7 +1,7 @@
 'use client';
 
 import { useTimelineStore } from '../store/useTimelineStore';
-import { Play, Pause, Minus, Plus, Activity } from 'lucide-react';
+import { Play, Pause, Minus, Plus, Activity, Loader2 } from 'lucide-react';
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { twMerge } from 'tailwind-merge';
 
@@ -31,7 +31,7 @@ function formatTickLabel(rangeMs: number, fraction: number): string {
     return Number.isInteger(hours) ? `-${hours}h` : `-${hours.toFixed(1)}h`;
 }
 
-export default function TimelinePlayer() {
+export default function TimelinePlayer({ embedded = false }: { embedded?: boolean }) {
     // Individual selectors — whole-store subscription re-renders this
     // component on every streamMetrics write (constant) and every
     // currentTime bump from Globe's onTick. Selector-per-field isolates
@@ -178,16 +178,53 @@ export default function TimelinePlayer() {
         document.dispatchEvent(new CustomEvent('timeline-ctrl', { detail: { action: 'speed', value: newMulti }}));
     };
 
+    const enterReplayWindow = useCallback(() => {
+        const anchorMs = Date.now();
+        const targetTime = new Date(anchorMs - rangeMs);
+        setRangeEndTimeMs(anchorMs);
+        setSliderPosition(0);
+        useTimelineStore.getState().enterHistoricalReplay();
+        markReplaySeek();
+        setCurrentTime(targetTime, { reason: 'mode-change' });
+        document.dispatchEvent(new CustomEvent('timeline-ctrl', { detail: { action: 'seek', time: targetTime.toISOString() }}));
+        document.dispatchEvent(new CustomEvent('timeline-ctrl', { detail: { action: 'pause' }}));
+    }, [markReplaySeek, rangeMs, setCurrentTime]);
+
     const toggleMode = () => {
         if (mode === 'live') {
-            useTimelineStore.getState().enterHistoricalReplay();
-            document.dispatchEvent(new CustomEvent('timeline-ctrl', { detail: { action: 'pause' }}));
+            enterReplayWindow();
         } else {
             useTimelineStore.getState().exitToLive();
             document.dispatchEvent(new CustomEvent('timeline-ctrl', { detail: { action: 'speed', value: 1.0 }}));
             document.dispatchEvent(new CustomEvent('timeline-ctrl', { detail: { action: 'play' }}));
         }
     }
+
+    const setReplayMode = () => {
+        if (mode !== 'live') return;
+        enterReplayWindow();
+    };
+
+    const setLiveMode = () => {
+        if (mode === 'live') return;
+        useTimelineStore.getState().exitToLive();
+        document.dispatchEvent(new CustomEvent('timeline-ctrl', { detail: { action: 'speed', value: 1.0 }}));
+        document.dispatchEvent(new CustomEvent('timeline-ctrl', { detail: { action: 'play' }}));
+    };
+
+    const setSpeed = (value: number) => {
+        if (mode === 'live') return;
+        setSpeedMultiplier(value);
+        document.dispatchEvent(new CustomEvent('timeline-ctrl', { detail: { action: 'speed', value }}));
+    };
+
+    const handleEmbeddedPlayPause = () => {
+        if (isLive) {
+            enterReplayWindow();
+            return;
+        }
+        handlePlayPause();
+    };
 
     // Format relative time for slider tooltip
     const formatRelative = (ms: number) => {
@@ -203,10 +240,93 @@ export default function TimelinePlayer() {
         label: formatTickLabel(rangeMs, fraction),
     }));
 
+    if (embedded) {
+        return (
+            <div data-timeline-player="true" className="os-timeline">
+                <div className="os-timeline__mode">
+                    <button data-active={isLive ? 'true' : 'false'} onClick={setLiveMode}>LIVE</button>
+                    <button data-active={!isLive ? 'true' : 'false'} onClick={setReplayMode}>REPLAY</button>
+                </div>
+
+                <button
+                    onClick={handleEmbeddedPlayPause}
+                    disabled={replayHydrating}
+                    aria-label={replayHydrating ? 'Replay loading' : isPlaying ? 'Pause playback' : 'Start playback'}
+                    className="os-rail-btn disabled:cursor-not-allowed disabled:opacity-40"
+                    style={{ width: 28, height: 28 }}
+                >
+                    {replayHydrating ? (
+                        <Loader2 size={14} className="animate-spin" />
+                    ) : isPlaying && !isLive ? (
+                        <Pause size={14} fill="currentColor" />
+                    ) : (
+                        <Play size={14} fill="currentColor" className="ml-0.5" />
+                    )}
+                </button>
+
+                <div className="os-timeline__scrub">
+                    <div className="os-timeline__track">
+                        <div className="os-timeline__fill" style={{ width: `${sliderPosition * 100}%` }} />
+                    </div>
+                    <div className="os-timeline__thumb" style={{ left: `${sliderPosition * 100}%` }} />
+                    <input
+                        ref={sliderRef}
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.001"
+                        value={sliderPosition}
+                        onChange={handleSliderChange}
+                        onMouseDown={handleSliderPointerDown}
+                        onTouchStart={handleSliderPointerDown}
+                        onMouseUp={handleSliderCommit}
+                        onTouchEnd={handleSliderCommit}
+                        onKeyUp={handleSliderCommit}
+                        className="os-timeline__range"
+                        aria-label="Replay time"
+                    />
+                </div>
+
+                <div className="os-timeline__mode">
+                    {REPLAY_RANGE_OPTIONS.map((option) => (
+                        <button
+                            key={option.label}
+                            data-active={rangeMs === option.ms ? 'true' : 'false'}
+                            onClick={() => setRangeMs(option.ms)}
+                            aria-label={`Replay range ${option.label}`}
+                        >
+                            {option.label}
+                        </button>
+                    ))}
+                </div>
+
+                <div className="os-timeline__mode">
+                    {[0.5, 1, 4, 60, 3600].map((value) => (
+                        <button
+                            key={value}
+                            data-active={!isLive && speedMultiplier === value ? 'true' : 'false'}
+                            onClick={() => setSpeed(value)}
+                            disabled={isLive}
+                        >
+                            {value}x
+                        </button>
+                    ))}
+                </div>
+
+                <div className="os-timeline__time">
+                    <b>{replayHydrating ? 'LOADING REPLAY' : displayTime}</b>
+                </div>
+            </div>
+        );
+    }
+
     return (
         <div
             data-timeline-player="true"
-            className="absolute bottom-6 left-1/2 -translate-x-1/2 w-[720px] bg-black/80 backdrop-blur-xl border border-zinc-800 rounded-2xl shadow-2xl z-10 flex flex-col overflow-hidden"
+            className={twMerge(
+                'bg-black/80 backdrop-blur-xl border border-zinc-800 shadow-2xl flex flex-col overflow-hidden',
+                'absolute bottom-6 left-1/2 -translate-x-1/2 w-[720px] rounded-2xl z-10',
+            )}
         >
             <div className="flex items-center justify-between px-4 pt-3">
                 <div className="text-[10px] font-mono uppercase tracking-[0.2em] text-zinc-500">
