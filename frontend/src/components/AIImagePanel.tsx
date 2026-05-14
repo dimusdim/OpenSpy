@@ -1191,8 +1191,8 @@ export default function AIImagePanel({ embedded = false }: { embedded?: boolean 
     return (
         <>
             <div className={embedded
-                ? 'relative z-auto flex h-full min-h-0 w-full flex-col overflow-hidden bg-transparent'
-                : 'absolute top-4 right-4 z-20 w-80 max-h-[calc(100vh-32px)] flex flex-col bg-black/80 backdrop-blur-xl border border-zinc-800 rounded-lg shadow-2xl overflow-hidden'}
+                ? 'relative z-auto h-full min-h-0 w-full overflow-y-auto bg-transparent'
+                : 'absolute top-4 right-4 z-20 w-80 max-h-[calc(100vh-32px)] overflow-y-auto bg-black/80 backdrop-blur-xl border border-zinc-800 rounded-lg shadow-2xl'}
             >
                 {/* Header */}
                 <div className={embedded ? 'hidden' : 'flex items-center justify-between px-3 py-2.5 border-b border-zinc-800 shrink-0'}>
@@ -1278,7 +1278,7 @@ export default function AIImagePanel({ embedded = false }: { embedded?: boolean 
                 </div>
 
                 {/* Gallery */}
-                <div className="flex-1 overflow-y-auto min-h-0">
+                <div className="min-h-0">
                     <div className="px-3 py-2">
                         <p className="text-[10px] font-mono text-zinc-600 mb-2">
                             Gallery ({gallery.length} capture{gallery.length !== 1 ? 's' : ''})

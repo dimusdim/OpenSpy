@@ -22,6 +22,8 @@
   --os-accent-soft: rgba(127, 174, 196, 0.12);
   --os-accent-line: rgba(127, 174, 196, 0.32);
   --os-rail-w: 48px;
+  --os-rail-edge-gap: 12px;
+  --os-rail-dock-gap: 8px;
   --os-dock-w: 320px;
   --os-left-dock-w: var(--os-dock-w);
   --os-right-dock-w: var(--os-dock-w);
@@ -191,37 +193,37 @@ body {
 
 .os-rail {
   position: absolute;
-  top: var(--os-topbar-h);
-  bottom: var(--os-bottombar-h);
+  top: calc(var(--os-topbar-h) + 12px);
   z-index: 25;
   display: flex;
   width: var(--os-rail-w);
   flex-direction: column;
   padding: 8px 6px;
-  border-color: var(--os-line-1);
+  border: 1px solid var(--os-line-1);
+  border-radius: 8px;
   background: rgba(14, 14, 16, var(--os-panel-alpha));
+  box-shadow: 0 16px 50px rgba(0, 0, 0, 0.38);
   backdrop-filter: blur(var(--os-panel-blur));
 }
 
 .os-rail--left {
-  left: 0;
-  border-right: 1px solid var(--os-line-1);
+  left: var(--os-rail-edge-gap);
 }
 
 .os-rail--right {
-  right: 0;
-  border-left: 1px solid var(--os-line-1);
+  right: var(--os-rail-edge-gap);
 }
 
 .os-rail__inner {
   display: flex;
-  flex: 1;
   flex-direction: column;
   gap: 4px;
 }
 
 .os-rail__spacer {
-  flex: 1;
+  height: 1px;
+  margin: 6px 4px;
+  background: var(--os-line-1);
 }
 
 .os-rail__divider {
@@ -300,14 +302,14 @@ body {
 }
 
 .os-dock--left {
-  left: var(--os-rail-w);
+  left: calc(var(--os-rail-edge-gap) + var(--os-rail-w) + var(--os-rail-dock-gap));
   width: var(--os-left-dock-w);
   border-right: 1px solid var(--os-line-1);
 }
 
 .os-dock--right {
-  right: var(--os-rail-w);
-  width: min(var(--os-right-dock-w), calc(100vw - var(--os-rail-w) - 16px));
+  right: calc(var(--os-rail-edge-gap) + var(--os-rail-w) + var(--os-rail-dock-gap));
+  width: min(var(--os-right-dock-w), calc(100vw - var(--os-rail-edge-gap) - var(--os-rail-w) - var(--os-rail-dock-gap) - 16px));
   border-left: 1px solid var(--os-line-1);
 }
 
