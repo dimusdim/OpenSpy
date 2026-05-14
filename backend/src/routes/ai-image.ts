@@ -1,5 +1,5 @@
 import express from 'express';
-import { AIImageService } from '../services/ai-image.service';
+import { AIImageService, getAIImageModelCapabilities } from '../services/ai-image.service';
 import { AIPresetsService, PresetsPayload } from '../services/ai-presets.service';
 
 /**
@@ -18,12 +18,19 @@ export function setupAIImageRoutes(app: express.Express): AIImageService {
     const presetsJsonParser = express.json({ limit: '1mb' });
 
     // -----------------------------------------------------------------------
+    // GET /api/ai-image/model-capabilities?model=<provider/model>
+    // -----------------------------------------------------------------------
+    app.get('/api/ai-image/model-capabilities', (req: express.Request, res: express.Response) => {
+        res.json(getAIImageModelCapabilities(String(req.query.model || '')));
+    });
+
+    // -----------------------------------------------------------------------
     // POST /api/ai-image/generate
-    // Body: { screenshot, viewport, prompt, model?, presetName? }
+    // Body: { screenshot, viewport, prompt, model?, presetName?, sourceGeometry?, requestedAspectRatio? }
     // -----------------------------------------------------------------------
     app.post('/api/ai-image/generate', jsonParser, async (req: express.Request, res: express.Response) => {
         const bodySize = req.headers['content-length'] || 'unknown';
-        const { screenshot, viewport, prompt, model, presetName, contextSnapshot } = req.body ?? {};
+        const { screenshot, viewport, prompt, model, presetName, contextSnapshot, sourceGeometry, requestedAspectRatio } = req.body ?? {};
         const screenshotKB = screenshot ? Math.round(screenshot.length / 1024) : 0;
         console.log(`[AIImage] POST /generate  body=${bodySize}  screenshot=${screenshotKB}KB  model=${model || 'default'}`);
 
@@ -36,7 +43,7 @@ export function setupAIImageRoutes(app: express.Express): AIImageService {
 
         try {
             const record = await service.generate(
-                screenshot, viewport, prompt, model, presetName, contextSnapshot,
+                screenshot, viewport, prompt, model, presetName, contextSnapshot, sourceGeometry, requestedAspectRatio,
             );
             res.json(record);
         } catch (err: any) {

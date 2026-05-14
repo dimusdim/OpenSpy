@@ -102,10 +102,18 @@ const LAYER_TO_DOMAIN: Record<string, string> = {
 // AND reads back the live geodetic position (lat/lng/alt) + the subtype that
 // the layer hooks stashed in entity.properties when the entity was created.
 type EntityHUDProps = {
+    avoidLeftPx?: number;
     avoidRightPx?: number;
+    avoidTopPx?: number;
+    avoidBottomPx?: number;
 };
 
-export default function EntityHUD({ avoidRightPx = 0 }: EntityHUDProps) {
+export default function EntityHUD({
+    avoidLeftPx = 0,
+    avoidRightPx = 0,
+    avoidTopPx = 0,
+    avoidBottomPx = 0,
+}: EntityHUDProps) {
     // Individual selectors — whole-store subscription re-renders this
     // component on every store write (streamMetrics, currentTime, etc.),
     // including the 60 Hz rAF loop below calling setScreenPos/setLive.
@@ -115,7 +123,9 @@ export default function EntityHUD({ avoidRightPx = 0 }: EntityHUDProps) {
     const mode = useTimelineStore(s => s.mode);
     const [screenPos, setScreenPos] = useState<{ x: number, y: number } | null>(null);
     const panelRef = useRef<HTMLDivElement | null>(null);
+    const dragRef = useRef<{ pointerId: number; offsetX: number; offsetY: number } | null>(null);
     const [measuredPanelHeightPx, setMeasuredPanelHeightPx] = useState(0);
+    const [manualPanelPosition, setManualPanelPosition] = useState<{ x: number; y: number } | null>(null);
     const [live, setLive] = useState<{
         lat: number;
         lng: number;
@@ -788,54 +798,83 @@ export default function EntityHUD({ avoidRightPx = 0 }: EntityHUDProps) {
         };
     }, [selectedEntityId, selectedEntityData]);
 
+    useEffect(() => {
+        dragRef.current = null;
+        setManualPanelPosition(null);
+    }, [selectedEntityId]);
+
     if (!selectedEntityId || !selectedEntityData) return null;
 
     const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 1280;
+    const viewportHeight = typeof window !== 'undefined' ? window.innerHeight : 720;
+    const margin = 16;
+    const reservedLeftPx = Math.max(0, avoidLeftPx);
     const reservedRightPx = Math.max(0, avoidRightPx);
-    const sideAvailableWidth = viewportWidth - reservedRightPx - 32;
-    const panelWidth = Math.max(
-        248,
-        Math.min(320, sideAvailableWidth >= 280 ? sideAvailableWidth : viewportWidth - 32)
-    );
-    const panelMaxHeightPx = typeof window !== 'undefined' ? Math.round(window.innerHeight * 0.8) : 640;
+    const reservedTopPx = Math.max(0, avoidTopPx);
+    const reservedBottomPx = Math.max(0, avoidBottomPx);
+    const safeLeft = Math.min(viewportWidth - margin - 180, reservedLeftPx + margin);
+    const safeRight = Math.max(safeLeft + 180, viewportWidth - reservedRightPx - margin);
+    const safeTop = Math.min(viewportHeight - margin - 180, reservedTopPx + margin);
+    const safeBottom = Math.max(safeTop + 180, viewportHeight - reservedBottomPx - margin);
+    const safeWidth = Math.max(180, safeRight - safeLeft);
+    const safeHeight = Math.max(180, safeBottom - safeTop);
+    const panelWidth = Math.max(180, Math.min(320, safeWidth));
+    const panelMaxHeightPx = Math.max(180, Math.min(Math.round(viewportHeight * 0.8), safeHeight));
     const estimatedPanelHeightPx = typeof window !== 'undefined'
         ? Math.min(panelMaxHeightPx, live?.layer === 'aircraft' ? 560 : 460)
         : 460;
     const layoutPanelHeightPx = measuredPanelHeightPx > 0
         ? Math.min(panelMaxHeightPx, measuredPanelHeightPx)
         : estimatedPanelHeightPx;
+    const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+    const minPanelX = safeLeft;
+    const maxPanelX = Math.max(minPanelX, safeRight - panelWidth);
+    const minPanelY = safeTop;
+    const maxPanelY = Math.max(minPanelY, safeBottom - layoutPanelHeightPx);
+    const clampedPanelHeight = Math.min(layoutPanelHeightPx, safeBottom - safeTop);
+    const clampPanelPosition = (rawX: number, rawY: number) => ({
+        x: clamp(rawX, minPanelX, maxPanelX),
+        y: clamp(rawY, minPanelY, maxPanelY),
+    });
+    const buildAnchor = (x: number, y: number) => {
+        if (!screenPos) {
+            return { anchorX: x - 10, anchorY: y + 40 };
+        }
+        const panelIsLeftOfTarget = x + panelWidth <= screenPos.x;
+        const panelIsRightOfTarget = x >= screenPos.x;
+        const panelIsAboveTarget = y + clampedPanelHeight <= screenPos.y;
+        const anchorClampX = clamp(screenPos.x, x + 18, x + panelWidth - 18);
+        const anchorClampY = clamp(screenPos.y, y + 18, y + clampedPanelHeight - 18);
+        return {
+            anchorX: panelIsLeftOfTarget ? x + panelWidth + 10 : panelIsRightOfTarget ? x - 10 : anchorClampX,
+            anchorY: panelIsLeftOfTarget || panelIsRightOfTarget
+                ? anchorClampY
+                : panelIsAboveTarget
+                    ? y + clampedPanelHeight + 10
+                    : y - 10,
+        };
+    };
     const panelPlacement = (() => {
         if (typeof window === 'undefined') {
             return { x: 1000, y: 100, anchorX: 990, anchorY: 140 };
         }
-        const margin = 16;
         const gap = 32;
-        const legendSafeRight = window.innerWidth >= 900 ? 352 : margin;
-        const usableRight = Math.max(margin + panelWidth, window.innerWidth - reservedRightPx - margin);
-        const fallbackX = Math.max(legendSafeRight, usableRight - panelWidth);
-        const fallbackY = 100;
+        const fallback = clampPanelPosition(safeRight - panelWidth, safeTop + 24);
+        if (manualPanelPosition) {
+            const manual = clampPanelPosition(manualPanelPosition.x, manualPanelPosition.y);
+            return { ...manual, ...buildAnchor(manual.x, manual.y) };
+        }
         if (!screenPos) {
-            return { x: fallbackX, y: fallbackY, anchorX: fallbackX - 10, anchorY: fallbackY + 40 };
+            return { ...fallback, ...buildAnchor(fallback.x, fallback.y) };
         }
 
-        const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
-        const relaxedMinX = margin;
-        const relaxedMaxX = Math.max(relaxedMinX, usableRight - panelWidth);
-        const minX = reservedRightPx > 0
-            ? relaxedMinX
-            : relaxedMaxX >= legendSafeRight ? legendSafeRight : relaxedMinX;
-        const maxX = Math.max(minX, usableRight - panelWidth);
-        const minY = 76;
-        const maxY = Math.max(minY, window.innerHeight - layoutPanelHeightPx - margin);
         const targetPadding = 18;
         const targetSafeTop = screenPos.y - targetPadding;
         const targetSafeBottom = screenPos.y + targetPadding;
         const targetSafeLeft = screenPos.x - targetPadding;
         const targetSafeRight = screenPos.x + targetPadding;
-        const clampedPanelHeight = Math.min(layoutPanelHeightPx, window.innerHeight - minY - margin);
         const scoreCandidate = (rawX: number, rawY: number, priority: number) => {
-            const x = clamp(rawX, minX, maxX);
-            const y = clamp(rawY, minY, maxY);
+            const { x, y } = clampPanelPosition(rawX, rawY);
             const horizontallyOverlaps = targetSafeRight >= x && targetSafeLeft <= x + panelWidth;
             const verticallyOverlaps = targetSafeBottom >= y && targetSafeTop <= y + clampedPanelHeight;
             const coversTarget = horizontallyOverlaps && verticallyOverlaps;
@@ -854,40 +893,26 @@ export default function EntityHUD({ avoidRightPx = 0 }: EntityHUDProps) {
         const belowY = screenPos.y + gap;
         const sideY = screenPos.y - 110;
         const centeredX = screenPos.x - panelWidth / 2;
-        const preferLeft = reservedRightPx > 0 || screenPos.x > window.innerWidth * 0.56;
+        const preferLeft = screenPos.x > viewportWidth * 0.56;
         const candidates = preferLeft
             ? [
                 scoreCandidate(leftX, sideY, 0),
                 scoreCandidate(rightX, sideY, 1),
                 scoreCandidate(centeredX, belowY, 2),
                 scoreCandidate(centeredX, aboveY, 3),
-                scoreCandidate(fallbackX, fallbackY, 4),
+                scoreCandidate(fallback.x, fallback.y, 4),
             ]
             : [
                 scoreCandidate(rightX, sideY, 0),
                 scoreCandidate(leftX, sideY, 1),
                 scoreCandidate(centeredX, belowY, 2),
                 scoreCandidate(centeredX, aboveY, 3),
-                scoreCandidate(fallbackX, fallbackY, 4),
+                scoreCandidate(fallback.x, fallback.y, 4),
             ];
         const best = candidates.sort((a, b) => a.score - b.score)[0];
         const x = best.x;
         const y = best.y;
-        const panelIsLeftOfTarget = x + panelWidth <= screenPos.x;
-        const panelIsRightOfTarget = x >= screenPos.x;
-        const panelIsAboveTarget = y + clampedPanelHeight <= screenPos.y;
-        const anchorClampX = clamp(screenPos.x, x + 18, x + panelWidth - 18);
-        const anchorClampY = clamp(screenPos.y, y + 18, y + clampedPanelHeight - 18);
-        return {
-            x,
-            y,
-            anchorX: panelIsLeftOfTarget ? x + panelWidth + 10 : panelIsRightOfTarget ? x - 10 : anchorClampX,
-            anchorY: panelIsLeftOfTarget || panelIsRightOfTarget
-                ? anchorClampY
-                : panelIsAboveTarget
-                    ? y + clampedPanelHeight + 10
-                    : y - 10,
-        };
+        return { x, y, ...buildAnchor(x, y) };
     })();
 
     const flyTo = () => {
@@ -945,14 +970,55 @@ export default function EntityHUD({ avoidRightPx = 0 }: EntityHUDProps) {
                     top: panelPlacement.y,
                     left: panelPlacement.x,
                     width: panelWidth,
-                    maxHeight: typeof window !== 'undefined'
-                        ? Math.max(220, Math.min(panelMaxHeightPx, window.innerHeight - panelPlacement.y - 16))
-                        : panelMaxHeightPx,
+                    maxHeight: Math.max(180, Math.min(panelMaxHeightPx, safeBottom - panelPlacement.y)),
                 }}
             >
-                <div className="p-4 border-b border-zinc-800 flex justify-between items-center">
+                <div
+                    className="p-4 border-b border-zinc-800 flex justify-between items-center cursor-move select-none"
+                    style={{ touchAction: 'none' }}
+                    onPointerDown={(event) => {
+                        const target = event.target as HTMLElement | null;
+                        if (target?.closest('button')) return;
+                        event.preventDefault();
+                        event.currentTarget.setPointerCapture(event.pointerId);
+                        dragRef.current = {
+                            pointerId: event.pointerId,
+                            offsetX: event.clientX - panelPlacement.x,
+                            offsetY: event.clientY - panelPlacement.y,
+                        };
+                        setManualPanelPosition({ x: panelPlacement.x, y: panelPlacement.y });
+                    }}
+                    onPointerMove={(event) => {
+                        const drag = dragRef.current;
+                        if (!drag || drag.pointerId !== event.pointerId) return;
+                        event.preventDefault();
+                        setManualPanelPosition(clampPanelPosition(
+                            event.clientX - drag.offsetX,
+                            event.clientY - drag.offsetY,
+                        ));
+                    }}
+                    onPointerUp={(event) => {
+                        if (dragRef.current?.pointerId !== event.pointerId) return;
+                        dragRef.current = null;
+                        try {
+                            event.currentTarget.releasePointerCapture(event.pointerId);
+                        } catch {
+                            // The pointer may already be released by the browser.
+                        }
+                    }}
+                    onPointerCancel={(event) => {
+                        if (dragRef.current?.pointerId !== event.pointerId) return;
+                        dragRef.current = null;
+                    }}
+                >
                     <div className="text-xs font-mono font-bold text-cyan-400 tracking-wider">TARGET ACQUIRED</div>
-                    <button onClick={() => useTimelineStore.getState().setSelectedEntityId(null)} className="text-zinc-500 hover:text-white text-xl leading-none">&times;</button>
+                    <button
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={() => useTimelineStore.getState().setSelectedEntityId(null)}
+                        className="text-zinc-500 hover:text-white text-xl leading-none cursor-pointer"
+                    >
+                        &times;
+                    </button>
                 </div>
 
                 <div className="p-4 space-y-3">

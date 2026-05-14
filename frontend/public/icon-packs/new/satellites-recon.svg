@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="32" height="32" color="#fff"><defs><filter id="openspyIconOutline" x="-40%" y="-40%" width="180%" height="180%"><feMorphology in="SourceAlpha" result="dilated" operator="dilate" radius="0.75"/><feFlood flood-color="#000000" flood-opacity="0.5" result="outlineColor"/><feComposite in="outlineColor" in2="dilated" operator="in" result="outline"/><feMerge><feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><g filter="url(#openspyIconOutline)">
+<rect x="10" y="10" width="4" height="4" fill="currentColor"></rect>
+  <rect x="4" y="11.2" width="5" height="1.6" fill="currentColor"></rect>
+  <rect x="15" y="11.2" width="5" height="1.6" fill="currentColor"></rect>
+  <circle cx="12" cy="4" r="2.5" fill="none" stroke="currentColor" stroke-width="1.2"></circle>
+  <circle cx="12" cy="4" r="1" fill="#22d3ee"></circle>
+</g></svg>

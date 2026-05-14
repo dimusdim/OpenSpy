@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
 import dynamic from 'next/dynamic';
-import { Activity, Bot, ChevronDown, ChevronUp, History, Image as ImageIcon, Layers, Settings, Sparkles, X } from 'lucide-react';
+import { Activity, Bot, ChevronDown, ChevronUp, History, Image as ImageIcon, Layers, Palette, Settings, Sparkles, X } from 'lucide-react';
 import TimelinePlayer from '../components/TimelinePlayer';
 import SearchBar from '../components/SearchBar';
 import Legend from '../components/Legend';
@@ -14,17 +14,19 @@ import RenderPerfStatus from '../components/RenderPerfStatus';
 import AIImagePanel from '../components/AIImagePanel';
 import AgentPanel from '../components/AgentPanel';
 import ImageryPanel, { ImageryContextBadge } from '../components/ImageryPanel';
+import IconPackPanel from '../components/IconPackPanel';
 import { useAIImageStore } from '../store/useAIImageStore';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { useStatusPoller } from '../hooks/useStatusPoller';
 import { API_URL } from '../lib/config';
+import { setRuntimeIconPack } from '../icons/map-icons';
 
 const GlobeDynamic = dynamic(() => import('../components/Globe'), {
   ssr: false,
 });
 
 type LeftDock = 'layers' | 'imagery' | 'replay' | null;
-type RightDock = 'agent' | 'vision' | 'status' | null;
+type RightDock = 'agent' | 'vision' | 'icons' | 'status' | null;
 type OpenSpyWindow = Window & {
   __openspyTimelineStore?: typeof useTimelineStore;
 };
@@ -39,6 +41,7 @@ export default function Home() {
   const [activeRight, setActiveRight] = useState<RightDock>('agent');
   const [timelineHidden, setTimelineHidden] = useState(false);
   const [settingsHydrated, setSettingsHydrated] = useState(false);
+  const [iconPackHydrated, setIconPackHydrated] = useState(false);
   const [uiMounted, setUiMounted] = useState(false);
   const activeLayerCount = useMemo(() => (
     Object.keys(visibility).filter((layerKey) => {
@@ -57,15 +60,37 @@ export default function Home() {
     ? 'Agent'
     : activeRight === 'vision'
       ? 'AI Vision'
-      : activeRight === 'status'
-        ? 'Status'
-        : '';
+      : activeRight === 'icons'
+        ? 'Icon Packs'
+        : activeRight === 'status'
+          ? 'Status'
+          : '';
 
   // Status polling — always-on, independent of which panels are open
   useStatusPoller();
 
   useEffect(() => {
     setUiMounted(true);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_URL}/api/icon-packs`)
+      .then(r => r.json())
+      .then((data) => {
+        if (cancelled) return;
+        const pack = data?.packs?.find((candidate: any) => candidate?.id === data?.activePackId) || data?.packs?.[0] || null;
+        setRuntimeIconPack(pack);
+      })
+      .catch(() => {
+        setRuntimeIconPack(null);
+      })
+      .finally(() => {
+        if (!cancelled) setIconPackHydrated(true);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Load persisted settings from server on mount
@@ -153,7 +178,7 @@ export default function Home() {
 
   return (
     <main className="os-app selection:bg-cyan-500 selection:text-black">
-        {settingsHydrated ? <GlobeDynamic /> : null}
+        {settingsHydrated && iconPackHydrated ? <GlobeDynamic /> : null}
 
         {uiMounted ? (
             <>
@@ -219,6 +244,9 @@ export default function Home() {
                         <button className="os-rail-btn" data-active={activeRight === 'vision'} title="AI Vision" onClick={() => toggleRight('vision')}>
                             <Sparkles size={18} />
                         </button>
+                        <button className="os-rail-btn" data-active={activeRight === 'icons'} title="Icon packs" onClick={() => toggleRight('icons')}>
+                            <Palette size={18} />
+                        </button>
                         <div className="os-rail__divider" />
                         <button className="os-rail-btn" data-active={activeRight === 'status'} title="System status" onClick={() => toggleRight('status')}>
                             <Activity size={18} />
@@ -242,6 +270,9 @@ export default function Home() {
                         )}
                         {activeRight === 'vision' && (
                             <AIImagePanel embedded />
+                        )}
+                        {activeRight === 'icons' && (
+                            <IconPackPanel />
                         )}
                         {activeRight === 'status' && (
                             <div className="os-status-dock">
@@ -272,7 +303,12 @@ export default function Home() {
                 </div>
 
                 <CameraHUD />
-                <EntityHUD avoidRightPx={activeRight ? 384 : 72} />
+                <EntityHUD
+                    avoidLeftPx={activeLeft ? 384 : 72}
+                    avoidRightPx={activeRight ? 384 : 72}
+                    avoidTopPx={56}
+                    avoidBottomPx={timelineHidden ? 24 : 72}
+                />
                 <SettingsPanel isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
             </>
         ) : null}

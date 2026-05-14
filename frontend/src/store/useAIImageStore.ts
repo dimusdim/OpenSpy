@@ -71,6 +71,36 @@ export interface AIContextSnapshot {
     generatedAt: string;
 }
 
+export interface AIImageRect {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+}
+
+export interface AIImageSourceGeometry {
+    viewportCanvas: { width: number; height: number };
+    capture: { width: number; height: number; aspectRatio: string };
+    visibleRect: AIImageRect;
+    requestedAspectRatio: string;
+    strategy: 'viewport' | 'expanded-render' | 'center-pad';
+}
+
+export interface AIImageGeneratedGeometry {
+    width: number;
+    height: number;
+    aspectRatio: string;
+}
+
+export interface AIImageModelCapabilities {
+    model: string;
+    provider: string;
+    supportedAspectRatios: string[];
+    defaultAspectRatio: string;
+    defaultImageSize: string;
+    supportsImageToImage: boolean;
+}
+
 /** A generation preset — each becomes a capture button in the panel. */
 export interface Preset {
     id: string;
@@ -103,6 +133,8 @@ export interface GalleryEntry {
     /** Backend filenames — populated on completion. */
     originalFile?: string;
     generatedFile?: string;
+    sourceGeometry?: AIImageSourceGeometry;
+    generatedGeometry?: AIImageGeneratedGeometry;
     contextSnapshot?: AIContextSnapshot;
     error?: string;
 }
@@ -134,6 +166,9 @@ const EXCLUDED_CAP_PER_PRESET = 500;
 const PRESETS_KEY = 'ai-vision-presets';
 const PRESETS_API = `${API_URL}/api/ai-image/presets`;
 const PRESETS_DEBOUNCE_MS = 500;
+const DEPRECATED_IMAGE_MODEL_REPLACEMENTS: Record<string, string> = {
+    'black-forest-labs/flux.2-max': 'google/gemini-3-pro-image-preview',
+};
 
 const DEFAULT_PRESETS: Preset[] = [
     {
@@ -154,24 +189,38 @@ const DEFAULT_PRESETS: Preset[] = [
         model: 'google/gemini-3.1-flash-image-preview',
     },
     {
-        id: 'flux-max',
-        name: 'FLUX Enhance',
+        id: 'gemini-pro-enhance',
+        name: 'Gemini Pro Enhance',
         prompt:
             'Create a high-fidelity enhanced version of this satellite/aerial view. ' +
             'Maximize detail and clarity while preserving geographic accuracy.',
-        model: 'black-forest-labs/flux.2-max',
+        model: 'google/gemini-3-pro-image-preview',
     },
     {
-        id: 'flux-tactical',
-        name: 'FLUX Tactical',
+        id: 'gemini-pro-tactical',
+        name: 'Gemini Pro Tactical',
         prompt:
             'Transform this aerial/satellite view into a military tactical operations map. ' +
             'Neon green HUD overlay on dark background, grid coordinates, threat zones highlighted in red, ' +
             'friendly zones in blue, terrain contour lines, elevation markers. ' +
             'Style of a real-time command center display with data readouts and targeting reticles.',
-        model: 'black-forest-labs/flux.2-max',
+        model: 'google/gemini-3-pro-image-preview',
     },
 ];
+
+function normalizePreset(preset: Preset): Preset {
+    const replacement = DEPRECATED_IMAGE_MODEL_REPLACEMENTS[preset.model];
+    if (!replacement) return preset;
+    return {
+        ...preset,
+        model: replacement,
+        name: preset.name.replace(/\bFLUX(?:\.2)?\b/gi, 'Gemini Pro'),
+    };
+}
+
+function normalizePresets(presets: Preset[]): Preset[] {
+    return presets.map(normalizePreset);
+}
 
 function loadPresets(): Preset[] {
     if (typeof window === 'undefined') return DEFAULT_PRESETS;
@@ -180,15 +229,19 @@ function loadPresets(): Preset[] {
         if (raw) {
             const parsed = JSON.parse(raw);
             if (Array.isArray(parsed) && parsed.length > 0) {
+                const normalized = normalizePresets(parsed);
                 // Merge: add any default presets missing from saved set
-                const savedIds = new Set(parsed.map((p: Preset) => p.id));
+                const savedIds = new Set(normalized.map((p: Preset) => p.id));
                 const missing = DEFAULT_PRESETS.filter((d) => !savedIds.has(d.id));
                 if (missing.length > 0) {
-                    const merged = [...parsed, ...missing];
+                    const merged = [...normalized, ...missing];
                     savePresets(merged);
                     return merged;
                 }
-                return parsed;
+                if (JSON.stringify(normalized) !== JSON.stringify(parsed)) {
+                    savePresets(normalized);
+                }
+                return normalized;
             }
         }
     } catch { /* ignore */ }
@@ -211,7 +264,7 @@ async function fetchPresetsFromServer(): Promise<Preset[] | null> {
         const res = await fetch(PRESETS_API);
         if (!res.ok) return null;
         const body: ServerPresetsPayload = await res.json();
-        return Array.isArray(body?.presets) ? body.presets : null;
+        return Array.isArray(body?.presets) ? normalizePresets(body.presets) : null;
     } catch {
         return null;
     }
@@ -263,7 +316,14 @@ interface AIImageStore {
     /** Add a pending entry (screenshot captured, generation in flight). */
     addPending: (entry: GalleryEntry) => void;
     /** Mark entry as completed with backend data. */
-    completeEntry: (clientId: string, server: { id: string; originalFile: string; generatedFile: string; contextSnapshot?: AIContextSnapshot }) => void;
+    completeEntry: (clientId: string, server: {
+        id: string;
+        originalFile: string;
+        generatedFile: string;
+        contextSnapshot?: AIContextSnapshot;
+        sourceGeometry?: AIImageSourceGeometry;
+        generatedGeometry?: AIImageGeneratedGeometry;
+    }) => void;
     /** Mark entry as failed. */
     failEntry: (clientId: string, error: string) => void;
     removeEntry: (clientId: string) => void;
@@ -321,6 +381,8 @@ export const useAIImageStore = create<AIImageStore>((set, get) => ({
                           originalFile: server.originalFile,
                           generatedFile: server.generatedFile,
                           contextSnapshot: server.contextSnapshot ?? e.contextSnapshot,
+                          sourceGeometry: server.sourceGeometry ?? e.sourceGeometry,
+                          generatedGeometry: server.generatedGeometry,
                           status: 'completed' as const,
                           localScreenshot: undefined, // free memory
                       }

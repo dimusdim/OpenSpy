@@ -4,7 +4,7 @@ import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { useSecondaryLoadGate } from './useSecondaryLoadGate';
 import { API_URL } from '../lib/config';
-import { OUTAGE_ICON_CRITICAL, OUTAGE_ICON_WARNING } from '../icons/map-icons';
+import { getIconOpacity, getIconScale, getOutageIcon } from '../icons/map-icons';
 import { safeCartesianFromDegrees } from './position-utils';
 import { getLayerSourceVisibilityKey, normalizeLayerSourceId } from '../lib/source-visibility';
 
@@ -109,8 +109,9 @@ export function useOutagesLayer(viewer: Cesium.Viewer | null) {
                             countryCode: o.countryCode,
                         }),
                         billboard: {
-                            image: isCritical ? OUTAGE_ICON_CRITICAL : OUTAGE_ICON_WARNING,
-                            scale: isCritical ? 1.4 : 1.1,
+                            image: getOutageIcon(o.level),
+                            scale: getIconScale('outages', o.level, isCritical ? 1.4 : 1.1),
+                            color: Cesium.Color.WHITE.withAlpha(getIconOpacity('outages', o.level)),
                         },
                         // Pulsing ellipse around country centroid
                         ellipse: {
@@ -156,8 +157,9 @@ export function useOutagesLayer(viewer: Cesium.Viewer | null) {
                             countryCode: locCode,
                         }),
                         billboard: {
-                            image: OUTAGE_ICON_WARNING,
-                            scale: 1.0,
+                            image: getOutageIcon('warning'),
+                            scale: getIconScale('outages', 'warning', 1.0),
+                            color: Cesium.Color.WHITE.withAlpha(getIconOpacity('outages', 'warning')),
                         },
                         ellipse: {
                             semiMinorAxis: 150_000,

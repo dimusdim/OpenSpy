@@ -4,7 +4,7 @@ import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { useSecondaryLoadGate } from './useSecondaryLoadGate';
 import { API_URL } from '../lib/config';
-import { GFW_ICON } from '../icons/map-icons';
+import { getIconOpacity, getIconScale, getMapIcon } from '../icons/map-icons';
 import { safeCartesianFromDegrees } from './position-utils';
 
 export interface GfwMeta {
@@ -78,8 +78,9 @@ export function useGFWLayer(viewer: Cesium.Viewer | null) {
                     billboards.add({
                         id,
                         position,
-                        image: GFW_ICON,
-                        scale: 1.0,
+                        image: getMapIcon('gfw', 'default'),
+                        scale: getIconScale('gfw', 'default', 1.0),
+                        color: Cesium.Color.WHITE.withAlpha(getIconOpacity('gfw', 'default')),
                         verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
                     });
                     gfwMetaMap.set(id, {

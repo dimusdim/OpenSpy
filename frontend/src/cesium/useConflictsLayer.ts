@@ -4,7 +4,7 @@ import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { useSecondaryLoadGate } from './useSecondaryLoadGate';
 import { API_URL } from '../lib/config';
-import { getConflictIcon } from '../icons/map-icons';
+import { getConflictIcon, getIconOpacity, getIconScale } from '../icons/map-icons';
 import { getViewerAltitudeMeters, safeCartesianFromDegrees } from './position-utils';
 import { getLayerSourceVisibilityKey, normalizeLayerSourceId } from '../lib/source-visibility';
 
@@ -201,7 +201,12 @@ export function useConflictsLayer(viewer: Cesium.Viewer | null) {
                     id: record.id,
                     position,
                     image: getConflictIcon(record.eventType),
-                    scale: (record.fatalities || 0) > 10 ? 1.4 : (record.fatalities || 0) > 0 ? 1.1 : 0.9,
+                    scale: getIconScale(
+                        'conflicts',
+                        record.eventType,
+                        (record.fatalities || 0) > 10 ? 1.4 : (record.fatalities || 0) > 0 ? 1.1 : 0.9,
+                    ),
+                    color: Cesium.Color.WHITE.withAlpha(getIconOpacity('conflicts', record.eventType)),
                     verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
                 });
             }

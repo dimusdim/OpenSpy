@@ -5,7 +5,7 @@ import { useTimelineStore } from '../store/useTimelineStore';
 import { useSecondaryLoadGate } from './useSecondaryLoadGate';
 import { API_URL } from '../lib/config';
 import { perfLog } from '../lib/perf-log';
-import { INFRA_ICONS } from '../icons/map-icons';
+import { getIconOpacity, getIconScale, getInfraIcon } from '../icons/map-icons';
 import { getViewerAltitudeMeters } from './position-utils';
 
 type PipelineSubstance = 'oil' | 'gas' | 'water' | 'other';
@@ -176,10 +176,17 @@ function normalizeLineParts(raw: unknown): [number, number][][] {
 }
 
 function pipelineIcon(substance: PipelineSubstance): string {
-    if (substance === 'gas') return INFRA_ICONS.pipeline_gas || INFRA_ICONS.refinery;
-    if (substance === 'water') return INFRA_ICONS.pipeline_water || INFRA_ICONS.pipeline_gas || INFRA_ICONS.refinery;
-    if (substance === 'other') return INFRA_ICONS.pipeline_other || INFRA_ICONS.refinery;
-    return INFRA_ICONS.pipeline_oil || INFRA_ICONS.refinery;
+    if (substance === 'gas') return getInfraIcon('pipeline_gas');
+    if (substance === 'water') return getInfraIcon('pipeline_water');
+    if (substance === 'other') return getInfraIcon('pipeline_other');
+    return getInfraIcon('pipeline_oil');
+}
+
+function pipelineIconSubtype(substance: PipelineSubstance): string {
+    if (substance === 'gas') return 'pipeline_gas';
+    if (substance === 'water') return 'pipeline_water';
+    if (substance === 'other') return 'pipeline_other';
+    return 'pipeline_oil';
 }
 
 export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
@@ -396,7 +403,8 @@ export function usePipelinesLayer(viewer: Cesium.Viewer | null) {
                     const billboard = fallbackCollection.add({
                         position: Cesium.Cartesian3.fromDegrees(lng, lat, 0),
                         image: pipelineIcon(substance),
-                        scale: 0.82,
+                        scale: getIconScale('infrastructure', pipelineIconSubtype(substance), 0.82),
+                        color: Cesium.Color.WHITE.withAlpha(getIconOpacity('infrastructure', pipelineIconSubtype(substance))),
                         id: logicalId,
                         heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
                         verticalOrigin: Cesium.VerticalOrigin.BOTTOM,

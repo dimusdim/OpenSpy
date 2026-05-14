@@ -4,7 +4,7 @@ import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { useSecondaryLoadGate } from './useSecondaryLoadGate';
 import { API_URL } from '../lib/config';
-import { WEBCAM_ICON } from '../icons/map-icons';
+import { getIconOpacity, getIconScale, getMapIcon } from '../icons/map-icons';
 
 // Metadata per webcam, keyed by billboard id string.
 export interface WebcamMeta {
@@ -67,8 +67,9 @@ export function useWebcamsLayer(viewer: Cesium.Viewer | null) {
 
                     billboards.add({
                         position: Cesium.Cartesian3.fromDegrees(cam.lng, cam.lat, 50),
-                        image: WEBCAM_ICON,
-                        scale: 0.5,
+                        image: getMapIcon('webcams', 'default'),
+                        scale: getIconScale('webcams', 'default', 0.5),
+                        color: Cesium.Color.WHITE.withAlpha(getIconOpacity('webcams', 'default')),
                         id: camId,
                         verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
                     });

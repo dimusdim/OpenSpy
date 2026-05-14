@@ -9,6 +9,9 @@ import {
     AI_CONTEXT_DEFAULTS,
     type AIContextObject,
     type AIContextSnapshot,
+    type AIImageGeneratedGeometry,
+    type AIImageModelCapabilities,
+    type AIImageSourceGeometry,
 } from '../store/useAIImageStore';
 import { useTimelineStore } from '../store/useTimelineStore';
 import {
@@ -65,6 +68,8 @@ type GalleryApiRecord = {
     viewport: GalleryEntry['viewport'];
     originalFile?: string;
     generatedFile?: string;
+    sourceGeometry?: AIImageSourceGeometry;
+    generatedGeometry?: AIImageGeneratedGeometry;
     contextSnapshot?: AIContextSnapshot;
 };
 
@@ -72,8 +77,16 @@ type GenerateApiRecord = {
     id: string;
     originalFile: string;
     generatedFile: string;
+    sourceGeometry?: AIImageSourceGeometry;
+    generatedGeometry?: AIImageGeneratedGeometry;
     contextSnapshot?: AIContextSnapshot;
 };
+
+async function fetchModelCapabilities(model: string): Promise<AIImageModelCapabilities> {
+    const res = await fetch(`${API_URL}/api/ai-image/model-capabilities?model=${encodeURIComponent(model)}`);
+    if (!res.ok) throw new Error(`Model capabilities failed: HTTP ${res.status}`);
+    return res.json() as Promise<AIImageModelCapabilities>;
+}
 
 function getGlobalViewer(): Cesium.Viewer | undefined {
     return (window as ViewerWindow).viewerContext;
@@ -112,16 +125,22 @@ export function AIImageToggle() {
 // ===========================================================================
 
 function ImageOverlayComparison({
+    entry,
     beforeSrc,
     afterSrc,
     onClose,
 }: {
+    entry: GalleryEntry;
     beforeSrc: string;
     afterSrc: string;
     onClose: () => void;
 }) {
     const overlayOpacity = useAIImageStore((s) => s.overlayOpacity);
     const setOverlayOpacity = useAIImageStore((s) => s.setOverlayOpacity);
+    const [windowSize, setWindowSize] = useState(() => ({
+        width: typeof window !== 'undefined' ? window.innerWidth : 1280,
+        height: typeof window !== 'undefined' ? window.innerHeight : 720,
+    }));
 
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
@@ -133,23 +152,80 @@ function ImageOverlayComparison({
         };
     }, [onClose]);
 
+    useEffect(() => {
+        const onResize = () => {
+            setWindowSize({ width: window.innerWidth, height: window.innerHeight });
+        };
+        window.addEventListener('resize', onResize);
+        return () => window.removeEventListener('resize', onResize);
+    }, []);
+
     const opacityFraction = overlayOpacity / 100;
+    const geometry = entry.sourceGeometry;
+    const overlayStyle = (() => {
+        if (!geometry) return null;
+        const capture = geometry.capture;
+        const visible = geometry.visibleRect;
+        if (
+            capture.width <= 0 ||
+            capture.height <= 0 ||
+            visible.width <= 0 ||
+            visible.height <= 0
+        ) {
+            return null;
+        }
+        const scale = Math.min(windowSize.width / visible.width, windowSize.height / visible.height);
+        const frameWidth = capture.width * scale;
+        const frameHeight = capture.height * scale;
+        const visibleCenterX = (visible.x + visible.width / 2) * scale;
+        const visibleCenterY = (visible.y + visible.height / 2) * scale;
+        return {
+            left: windowSize.width / 2 - visibleCenterX,
+            top: windowSize.height / 2 - visibleCenterY,
+            width: frameWidth,
+            height: frameHeight,
+        };
+    })();
 
     return (
         <div className="fixed inset-0 z-[9500] bg-black select-none">
-            <img
-                src={beforeSrc}
-                alt="Source"
-                className="absolute inset-0 h-full w-full object-contain object-center"
-                draggable={false}
-            />
-            <img
-                src={afterSrc}
-                alt="Generated"
-                className="absolute inset-0 h-full w-full object-contain object-center"
-                style={{ opacity: opacityFraction }}
-                draggable={false}
-            />
+            {overlayStyle ? (
+                <div
+                    className="absolute overflow-hidden"
+                    data-ai-image-compare-frame="true"
+                    style={overlayStyle}
+                >
+                    <img
+                        src={beforeSrc}
+                        alt="Source"
+                        className="absolute inset-0 h-full w-full object-fill"
+                        draggable={false}
+                    />
+                    <img
+                        src={afterSrc}
+                        alt="Generated"
+                        className="absolute inset-0 h-full w-full object-fill"
+                        style={{ opacity: opacityFraction }}
+                        draggable={false}
+                    />
+                </div>
+            ) : (
+                <>
+                    <img
+                        src={beforeSrc}
+                        alt="Source"
+                        className="absolute inset-0 h-full w-full object-contain object-center"
+                        draggable={false}
+                    />
+                    <img
+                        src={afterSrc}
+                        alt="Generated"
+                        className="absolute inset-0 h-full w-full object-contain object-center"
+                        style={{ opacity: opacityFraction }}
+                        draggable={false}
+                    />
+                </>
+            )}
 
             {/* Labels */}
             <span className="absolute left-4 top-4 z-20 px-2 py-1 text-[11px] font-mono text-white/70 bg-black/50 rounded pointer-events-none">
@@ -221,6 +297,7 @@ function FullscreenOverlay() {
     if (originalSrc && generatedSrc) {
         return createPortal(
             <ImageOverlayComparison
+                entry={entry}
                 beforeSrc={originalSrc}
                 afterSrc={generatedSrc}
                 onClose={() => setEntry(null)}
@@ -801,7 +878,10 @@ function PresetRow({
                             />
                             <datalist id={`models-${preset.id}`}>
                                 <option value="google/gemini-3.1-flash-image-preview">Nano Banana 2</option>
-                                <option value="black-forest-labs/flux.2-max">FLUX.2 Max</option>
+                                <option value="google/gemini-3-pro-image-preview">Nano Banana Pro</option>
+                                <option value="openai/gpt-5.4-image-2">GPT-5.4 Image 2</option>
+                                <option value="openai/gpt-5-image">GPT-5 Image</option>
+                                <option value="openai/gpt-5-image-mini">GPT-5 Image Mini</option>
                             </datalist>
                         </div>
                     </label>
@@ -910,6 +990,8 @@ export default function AIImagePanel({ embedded = false }: { embedded?: boolean 
                     status: 'completed' as const,
                     originalFile: rec.originalFile,
                     generatedFile: rec.generatedFile,
+                    sourceGeometry: rec.sourceGeometry,
+                    generatedGeometry: rec.generatedGeometry,
                     contextSnapshot: rec.contextSnapshot,
                 }));
                 const pending = useAIImageStore
@@ -1007,10 +1089,16 @@ export default function AIImagePanel({ embedded = false }: { embedded?: boolean 
 
             let screenshot: string;
             let viewport: ViewportSnapshot;
+            let sourceGeometry: AIImageSourceGeometry;
+            let capabilities: AIImageModelCapabilities;
             try {
-                const result = await captureScreenshot();
+                capabilities = await fetchModelCapabilities(preset.model);
+                const result = await captureScreenshot({
+                    supportedAspectRatios: capabilities.supportedAspectRatios,
+                });
                 screenshot = result.dataUrl;
                 viewport = result.viewport;
+                sourceGeometry = result.sourceGeometry;
             } catch (err: unknown) {
                 console.error('[AIImage] Screenshot failed:', err);
                 return;
@@ -1025,6 +1113,7 @@ export default function AIImagePanel({ embedded = false }: { embedded?: boolean 
                 viewport: { ...viewport, tileMode },
                 status: 'pending',
                 localScreenshot: screenshot,
+                sourceGeometry,
                 contextSnapshot: contextSnapshot ?? undefined,
             };
             addPending(entry);
@@ -1041,6 +1130,8 @@ export default function AIImagePanel({ embedded = false }: { embedded?: boolean 
                             prompt: resolvedPrompt,
                             model: preset.model,
                             presetName: preset.name,
+                            requestedAspectRatio: sourceGeometry.requestedAspectRatio,
+                            sourceGeometry,
                             contextSnapshot,
                         }),
                     },
@@ -1062,6 +1153,8 @@ export default function AIImagePanel({ embedded = false }: { embedded?: boolean 
                         serverId: record.id,
                         originalFile: record.originalFile,
                         generatedFile: record.generatedFile,
+                        sourceGeometry: record.sourceGeometry ?? sourceGeometry,
+                        generatedGeometry: record.generatedGeometry,
                         contextSnapshot: record.contextSnapshot ?? contextSnapshot ?? undefined,
                         status: 'completed',
                         localScreenshot: undefined,

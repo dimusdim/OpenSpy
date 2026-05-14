@@ -2,7 +2,17 @@ import * as Cesium from 'cesium';
 import { getSatBillboardImage } from '../icons/map-icons';
 import { applyFastBillboardPosition, type SatelliteApplySlot } from './satelliteApplyManager';
 import { ReplayDenseGeometryPrimitive, writeDenseColor } from './replayDenseGeometryPrimitive';
-import { baseColorForSatellite, colorForStyle, featureFamilyForLayer, getReplayApplyChunkSize, getReplayHydrationStage, pointIconForStyle, pointScaleForStyle, toHudLayerName } from './renderStyleRegistry';
+import {
+    baseColorForSatellite,
+    colorForStyle,
+    featureFamilyForLayer,
+    getReplayApplyChunkSize,
+    getReplayHydrationStage,
+    pointIconForStyle,
+    pointOpacityForStyle,
+    pointScaleForStyle,
+    toHudLayerName,
+} from './renderStyleRegistry';
 import { replayHttpGet } from './replayHttp';
 import { createBillboardScreenHeadingScratch, headingFallbackRotation, screenSpaceRotationForHeading } from './billboardScreenHeading';
 
@@ -1179,6 +1189,7 @@ export class ReplayRenderBatchManager {
                 const icon = await pointImageForReplayStyle(options.layerId, style);
                 if (isCancelled()) return cancelledResult();
                 const scale = pointScaleForStyle(options.layerId, style);
+                const opacity = pointOpacityForStyle(options.layerId, style);
                 const position = new Cesium.Cartesian3(x, y, z);
                 const rotation = this.pointRotation(options.layerId, position, Number.isFinite(heading) ? heading : null);
                 const visibilityId = featureId || pickId;
@@ -1192,6 +1203,7 @@ export class ReplayRenderBatchManager {
                     position,
                     image: icon,
                     scale,
+                    color: Cesium.Color.WHITE.withAlpha(opacity),
                     rotation,
                     ...(options.layerId === 'vessel' ? { alignedAxis: Cesium.Cartesian3.UNIT_Z } : {}),
                     show: visible,
@@ -1434,6 +1446,7 @@ export class ReplayRenderBatchManager {
                     : pointIconForStyle(manifest.layerId, style);
                 if (isCancelled()) return cleanupPartialRender();
                 const scale = pointScaleForStyle(manifest.layerId, style);
+                const opacity = pointOpacityForStyle(manifest.layerId, style);
                 const pickId = makeRenderId(manifest.chunkId, row.featureIndex);
                 const visibilityId = ref?.id || pickId;
                 const visible = this.resolveVisible(
@@ -1492,6 +1505,7 @@ export class ReplayRenderBatchManager {
                         position,
                         image: icon,
                         scale,
+                        color: Cesium.Color.WHITE.withAlpha(opacity),
                         rotation,
                         ...(manifest.layerId === 'vessel' ? { alignedAxis: Cesium.Cartesian3.UNIT_Z } : {}),
                         show: visible,

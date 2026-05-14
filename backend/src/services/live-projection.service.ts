@@ -947,7 +947,33 @@ export class LiveProjectionService {
     private async getEventDetails(layerId: string, id: string): Promise<Record<string, any> | null> {
         if (!this.database.isReady()) return null;
         const candidates = this.normalizeEventDetailCandidates(layerId, id);
-        const result = await this.database.query<any>(
+        const liveResult = await this.database.query<any>(
+            `
+                SELECT
+                    e.event_id,
+                    e.layer_id,
+                    e.source_id,
+                    e.event_kind,
+                    e.subtype,
+                    e.observed_at,
+                    e.valid_from,
+                    e.valid_to,
+                    CASE WHEN e.geom IS NOT NULL THEN ST_AsGeoJSON(e.geom)::jsonb ELSE NULL END AS geometry,
+                    CASE WHEN e.geom IS NOT NULL THEN ST_Y(ST_PointOnSurface(e.geom)) ELSE NULL END AS display_lat,
+                    CASE WHEN e.geom IS NOT NULL THEN ST_X(ST_PointOnSurface(e.geom)) ELSE NULL END AS display_lng,
+                    e.properties
+                FROM core.events e
+                WHERE e.layer_id = $1
+                  AND e.event_id = ANY($2::text[])
+                ORDER BY COALESCE(e.observed_at, e.updated_at, e.created_at) DESC, e.updated_at DESC
+                LIMIT 1
+            `,
+            [layerId, candidates],
+        );
+        const liveRow = liveResult?.rows?.[0];
+        if (liveRow) return this.eventDetailsFromRow(layerId, liveRow);
+
+        const snapshotResult = await this.database.query<any>(
             `
                 SELECT
                     s.event_id,
@@ -970,8 +996,12 @@ export class LiveProjectionService {
             `,
             [layerId, candidates],
         );
-        const row = result?.rows?.[0];
+        const row = snapshotResult?.rows?.[0];
         if (!row) return null;
+        return this.eventDetailsFromRow(layerId, row);
+    }
+
+    private eventDetailsFromRow(layerId: string, row: any): Record<string, any> {
         const props = stripStateHash(row.properties);
         return {
             layerId,
@@ -983,8 +1013,8 @@ export class LiveProjectionService {
             observedAt: normalizeObservedAt(row.observed_at),
             validFrom: normalizeObservedAt(row.valid_from),
             validTo: normalizeObservedAt(row.valid_to),
-            lat: Number.isFinite(row.display_lat) ? row.display_lat : null,
-            lng: Number.isFinite(row.display_lng) ? row.display_lng : null,
+            lat: Number.isFinite(Number(row.display_lat)) ? Number(row.display_lat) : null,
+            lng: Number.isFinite(Number(row.display_lng)) ? Number(row.display_lng) : null,
             properties: props,
             geometry: row.geometry || null,
         };

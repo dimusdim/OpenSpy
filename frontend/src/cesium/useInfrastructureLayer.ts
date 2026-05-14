@@ -4,7 +4,7 @@ import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
 import { perfLog } from '../lib/perf-log';
-import { INFRA_ICONS } from '../icons/map-icons';
+import { getIconOpacity, getIconScale, getInfraIcon } from '../icons/map-icons';
 import { getViewerAltitudeMeters } from './position-utils';
 
 const POWER_LINE_COLOR = Cesium.Color.ORANGE.withAlpha(0.85);
@@ -512,8 +512,9 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
                 const instanceId = registerLogical(rec.id, meta);
                 collection.add({
                   position: Cesium.Cartesian3.fromDegrees(rec.lng, rec.lat, 0),
-                  image: INFRA_ICONS[subtype] || INFRA_ICONS.military,
-                  scale: 0.9,
+                  image: getInfraIcon(subtype),
+                  scale: getIconScale('infrastructure', subtype, 0.9),
+                  color: Cesium.Color.WHITE.withAlpha(getIconOpacity('infrastructure', subtype)),
                   id: instanceId,
                   heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
                   verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
@@ -621,8 +622,9 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
                 const instanceId = registerLogical(rec.id, meta);
                 powerBillboardCollection.add({
                   position: Cesium.Cartesian3.fromDegrees(rec.lng, rec.lat, 0),
-                  image: subtype === 'power_substation' ? INFRA_ICONS.power_substation : INFRA_ICONS.power_plant,
-                  scale: 0.85,
+                  image: subtype === 'power_substation' ? getInfraIcon('power_substation') : getInfraIcon('power_plant'),
+                  scale: getIconScale('infrastructure', subtype === 'power_substation' ? 'power_substation' : 'power_plant', 0.85),
+                  color: Cesium.Color.WHITE.withAlpha(getIconOpacity('infrastructure', subtype === 'power_substation' ? 'power_substation' : 'power_plant')),
                   id: instanceId,
                   heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
                   verticalOrigin: Cesium.VerticalOrigin.BOTTOM,

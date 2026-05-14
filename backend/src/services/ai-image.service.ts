@@ -42,6 +42,36 @@ export interface AIImageContextSnapshot {
     generatedAt: string;
 }
 
+export interface AIImageRect {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+}
+
+export interface AIImageSourceGeometry {
+    viewportCanvas: { width: number; height: number };
+    capture: { width: number; height: number; aspectRatio: string };
+    visibleRect: AIImageRect;
+    requestedAspectRatio: string;
+    strategy: 'viewport' | 'expanded-render' | 'center-pad';
+}
+
+export interface AIImageGeneratedGeometry {
+    width: number;
+    height: number;
+    aspectRatio: string;
+}
+
+export interface AIImageModelCapabilities {
+    model: string;
+    provider: string;
+    supportedAspectRatios: string[];
+    defaultAspectRatio: string;
+    defaultImageSize: string;
+    supportsImageToImage: boolean;
+}
+
 export interface ImageRecord {
     id: string;
     timestamp: string;
@@ -51,6 +81,8 @@ export interface ImageRecord {
     viewport: ViewportData;
     originalFile: string;
     generatedFile: string;
+    sourceGeometry?: AIImageSourceGeometry;
+    generatedGeometry?: AIImageGeneratedGeometry;
     contextSnapshot?: AIImageContextSnapshot;
 }
 
@@ -77,6 +109,144 @@ const STANDARD_RATIOS = [
     { label: '9:16', value: 9 / 16 },
 ];
 
+const OPENROUTER_STANDARD_ASPECT_RATIOS = ['1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9', '21:9'];
+const DEPRECATED_IMAGE_MODEL_REPLACEMENTS: Record<string, string> = {
+    'black-forest-labs/flux.2-max': 'google/gemini-3-pro-image-preview',
+};
+const MODEL_CAPABILITY_OVERRIDES: Record<string, Partial<AIImageModelCapabilities>> = {
+    'google/gemini-3.1-flash-image-preview': {
+        provider: 'openrouter',
+        supportedAspectRatios: ['1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9', '21:9'],
+        defaultAspectRatio: '16:9',
+        defaultImageSize: '2K',
+        supportsImageToImage: true,
+    },
+    'google/gemini-3-pro-image-preview': {
+        provider: 'openrouter',
+        supportedAspectRatios: OPENROUTER_STANDARD_ASPECT_RATIOS,
+        defaultAspectRatio: '16:9',
+        defaultImageSize: '2K',
+        supportsImageToImage: true,
+    },
+    'openai/gpt-5-image': {
+        provider: 'openrouter',
+        supportedAspectRatios: OPENROUTER_STANDARD_ASPECT_RATIOS,
+        defaultAspectRatio: '16:9',
+        defaultImageSize: '2K',
+        supportsImageToImage: true,
+    },
+    'openai/gpt-5-image-mini': {
+        provider: 'openrouter',
+        supportedAspectRatios: OPENROUTER_STANDARD_ASPECT_RATIOS,
+        defaultAspectRatio: '16:9',
+        defaultImageSize: '2K',
+        supportsImageToImage: true,
+    },
+    'openai/gpt-5.4-image-2': {
+        provider: 'openrouter',
+        supportedAspectRatios: OPENROUTER_STANDARD_ASPECT_RATIOS,
+        defaultAspectRatio: '16:9',
+        defaultImageSize: '2K',
+        supportsImageToImage: true,
+    },
+};
+
+function aspectRatioValue(label: string): number | null {
+    const [rawW, rawH] = label.split(':');
+    const w = Number(rawW);
+    const h = Number(rawH);
+    if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return null;
+    return w / h;
+}
+
+function normalizeAspectRatioLabel(value: unknown): string | null {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    return aspectRatioValue(trimmed) ? trimmed : null;
+}
+
+export function getAIImageModelCapabilities(model: string | undefined | null): AIImageModelCapabilities {
+    const rawId = String(model || 'google/gemini-3.1-flash-image-preview').trim() || 'google/gemini-3.1-flash-image-preview';
+    const id = DEPRECATED_IMAGE_MODEL_REPLACEMENTS[rawId] || rawId;
+    const override = MODEL_CAPABILITY_OVERRIDES[id] || {};
+    const supportedAspectRatios = override.supportedAspectRatios?.length
+        ? override.supportedAspectRatios
+        : OPENROUTER_STANDARD_ASPECT_RATIOS;
+    const defaultAspectRatio = override.defaultAspectRatio && supportedAspectRatios.includes(override.defaultAspectRatio)
+        ? override.defaultAspectRatio
+        : supportedAspectRatios.includes('16:9') ? '16:9' : supportedAspectRatios[0];
+    return {
+        model: id,
+        provider: override.provider || 'openrouter',
+        supportedAspectRatios,
+        defaultAspectRatio,
+        defaultImageSize: override.defaultImageSize || '2K',
+        supportsImageToImage: override.supportsImageToImage ?? true,
+    };
+}
+
+function selectClosestSupportedAspectRatio(width: number, height: number, supported: string[], fallback: string): string {
+    const ratio = width / height;
+    const options = supported
+        .map((label) => ({ label, value: aspectRatioValue(label) }))
+        .filter((item): item is { label: string; value: number } => item.value !== null);
+    if (options.length === 0) return fallback;
+    return options.reduce((best, candidate) => (
+        Math.abs(candidate.value - ratio) < Math.abs(best.value - ratio) ? candidate : best
+    )).label;
+}
+
+function imageDimensionsFromBuffer(buffer: Buffer): { width: number; height: number } | null {
+    if (
+        buffer.length >= 24 &&
+        buffer[0] === 0x89 &&
+        buffer[1] === 0x50 &&
+        buffer[2] === 0x4e &&
+        buffer[3] === 0x47
+    ) {
+        return {
+            width: buffer.readUInt32BE(16),
+            height: buffer.readUInt32BE(20),
+        };
+    }
+
+    if (buffer.length >= 4 && buffer[0] === 0xff && buffer[1] === 0xd8) {
+        let offset = 2;
+        while (offset < buffer.length - 9) {
+            if (buffer[offset] !== 0xff) {
+                offset += 1;
+                continue;
+            }
+            const marker = buffer[offset + 1];
+            const length = buffer.readUInt16BE(offset + 2);
+            if (length < 2) return null;
+            if (
+                marker === 0xc0 ||
+                marker === 0xc1 ||
+                marker === 0xc2 ||
+                marker === 0xc3 ||
+                marker === 0xc5 ||
+                marker === 0xc6 ||
+                marker === 0xc7 ||
+                marker === 0xc9 ||
+                marker === 0xca ||
+                marker === 0xcb ||
+                marker === 0xcd ||
+                marker === 0xce ||
+                marker === 0xcf
+            ) {
+                return {
+                    height: buffer.readUInt16BE(offset + 5),
+                    width: buffer.readUInt16BE(offset + 7),
+                };
+            }
+            offset += 2 + length;
+        }
+    }
+
+    return null;
+}
+
 function closestAspectRatio(w: number, h: number): string {
     const ratio = w / h;
     let best = STANDARD_RATIOS[0];
@@ -96,14 +266,14 @@ function closestAspectRatio(w: number, h: number): string {
  * The screenshot parameter is a base64 data URL like "data:image/png;base64,...".
  * Returns the closest standard aspect ratio string.
  */
-function aspectRatioFromPng(dataUrl: string): string {
+function aspectRatioFromPng(dataUrl: string): string | null {
     const base64Body = dataUrl.replace(/^data:image\/\w+;base64,/, '');
     // PNG header: 8-byte signature, then IHDR chunk (4 len + 4 type + 4 width + 4 height ...)
     // Width is at bytes 16-19, height at bytes 20-23 (big-endian uint32).
     const buf = Buffer.from(base64Body, 'base64');
     if (buf.length < 24) {
-        console.warn('[AIImage] PNG too short to read IHDR, defaulting to 16:9');
-        return '16:9';
+        console.warn('[AIImage] PNG too short to read IHDR');
+        return null;
     }
     const width = buf.readUInt32BE(16);
     const height = buf.readUInt32BE(20);
@@ -231,6 +401,59 @@ function sanitizeContextSnapshot(input: unknown): AIImageContextSnapshot | undef
     };
 }
 
+function sanitizeRect(input: unknown, fallback: AIImageRect): AIImageRect {
+    const rect = input && typeof input === 'object' ? input as Partial<AIImageRect> : {};
+    return {
+        x: Math.max(0, finiteNumber(rect.x, fallback.x)),
+        y: Math.max(0, finiteNumber(rect.y, fallback.y)),
+        width: Math.max(1, finiteNumber(rect.width, fallback.width)),
+        height: Math.max(1, finiteNumber(rect.height, fallback.height)),
+    };
+}
+
+function sanitizeSourceGeometry(
+    input: unknown,
+    originalDimensions: { width: number; height: number } | null,
+    requestedAspectRatio: string,
+): AIImageSourceGeometry | undefined {
+    const width = originalDimensions?.width || 1;
+    const height = originalDimensions?.height || 1;
+    const fallback: AIImageSourceGeometry = {
+        viewportCanvas: { width, height },
+        capture: { width, height, aspectRatio: requestedAspectRatio },
+        visibleRect: { x: 0, y: 0, width, height },
+        requestedAspectRatio,
+        strategy: 'viewport',
+    };
+    if (!input || typeof input !== 'object') return fallback;
+
+    const value = input as Partial<AIImageSourceGeometry>;
+    const viewportCanvas = value.viewportCanvas && typeof value.viewportCanvas === 'object'
+        ? value.viewportCanvas as Partial<{ width: number; height: number }>
+        : {};
+    const capture = value.capture && typeof value.capture === 'object'
+        ? value.capture as Partial<{ width: number; height: number; aspectRatio: string }>
+        : {};
+    const strategy = value.strategy === 'expanded-render' || value.strategy === 'center-pad' || value.strategy === 'viewport'
+        ? value.strategy
+        : 'viewport';
+
+    return {
+        viewportCanvas: {
+            width: Math.max(1, finiteNumber(viewportCanvas.width, fallback.viewportCanvas.width)),
+            height: Math.max(1, finiteNumber(viewportCanvas.height, fallback.viewportCanvas.height)),
+        },
+        capture: {
+            width: Math.max(1, finiteNumber(capture.width, fallback.capture.width)),
+            height: Math.max(1, finiteNumber(capture.height, fallback.capture.height)),
+            aspectRatio: normalizeAspectRatioLabel(capture.aspectRatio) || requestedAspectRatio,
+        },
+        visibleRect: sanitizeRect(value.visibleRect, fallback.visibleRect),
+        requestedAspectRatio: normalizeAspectRatioLabel(value.requestedAspectRatio) || requestedAspectRatio,
+        strategy,
+    };
+}
+
 function sanitizeContextObject(input: unknown): AIImageContextObject | null {
     if (!input || typeof input !== 'object') return null;
     const object = input as Partial<AIImageContextObject>;
@@ -315,6 +538,8 @@ export class AIImageService {
         model: string = 'google/gemini-3.1-flash-image-preview',
         presetName: string = '',
         contextSnapshot?: AIImageContextSnapshot,
+        sourceGeometry?: AIImageSourceGeometry,
+        requestedAspectRatio?: string,
     ): Promise<ImageRecord> {
         const id = `img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         const timestamp = new Date().toISOString();
@@ -322,19 +547,36 @@ export class AIImageService {
         // Persist original screenshot ----------------------------------------
         const originalFile = `${id}_original.png`;
         const base64Body = screenshot.replace(/^data:image\/\w+;base64,/, '');
-        fs.writeFileSync(path.join(ORIGINALS_DIR, originalFile), base64Body, 'base64');
+        const originalBuffer = Buffer.from(base64Body, 'base64');
+        fs.writeFileSync(path.join(ORIGINALS_DIR, originalFile), originalBuffer);
 
         console.log(`[AIImage] Saved original: ${originalFile} (${(base64Body.length * 0.75 / 1024 / 1024).toFixed(1)} MB)`);
 
-        // Call OpenRouter Gemini Flash Image ---------------------------------
+        // Call selected OpenRouter image model -------------------------------
         const apiKey = process.env.OPENROUTER_API_KEY;
         if (!apiKey) throw new Error('OPENROUTER_API_KEY not configured');
 
-        // Compute aspect ratio from PNG header
-        const aspectRatio = aspectRatioFromPng(screenshot);
+        // Compute/validate aspect ratio against the selected model capability.
+        const modelCapabilities = getAIImageModelCapabilities(model);
+        const effectiveModel = modelCapabilities.model;
+        const originalDimensions = imageDimensionsFromBuffer(originalBuffer);
+        const fallbackAspectRatio = originalDimensions
+            ? selectClosestSupportedAspectRatio(
+                originalDimensions.width,
+                originalDimensions.height,
+                modelCapabilities.supportedAspectRatios,
+                modelCapabilities.defaultAspectRatio,
+            )
+            : normalizeAspectRatioLabel(aspectRatioFromPng(screenshot)) || modelCapabilities.defaultAspectRatio;
+        const requestedRatio = normalizeAspectRatioLabel(requestedAspectRatio)
+            || normalizeAspectRatioLabel(sourceGeometry?.requestedAspectRatio)
+            || fallbackAspectRatio;
+        const aspectRatio = modelCapabilities.supportedAspectRatios.includes(requestedRatio)
+            ? requestedRatio
+            : fallbackAspectRatio;
 
         // Build model-specific config
-        const isGemini = model.startsWith('google/');
+        const isGemini = effectiveModel.startsWith('google/');
         const modalities = isGemini ? ['image', 'text'] : ['image'];
 
         // OpenRouter image_config supports ONLY:
@@ -342,14 +584,10 @@ export class AIImageService {
         //   image_size: "1K"|"2K"|"4K"
         // width/height are NOT supported — OpenRouter silently ignores them
         // and returns 1024x1024. All models use the same params.
-        let imageConfig: Record<string, any>;
-        if (isGemini) {
-            // Gemini auto-inherits aspect ratio from input image
-            imageConfig = { image_size: '2K' };
-        } else {
-            // FLUX, and any other model: aspect_ratio + image_size
-            imageConfig = { aspect_ratio: aspectRatio, image_size: '2K' };
-        }
+        const imageConfig: Record<string, any> = {
+            aspect_ratio: aspectRatio,
+            image_size: modelCapabilities.defaultImageSize,
+        };
 
         let imageData: string | null = null;
         let lastNoImageBody = '';
@@ -359,12 +597,12 @@ export class AIImageService {
             const attemptPrompt = attempt === 1
                 ? prompt
                 : `${prompt}\n\nReturn the transformed result as an image output. Do not answer with text only.`;
-            console.log(`[AIImage] Generating ${id} attempt=${attempt}  model=${model}  config=${JSON.stringify(imageConfig)}  prompt="${attemptPrompt.slice(0, 80)}…"`);
+            console.log(`[AIImage] Generating ${id} attempt=${attempt}  model=${effectiveModel}  config=${JSON.stringify(imageConfig)}  prompt="${attemptPrompt.slice(0, 80)}…"`);
 
             const response = await axios.post(
                 'https://openrouter.ai/api/v1/chat/completions',
                 {
-                    model,
+                    model: effectiveModel,
                     messages: [
                         {
                             role: 'user',
@@ -415,28 +653,38 @@ export class AIImageService {
 
         // Persist generated image --------------------------------------------
         const generatedFile = `${id}_generated.png`;
+        let generatedBuffer: Buffer;
         if (imageData.startsWith('data:')) {
             const genBase64 = imageData.replace(/^data:image\/\w+;base64,/, '');
-            fs.writeFileSync(path.join(GENERATED_DIR, generatedFile), genBase64, 'base64');
+            generatedBuffer = Buffer.from(genBase64, 'base64');
+            fs.writeFileSync(path.join(GENERATED_DIR, generatedFile), generatedBuffer);
         } else {
             const imgRes = await axios.get(imageData, {
                 responseType: 'arraybuffer',
                 timeout: 30_000,
             });
-            fs.writeFileSync(path.join(GENERATED_DIR, generatedFile), Buffer.from(imgRes.data));
+            generatedBuffer = Buffer.from(imgRes.data);
+            fs.writeFileSync(path.join(GENERATED_DIR, generatedFile), generatedBuffer);
         }
 
         console.log(`[AIImage] Saved ${generatedFile}`);
+        const generatedDimensions = imageDimensionsFromBuffer(generatedBuffer);
 
         const record: ImageRecord = {
             id,
             timestamp,
             prompt,
-            model,
+            model: effectiveModel,
             presetName,
             viewport,
             originalFile,
             generatedFile,
+            sourceGeometry: sanitizeSourceGeometry(sourceGeometry, originalDimensions, aspectRatio),
+            generatedGeometry: generatedDimensions ? {
+                width: generatedDimensions.width,
+                height: generatedDimensions.height,
+                aspectRatio: closestAspectRatio(generatedDimensions.width, generatedDimensions.height),
+            } : undefined,
             contextSnapshot: sanitizeContextSnapshot(contextSnapshot),
         };
 

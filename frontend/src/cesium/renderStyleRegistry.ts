@@ -1,5 +1,16 @@
 import * as Cesium from 'cesium';
-import { getAviIcon, getConflictIcon, getDisasterIcon, getMapIcon, getOutageIcon, getSatIcon, getShipIcon, svgUri } from '../icons/map-icons';
+import {
+    getAviIcon,
+    getConflictIcon,
+    getDisasterIcon,
+    getIconOpacity,
+    getIconScale,
+    getMapIcon,
+    getOutageIcon,
+    getSatIcon,
+    getShipIcon,
+    svgUri,
+} from '../icons/map-icons';
 import layerContractsDoc from '../../../config/layer-contracts.json';
 
 export type RenderStyleLike = {
@@ -241,11 +252,6 @@ export function getReplayMotionTrackRefreshSeconds(layerId: string): number {
     return requireNumberField(contract, 'motionTrackRefreshSeconds');
 }
 
-const REPLAY_ASSET_POINT_ICON = svgUri('<circle cx="12" cy="12" r="7" fill="#38bdf8"/>');
-const REPLAY_JAM_HIGH = svgUri('<circle cx="12" cy="12" r="7" fill="#ef4444"/>');
-const REPLAY_JAM_MEDIUM = svgUri('<circle cx="12" cy="12" r="7" fill="#f97316"/>');
-const REPLAY_JAM_LOW = svgUri('<circle cx="12" cy="12" r="7" fill="#eab308"/>');
-
 function colorForLayer(layerId: string, alpha: number): Cesium.Color {
     const base = Cesium.Color.fromCssColorString(getStyleContract(layerId).color);
     return Cesium.Color.fromAlpha(base, alpha);
@@ -281,15 +287,13 @@ export function pointIconForStyle(layerId: string, style: RenderStyleLike | unde
         case 'outage':
             return getOutageIcon(subtype || 'warning');
         case 'fire':
-            return getMapIcon('fires', subtype || 'high') || REPLAY_ASSET_POINT_ICON;
+            return getMapIcon('fires', subtype || 'high') || svgUri('<circle cx="12" cy="12" r="7" fill="#ef4444"/>');
         case 'gfw':
-            return getMapIcon('gfw', 'default') || REPLAY_ASSET_POINT_ICON;
+            return getMapIcon('gfw', 'default') || svgUri('<circle cx="12" cy="12" r="7" fill="#22c55e"/>');
         case 'asset':
-            return REPLAY_ASSET_POINT_ICON;
+            return getMapIcon('asset', 'default') || svgUri('<circle cx="12" cy="12" r="7" fill="#38bdf8"/>');
         case 'jamming':
-            if (subtype === 'high') return REPLAY_JAM_HIGH;
-            if (subtype === 'low') return REPLAY_JAM_LOW;
-            return REPLAY_JAM_MEDIUM;
+            return getMapIcon('jamming', subtype || 'medium') || svgUri('<circle cx="12" cy="12" r="7" fill="#f97316"/>');
         default:
             throw new Error(`Missing replay point-icon contract for layer_id=${normalizeLayerId(layerId)}`);
     }
@@ -324,12 +328,49 @@ function pointScaleForLayer(layerId: string): number {
     return Number.isFinite(scale) ? Number(scale) : 1.1;
 }
 
+function iconTargetForStyle(layerId: string, style: RenderStyleLike | undefined): { layer: string; subtype: string } {
+    const contract = getStyleContract(layerId);
+    const subtype = style?.subtype || undefined;
+    const variant = style?.variant || undefined;
+    switch (contract.pointIcon) {
+        case 'aircraft':
+            return { layer: 'aviation', subtype: subtype || 'general' };
+        case 'vessel':
+            return { layer: 'maritime', subtype: subtype || 'unknown' };
+        case 'satellite':
+            return { layer: 'satellites', subtype: variant === 'recon' || subtype === 'recon' ? 'recon' : subtype || 'civilian' };
+        case 'disaster':
+            return { layer: 'disasters', subtype: subtype || 'XX' };
+        case 'conflict':
+            return { layer: 'conflicts', subtype: variant || subtype || 'violence' };
+        case 'outage':
+            return { layer: 'outages', subtype: subtype || 'warning' };
+        case 'fire':
+            return { layer: 'fires', subtype: subtype || 'high' };
+        case 'gfw':
+            return { layer: 'gfw', subtype: 'default' };
+        case 'asset':
+            return { layer: 'asset', subtype: 'default' };
+        case 'jamming':
+            return { layer: 'jamming', subtype: subtype || 'medium' };
+        default:
+            return { layer: 'asset', subtype: 'default' };
+    }
+}
+
 export function pointScaleForStyle(layerId: string, style: RenderStyleLike | undefined): number {
     const contract = getStyleContract(layerId);
+    const target = iconTargetForStyle(layerId, style);
     if (contract.pointIcon === 'satellite' && (style?.variant === 'recon' || style?.subtype === 'recon')) {
-        return Number.isFinite(contract.reconPointScale) ? Number(contract.reconPointScale) : 1.8;
+        const scale = Number.isFinite(contract.reconPointScale) ? Number(contract.reconPointScale) : 1.8;
+        return getIconScale(target.layer, target.subtype, scale);
     }
-    return pointScaleForLayer(layerId);
+    return getIconScale(target.layer, target.subtype, pointScaleForLayer(layerId));
+}
+
+export function pointOpacityForStyle(layerId: string, style: RenderStyleLike | undefined): number {
+    const target = iconTargetForStyle(layerId, style);
+    return getIconOpacity(target.layer, target.subtype);
 }
 
 function layerColorWithAlpha(layerId: string, cssColor: string | undefined, alpha: number | undefined, fallbackAlpha: number): Cesium.Color {

@@ -42,6 +42,73 @@ export function svgDataUri(svg: string): string {
   return `data:image/svg+xml,` + encodeURIComponent(svg);
 }
 
+// ========================= Runtime icon packs ===============================
+
+export type RuntimeIconPackIcon = {
+  id: string;
+  layer: string;
+  subtype: string;
+  file: string;
+  scale?: number;
+  opacity?: number;
+};
+
+export type RuntimeIconPack = {
+  id: string;
+  name?: string;
+  icons: Record<string, RuntimeIconPackIcon>;
+};
+
+let runtimeIconPack: RuntimeIconPack | null = null;
+let runtimeIconPackRevision = 0;
+
+export function setRuntimeIconPack(pack: RuntimeIconPack | null): void {
+  runtimeIconPack = pack;
+  runtimeIconPackRevision += 1;
+  satBillboardImageCache.clear();
+}
+
+function normalizeConflictSubtype(subtype: string): string {
+  if (subtype.includes('Explosions') || subtype.includes('Remote violence')) return 'explosions';
+  if (subtype === 'Battles' || subtype === 'force_posture' || subtype === 'assaults') return 'battles';
+  return 'violence';
+}
+
+function normalizeIconSubtype(layer: string, subtype: string): string {
+  if (layer === 'conflicts') return normalizeConflictSubtype(subtype);
+  if (layer === 'disasters') return subtype || 'XX';
+  if (layer === 'satellites' && subtype === 'recon') return 'recon';
+  if (layer === 'gfw' || layer === 'webcams' || layer === 'asset') return 'default';
+  return subtype || 'default';
+}
+
+function iconPackId(layer: string, subtype: string): string {
+  return `${layer}:${normalizeIconSubtype(layer, subtype)}`;
+}
+
+function runtimeIconConfig(layer: string, subtype: string): RuntimeIconPackIcon | undefined {
+  if (!runtimeIconPack) return undefined;
+  return runtimeIconPack.icons[iconPackId(layer, subtype)];
+}
+
+function runtimeIconUrl(layer: string, subtype: string): string | undefined {
+  if (!runtimeIconPack) return undefined;
+  const icon = runtimeIconConfig(layer, subtype);
+  if (!icon?.file) return undefined;
+  return `/icon-packs/${encodeURIComponent(runtimeIconPack.id)}/${encodeURIComponent(icon.file)}?v=${runtimeIconPackRevision}`;
+}
+
+export function getIconScale(layer: string, subtype: string, fallback = 1): number {
+  const scale = Number(runtimeIconConfig(layer, subtype)?.scale);
+  return Number.isFinite(scale) && scale > 0 ? scale : fallback;
+}
+
+export function getIconOpacity(layer: string, subtype: string, fallback = 1): number {
+  const opacity = Number(runtimeIconConfig(layer, subtype)?.opacity);
+  if (!Number.isFinite(opacity)) return fallback;
+  return Math.max(0, Math.min(1, opacity));
+}
+
 // ======================== Aircraft icons ====================================
 // 32×32 output, 24×24 viewBox, black stroke
 
@@ -62,7 +129,7 @@ export const AVI_ICONS: Record<string, string> = {
 
 /** Resolve an aircraft type to its icon data URI. Falls back to `general`. */
 export function getAviIcon(type: string): string {
-  return AVI_ICONS[type] || AVI_ICONS.general;
+  return runtimeIconUrl('aviation', type) || AVI_ICONS[type] || AVI_ICONS.general;
 }
 
 // ======================== Vessel icons ======================================
@@ -215,7 +282,7 @@ export const VESSEL_ICONS: Record<string, string> = {
 
 /** Resolve a vessel type to its icon data URI. Falls back to `unknown`. */
 export function getShipIcon(type: string): string {
-  return VESSEL_ICONS[type] || VESSEL_ICONS.unknown;
+  return runtimeIconUrl('maritime', type) || VESSEL_ICONS[type] || VESSEL_ICONS.unknown;
 }
 
 // ====================== Dark vessel icon ====================================
@@ -241,6 +308,10 @@ export const DARK_VESSEL_ICON: string =
     `<circle cx="35" cy="13.5" r="1.3" fill="#fff"/>` +
     `</svg>`,
   );
+
+export function getDarkVesselIcon(): string {
+  return runtimeIconUrl('maritime', 'dark_vessel') || DARK_VESSEL_ICON;
+}
 
 // ======================== Satellite icons ===================================
 // 32×32 output, 24×24 viewBox
@@ -352,8 +423,8 @@ export const SAT_RECON_ICON: string = svgDataUri(
 
 /** Resolve a satellite type to its icon data URI. Recon flag overrides type. */
 export function getSatIcon(type: string, isRecon?: boolean): string {
-  if (isRecon) return SAT_RECON_ICON;
-  return SAT_ICONS[type] || SAT_ICONS.civilian;
+  if (isRecon) return runtimeIconUrl('satellites', 'recon') || SAT_RECON_ICON;
+  return runtimeIconUrl('satellites', type) || SAT_ICONS[type] || SAT_ICONS.civilian;
 }
 
 const SAT_BILLBOARD_ICON_SIZE = 32;
@@ -474,7 +545,7 @@ export const INFRA_ICONS: Record<string, string> = {
 
 /** Resolve an infrastructure subtype to its icon data URI. Falls back to power_plant. */
 export function getInfraIcon(subtype: string): string {
-  return INFRA_ICONS[subtype] || INFRA_ICONS.power_plant;
+  return runtimeIconUrl('infrastructure', subtype) || INFRA_ICONS[subtype] || INFRA_ICONS.power_plant;
 }
 
 // ======================== Conflict icons ====================================
@@ -538,6 +609,8 @@ export const CONFLICT_ICON_VIOLENCE: string =
 
 /** Resolve a conflict event type to its icon data URI. */
 export function getConflictIcon(eventType: string): string {
+  const runtime = runtimeIconUrl('conflicts', eventType);
+  if (runtime) return runtime;
   if (eventType.includes('Explosions') || eventType.includes('Remote violence'))
     return CONFLICT_ICON_EXPLOSIONS;
   if (eventType === 'Battles') return CONFLICT_ICON_BATTLES;
@@ -578,6 +651,8 @@ export const DISASTER_EVENT_BODY: Record<string, string> = {
  * 36×36 output, 24×24 viewBox, coloured by alert severity.
  */
 export function getDisasterIcon(eventType: string, alertLevel: string): string {
+  const runtime = runtimeIconUrl('disasters', eventType);
+  if (runtime) return runtime;
   const body = DISASTER_EVENT_BODY[eventType] || DISASTER_EVENT_BODY.XX;
   const fill = DISASTER_ALERT_FILL[alertLevel] || DISASTER_ALERT_FILL.Green;
   return (
@@ -628,6 +703,8 @@ export const OUTAGE_ICON_WARNING: string =
 
 /** Resolve outage severity to icon data URI. Falls back to warning. */
 export function getOutageIcon(severity: string): string {
+  const runtime = runtimeIconUrl('outages', severity);
+  if (runtime) return runtime;
   if (severity === 'critical') return OUTAGE_ICON_CRITICAL;
   return OUTAGE_ICON_WARNING;
 }
@@ -741,21 +818,20 @@ export function getMapIcon(layer: string, subtype: string): string | undefined {
   switch (layer) {
     // --- Aviation ---
     case 'aviation':
-      return AVI_ICONS[subtype] ?? AVI_ICONS.general;
+      return getAviIcon(subtype);
 
     // --- Maritime ---
     case 'maritime':
-      if (subtype === 'dark_vessel') return DARK_VESSEL_ICON;
-      return VESSEL_ICONS[subtype] ?? VESSEL_ICONS.unknown;
+      if (subtype === 'dark_vessel') return getDarkVesselIcon();
+      return getShipIcon(subtype);
 
     // --- Satellites ---
     case 'satellites':
-      if (subtype === 'recon') return SAT_RECON_ICON;
-      return SAT_ICONS[subtype] ?? SAT_ICONS.civilian;
+      return getSatIcon(subtype, subtype === 'recon');
 
     // --- Infrastructure ---
     case 'infrastructure':
-      return INFRA_ICONS[subtype] ?? INFRA_ICONS.power_plant;
+      return getInfraIcon(subtype);
 
     // --- Conflicts ---
     case 'conflicts':
@@ -776,18 +852,28 @@ export function getMapIcon(layer: string, subtype: string): string | undefined {
 
     // --- GFW ---
     case 'gfw':
-      return GFW_ICON;
+      return runtimeIconUrl('gfw', 'default') || GFW_ICON;
 
     // --- Webcams ---
     case 'webcams':
-      return WEBCAM_ICON;
+      return runtimeIconUrl('webcams', 'default') || WEBCAM_ICON;
 
     // --- Fires ---
     case 'fires':
-      if (subtype === 'high') return FIRE_DOT_HIGH;
-      if (subtype === 'medium') return FIRE_DOT_MEDIUM;
-      if (subtype === 'low') return FIRE_DOT_LOW;
-      return FIRE_DOT_HIGH;
+      if (subtype === 'high') return runtimeIconUrl('fires', 'high') || FIRE_DOT_HIGH;
+      if (subtype === 'medium') return runtimeIconUrl('fires', 'medium') || FIRE_DOT_MEDIUM;
+      if (subtype === 'low') return runtimeIconUrl('fires', 'low') || FIRE_DOT_LOW;
+      return runtimeIconUrl('fires', 'high') || FIRE_DOT_HIGH;
+
+    // --- GPS jamming ---
+    case 'jamming':
+      if (subtype === 'high') return runtimeIconUrl('jamming', 'high') || svgUri('<circle cx="12" cy="12" r="7" fill="#ef4444"/>');
+      if (subtype === 'low') return runtimeIconUrl('jamming', 'low') || svgUri('<circle cx="12" cy="12" r="7" fill="#eab308"/>');
+      return runtimeIconUrl('jamming', 'medium') || svgUri('<circle cx="12" cy="12" r="7" fill="#f97316"/>');
+
+    // --- Generic assets ---
+    case 'asset':
+      return runtimeIconUrl('asset', 'default') || svgUri('<circle cx="12" cy="12" r="7" fill="#38bdf8"/>');
 
     default:
       return undefined;

@@ -4,7 +4,7 @@ import { io, Socket } from 'socket.io-client';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
 import { perfLog } from '../lib/perf-log';
-import { getAviIcon, getShipIcon, DARK_VESSEL_ICON } from '../icons/map-icons';
+import { getAviIcon, getDarkVesselIcon, getIconOpacity, getIconScale, getShipIcon } from '../icons/map-icons';
 import { getViewerAltitudeMeters, safeCartesianFromDegrees } from './position-utils';
 import { TrailBatcher } from './TrailBatcher';
 import { applyBillboardScreenSpaceHeading, createBillboardScreenHeadingScratch, headingFallbackRotation, screenSpaceRotationForHeading } from './billboardScreenHeading';
@@ -37,9 +37,6 @@ const getShipSVG = getShipIcon;
 const LIVE_APPLY_BUDGET_MS = 8;
 const LIVE_APPLY_YIELD_EVERY = 500;
 const AIRCRAFT_SCREEN_ROTATION_INTERVAL_MS = 50;
-const LIVE_AIRCRAFT_ICON_SCALE = pointScaleForStyle('aircraft', { subtype: 'general' });
-const LIVE_VESSEL_ICON_SCALE = pointScaleForStyle('vessel', { subtype: 'unknown' });
-
 function yieldToBrowser(): Promise<void> {
     return new Promise(resolve => {
         // Do not wait for browser "idle" here. In the full Cesium/WebGL
@@ -692,7 +689,8 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                         bb = aviBillboards.add({
                             position: pos,
                             image: getAviSVG(ac.type),
-                            scale: LIVE_AIRCRAFT_ICON_SCALE,
+                            scale: pointScaleForStyle('aircraft', { subtype: ac.type || 'general' }),
+                            color: Cesium.Color.WHITE.withAlpha(getIconOpacity('aviation', ac.type || 'general')),
                             rotation,
                             id: ac.id,
                             show,
@@ -773,7 +771,8 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                     bb = maritimeBillboards.add({
                         position: pos,
                         image: getShipSVG(v.type),
-                        scale: LIVE_VESSEL_ICON_SCALE,
+                        scale: pointScaleForStyle('vessel', { subtype: v.type || 'unknown' }),
+                        color: Cesium.Color.WHITE.withAlpha(getIconOpacity('maritime', v.type || 'unknown')),
                         rotation,
                         alignedAxis: Cesium.Cartesian3.UNIT_Z,
                         id: v.id,
@@ -848,8 +847,9 @@ export function useDynamicLayers(viewer: Cesium.Viewer | null) {
                                 darkSince: darkSinceDate.toISOString(),
                             }),
                             billboard: {
-                                image: DARK_VESSEL_ICON,
-                                scale: 1.1,
+                                image: getDarkVesselIcon(),
+                                scale: getIconScale('maritime', 'dark_vessel', 1.1),
+                                color: Cesium.Color.WHITE.withAlpha(getIconOpacity('maritime', 'dark_vessel')),
                             },
                             // Red pulsing ellipse around last known position
                             ellipse: {

@@ -870,6 +870,290 @@ app.post('/api/settings', handleSaveViewState);
 app.get('/api/view-state', handleGetViewState);
 app.post('/api/view-state', handleSaveViewState);
 
+// ---------------------------------------------------------------------------
+// Map icon packs
+// ---------------------------------------------------------------------------
+type IconTarget = {
+    id: string;
+    group: string;
+    label: string;
+    layer: string;
+    subtype: string;
+    file: string;
+};
+
+type IconPackIcon = IconTarget & {
+    scale: number;
+    opacity: number;
+};
+
+type IconPackManifest = {
+    schemaVersion: number;
+    id: string;
+    name: string;
+    icons: Record<string, IconPackIcon>;
+};
+
+const ICON_PACK_REPO_ROOT = getRepoRootFromBackend();
+const ICON_PACK_ROOT = path.join(ICON_PACK_REPO_ROOT, 'frontend/public/icon-packs');
+const ICON_PACK_SETTINGS_FILE = path.join(ICON_PACK_ROOT, '_settings.json');
+const ICON_TARGETS_FILE = path.join(ICON_PACK_REPO_ROOT, 'config/icon-targets.json');
+
+function readIconTargets(): IconTarget[] {
+    const parsed = JSON.parse(fs.readFileSync(ICON_TARGETS_FILE, 'utf8'));
+    if (!Array.isArray(parsed?.targets)) return [];
+    return parsed.targets.filter((target: any) =>
+        target
+        && typeof target.id === 'string'
+        && typeof target.group === 'string'
+        && typeof target.label === 'string'
+        && typeof target.layer === 'string'
+        && typeof target.subtype === 'string'
+        && typeof target.file === 'string',
+    );
+}
+
+function sanitizeIconPackId(value: unknown): string {
+    const raw = String(value || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 64);
+    return raw || 'icon-pack';
+}
+
+function sanitizeSvgFileName(value: unknown, fallback: string): string {
+    const base = path.basename(String(value || fallback))
+        .replace(/[^a-zA-Z0-9._-]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+    const withExt = base.toLowerCase().endsWith('.svg') ? base : `${base || fallback}.svg`;
+    return withExt.slice(0, 96);
+}
+
+function iconPackPath(packId: string): string {
+    const safeId = sanitizeIconPackId(packId);
+    return path.join(ICON_PACK_ROOT, safeId);
+}
+
+function assertInsideIconPackRoot(filePath: string): void {
+    const relative = path.relative(ICON_PACK_ROOT, filePath);
+    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+        throw new Error('Invalid icon pack path');
+    }
+}
+
+function normalizeIconManifestIcon(target: IconTarget, icon: Partial<IconPackIcon> | undefined): IconPackIcon {
+    return {
+        ...target,
+        file: sanitizeSvgFileName(icon?.file || target.file, target.file),
+        scale: Number.isFinite(Number(icon?.scale)) ? Math.max(0.05, Math.min(8, Number(icon?.scale))) : 1,
+        opacity: Number.isFinite(Number(icon?.opacity)) ? Math.max(0, Math.min(1, Number(icon?.opacity))) : 1,
+    };
+}
+
+async function readIconPackSettings(): Promise<{ activePackId: string }> {
+    try {
+        const parsed = JSON.parse(await fs.promises.readFile(ICON_PACK_SETTINGS_FILE, 'utf8'));
+        return { activePackId: sanitizeIconPackId(parsed?.activePackId || 'default') };
+    } catch {
+        return { activePackId: 'default' };
+    }
+}
+
+async function writeIconPackSettings(activePackId: string): Promise<void> {
+    await fs.promises.mkdir(ICON_PACK_ROOT, { recursive: true });
+    await fs.promises.writeFile(
+        ICON_PACK_SETTINGS_FILE,
+        JSON.stringify({ schemaVersion: 1, activePackId: sanitizeIconPackId(activePackId) }, null, 2) + '\n',
+    );
+}
+
+async function readIconPackManifest(packId: string): Promise<IconPackManifest> {
+    const safeId = sanitizeIconPackId(packId);
+    const manifestPath = path.join(iconPackPath(safeId), 'manifest.json');
+    assertInsideIconPackRoot(manifestPath);
+    const parsed = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+    const targets = readIconTargets();
+    const icons: Record<string, IconPackIcon> = {};
+    for (const target of targets) {
+        icons[target.id] = normalizeIconManifestIcon(target, parsed?.icons?.[target.id]);
+    }
+    return {
+        schemaVersion: 1,
+        id: safeId,
+        name: typeof parsed?.name === 'string' && parsed.name.trim() ? parsed.name.trim() : safeId,
+        icons,
+    };
+}
+
+async function writeIconPackManifest(manifest: IconPackManifest): Promise<void> {
+    const safeId = sanitizeIconPackId(manifest.id);
+    const manifestPath = path.join(iconPackPath(safeId), 'manifest.json');
+    assertInsideIconPackRoot(manifestPath);
+    await fs.promises.mkdir(path.dirname(manifestPath), { recursive: true });
+    await fs.promises.writeFile(manifestPath, JSON.stringify({ ...manifest, id: safeId }, null, 2) + '\n');
+}
+
+async function listIconPackPayload() {
+    await fs.promises.mkdir(ICON_PACK_ROOT, { recursive: true });
+    const targets = readIconTargets();
+    const entries = await fs.promises.readdir(ICON_PACK_ROOT, { withFileTypes: true }).catch(() => []);
+    const packs: IconPackManifest[] = [];
+    for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        try {
+            packs.push(await readIconPackManifest(entry.name));
+        } catch (error: any) {
+            console.warn(`[icon-packs] skipped ${entry.name}:`, error?.message || error);
+        }
+    }
+    packs.sort((a, b) => a.name.localeCompare(b.name));
+    const settings = await readIconPackSettings();
+    const activePackId = packs.some((pack) => pack.id === settings.activePackId)
+        ? settings.activePackId
+        : (packs[0]?.id || 'default');
+    return { activePackId, targets, packs };
+}
+
+app.get('/api/icon-packs', async (_req, res) => {
+    try {
+        res.json(await listIconPackPayload());
+    } catch (err: any) {
+        sendError(res, err);
+    }
+});
+
+app.post('/api/icon-packs', async (req, res) => {
+    try {
+        const name = String(req.body?.name || '').trim() || 'Icon Pack';
+        const requestedId = sanitizeIconPackId(req.body?.id || name);
+        let packId = requestedId;
+        let suffix = 2;
+        while (fs.existsSync(iconPackPath(packId))) {
+            packId = `${requestedId}-${suffix++}`;
+        }
+
+        const cloneFrom = sanitizeIconPackId(req.body?.cloneFrom || 'default');
+        const sourceManifest = await readIconPackManifest(cloneFrom);
+        const sourceDir = iconPackPath(cloneFrom);
+        const targetDir = iconPackPath(packId);
+        assertInsideIconPackRoot(targetDir);
+        await fs.promises.mkdir(targetDir, { recursive: false });
+
+        const nextManifest: IconPackManifest = {
+            ...sourceManifest,
+            id: packId,
+            name,
+            icons: { ...sourceManifest.icons },
+        };
+        for (const icon of Object.values(sourceManifest.icons)) {
+            const sourceFile = path.join(sourceDir, icon.file);
+            const targetFile = path.join(targetDir, icon.file);
+            assertInsideIconPackRoot(sourceFile);
+            assertInsideIconPackRoot(targetFile);
+            if (fs.existsSync(sourceFile)) {
+                await fs.promises.copyFile(sourceFile, targetFile);
+            }
+        }
+        await writeIconPackManifest(nextManifest);
+        res.json(await listIconPackPayload());
+    } catch (err: any) {
+        sendError(res, err);
+    }
+});
+
+app.put('/api/icon-packs/active', async (req, res) => {
+    try {
+        const packId = sanitizeIconPackId(req.body?.packId);
+        await readIconPackManifest(packId);
+        await writeIconPackSettings(packId);
+        res.json(await listIconPackPayload());
+    } catch (err: any) {
+        sendError(res, err);
+    }
+});
+
+app.patch('/api/icon-packs/:packId/icons/:iconId', async (req, res) => {
+    try {
+        const packId = sanitizeIconPackId(req.params.packId);
+        const iconId = decodeURIComponent(req.params.iconId || '');
+        const targets = readIconTargets();
+        const target = targets.find((candidate) => candidate.id === iconId);
+        if (!target) {
+            res.status(404).json({ error: 'Icon target not found' });
+            return;
+        }
+        const manifest = await readIconPackManifest(packId);
+        manifest.icons[iconId] = normalizeIconManifestIcon(target, {
+            ...manifest.icons[iconId],
+            scale: req.body?.scale,
+            opacity: req.body?.opacity,
+            file: req.body?.file || manifest.icons[iconId]?.file,
+        });
+        await writeIconPackManifest(manifest);
+        res.json(await listIconPackPayload());
+    } catch (err: any) {
+        sendError(res, err);
+    }
+});
+
+app.patch('/api/icon-packs/:packId/icons', async (req, res) => {
+    try {
+        const packId = sanitizeIconPackId(req.params.packId);
+        const updates = req.body?.icons && typeof req.body.icons === 'object' ? req.body.icons : {};
+        const targets = readIconTargets();
+        const targetsById = new Map(targets.map((target) => [target.id, target]));
+        const manifest = await readIconPackManifest(packId);
+        for (const [iconId, patch] of Object.entries(updates)) {
+            const target = targetsById.get(iconId);
+            if (!target) continue;
+            const iconPatch = patch && typeof patch === 'object' ? patch as any : {};
+            manifest.icons[iconId] = normalizeIconManifestIcon(target, {
+                ...manifest.icons[iconId],
+                scale: iconPatch.scale,
+                opacity: iconPatch.opacity,
+                file: iconPatch.file || manifest.icons[iconId]?.file,
+            });
+        }
+        await writeIconPackManifest(manifest);
+        res.json(await listIconPackPayload());
+    } catch (err: any) {
+        sendError(res, err);
+    }
+});
+
+app.post('/api/icon-packs/:packId/icons/:iconId/upload', async (req, res) => {
+    try {
+        const packId = sanitizeIconPackId(req.params.packId);
+        const iconId = decodeURIComponent(req.params.iconId || '');
+        const targets = readIconTargets();
+        const target = targets.find((candidate) => candidate.id === iconId);
+        if (!target) {
+            res.status(404).json({ error: 'Icon target not found' });
+            return;
+        }
+        const svg = String(req.body?.svg || '').trim();
+        if (!svg.startsWith('<svg') || /<script[\s>]/i.test(svg) || svg.length > 512_000) {
+            res.status(400).json({ error: 'Expected a safe SVG document under 512KB' });
+            return;
+        }
+        const manifest = await readIconPackManifest(packId);
+        const fileName = sanitizeSvgFileName(req.body?.filename, target.file);
+        const filePath = path.join(iconPackPath(packId), fileName);
+        assertInsideIconPackRoot(filePath);
+        await fs.promises.writeFile(filePath, svg + (svg.endsWith('\n') ? '' : '\n'));
+        manifest.icons[iconId] = normalizeIconManifestIcon(target, {
+            ...manifest.icons[iconId],
+            file: fileName,
+        });
+        await writeIconPackManifest(manifest);
+        res.json(await listIconPackPayload());
+    } catch (err: any) {
+        sendError(res, err);
+    }
+});
+
 app.get('/api/catalog/sources', async (_req, res) => {
     try {
         res.json(await catalogReadService.listSources());

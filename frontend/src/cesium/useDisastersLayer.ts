@@ -4,7 +4,7 @@ import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { useSecondaryLoadGate } from './useSecondaryLoadGate';
 import { API_URL } from '../lib/config';
-import { getDisasterIcon } from '../icons/map-icons';
+import { getDisasterIcon, getIconOpacity, getIconScale } from '../icons/map-icons';
 import { safeCartesianFromDegrees } from './position-utils';
 import { getLayerSourceVisibilityKey, normalizeLayerSourceId } from '../lib/source-visibility';
 
@@ -85,7 +85,8 @@ export function useDisastersLayer(viewer: Cesium.Viewer | null) {
                                 }),
                                 billboard: {
                                     image: getDisasterIcon(ev.eventType || 'XX', ev.alertLevel || 'Green'),
-                                    scale: 1.2,
+                                    scale: getIconScale('disasters', ev.eventType || 'XX', 1.2),
+                                    color: Cesium.Color.WHITE.withAlpha(getIconOpacity('disasters', ev.eventType || 'XX')),
                                 },
                             };
 

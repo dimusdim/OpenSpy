@@ -4,7 +4,7 @@ import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { useSecondaryLoadGate } from './useSecondaryLoadGate';
 import { API_URL } from '../lib/config';
-import { getSatBillboardImage } from '../icons/map-icons';
+import { getIconOpacity, getIconScale, getSatBillboardImage } from '../icons/map-icons';
 import { isFiniteCartesian } from './position-utils';
 import { createSatellitePositionsSAB, type SatellitePositionsSAB } from './satellitePositionsSAB';
 import {
@@ -553,7 +553,8 @@ export function useSatellitesLayer(viewer: Cesium.Viewer | null) {
                     const bb = bc.add({
                         position: Cesium.Cartesian3.ZERO,
                         image: icon,
-                        scale: isRecon ? 1.8 : 1.4,
+                        scale: getIconScale('satellites', iconKey, isRecon ? 1.8 : 1.4),
+                        color: Cesium.Color.WHITE.withAlpha(getIconOpacity('satellites', iconKey)),
                         show: false, // hidden until first Worker tick
                         id: entityId,
                     });

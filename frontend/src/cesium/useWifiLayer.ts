@@ -4,7 +4,7 @@ import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { useSecondaryLoadGate } from './useSecondaryLoadGate';
 import { API_URL } from '../lib/config';
-import { WIFI_ICONS } from '../icons/map-icons';
+import { getIconOpacity, getIconScale, getMapIcon } from '../icons/map-icons';
 import { getViewerHeightAboveGroundMetersMostDetailed } from './position-utils';
 
 type WifiSecurity = 'open' | 'encrypted' | 'unknown';
@@ -356,7 +356,9 @@ export function useWifiLayer(viewer: Cesium.Viewer | null) {
                         for (let i = 0; i < existingTile.collection.length; i++) {
                             const billboard = existingTile.collection.get(i);
                             if (String(billboard.id || '') === preparedRecord.id) {
-                                billboard.image = WIFI_ICONS[preparedRecord.security] || WIFI_ICONS.unknown;
+                                billboard.image = getMapIcon('wifi', preparedRecord.security) || '';
+                                billboard.scale = getIconScale('wifi', preparedRecord.security, 0.78);
+                                billboard.color = Cesium.Color.WHITE.withAlpha(getIconOpacity('wifi', preparedRecord.security));
                                 break;
                             }
                         }
@@ -368,9 +370,10 @@ export function useWifiLayer(viewer: Cesium.Viewer | null) {
                         existingTile.ids.push(preparedRecord.id);
                         existingTile.collection.add({
                             id: preparedRecord.id,
-                            image: WIFI_ICONS[preparedRecord.security] || WIFI_ICONS.unknown,
+                            image: getMapIcon('wifi', preparedRecord.security) || '',
                             position: Cesium.Cartesian3.fromDegrees(preparedRecord.lng, preparedRecord.lat, 0),
-                            scale: 0.78,
+                            scale: getIconScale('wifi', preparedRecord.security, 0.78),
+                            color: Cesium.Color.WHITE.withAlpha(getIconOpacity('wifi', preparedRecord.security)),
                             verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
                             horizontalOrigin: Cesium.HorizontalOrigin.CENTER,
                             heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
@@ -399,9 +402,10 @@ export function useWifiLayer(viewer: Cesium.Viewer | null) {
                 aggregateCountsRef.current[preparedRecord.security] += 1;
                 collection.add({
                     id: preparedRecord.id,
-                    image: WIFI_ICONS[preparedRecord.security] || WIFI_ICONS.unknown,
+                    image: getMapIcon('wifi', preparedRecord.security) || '',
                     position: Cesium.Cartesian3.fromDegrees(preparedRecord.lng, preparedRecord.lat, 0),
-                    scale: 0.78,
+                    scale: getIconScale('wifi', preparedRecord.security, 0.78),
+                    color: Cesium.Color.WHITE.withAlpha(getIconOpacity('wifi', preparedRecord.security)),
                     verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
                     horizontalOrigin: Cesium.HorizontalOrigin.CENTER,
                     heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,

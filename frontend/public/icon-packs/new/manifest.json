@@ -1,0 +1,527 @@
+{
+  "schemaVersion": 1,
+  "id": "new",
+  "name": "Icon Pack New",
+  "icons": {
+    "aviation:airliner": {
+      "id": "aviation:airliner",
+      "group": "Aviation",
+      "label": "Airliner",
+      "layer": "aviation",
+      "subtype": "airliner",
+      "file": "aviation-airliner.svg",
+      "scale": 0.7,
+      "opacity": 1
+    },
+    "aviation:military": {
+      "id": "aviation:military",
+      "group": "Aviation",
+      "label": "Military aircraft",
+      "layer": "aviation",
+      "subtype": "military",
+      "file": "aviation-military.svg",
+      "scale": 0.7,
+      "opacity": 1
+    },
+    "aviation:light": {
+      "id": "aviation:light",
+      "group": "Aviation",
+      "label": "Light aircraft",
+      "layer": "aviation",
+      "subtype": "light",
+      "file": "aviation-light.svg",
+      "scale": 0.7,
+      "opacity": 1
+    },
+    "aviation:general": {
+      "id": "aviation:general",
+      "group": "Aviation",
+      "label": "General aircraft",
+      "layer": "aviation",
+      "subtype": "general",
+      "file": "aviation-general.svg",
+      "scale": 0.7,
+      "opacity": 1
+    },
+    "maritime:cargo": {
+      "id": "maritime:cargo",
+      "group": "Maritime",
+      "label": "Cargo vessel",
+      "layer": "maritime",
+      "subtype": "cargo",
+      "file": "maritime-cargo.svg",
+      "scale": 0.7,
+      "opacity": 1
+    },
+    "maritime:tanker": {
+      "id": "maritime:tanker",
+      "group": "Maritime",
+      "label": "Tanker",
+      "layer": "maritime",
+      "subtype": "tanker",
+      "file": "maritime-tanker.svg",
+      "scale": 0.7,
+      "opacity": 1
+    },
+    "maritime:passenger": {
+      "id": "maritime:passenger",
+      "group": "Maritime",
+      "label": "Passenger vessel",
+      "layer": "maritime",
+      "subtype": "passenger",
+      "file": "maritime-passenger.svg",
+      "scale": 0.7,
+      "opacity": 1
+    },
+    "maritime:fishing": {
+      "id": "maritime:fishing",
+      "group": "Maritime",
+      "label": "Fishing vessel",
+      "layer": "maritime",
+      "subtype": "fishing",
+      "file": "maritime-fishing.svg",
+      "scale": 0.7,
+      "opacity": 1
+    },
+    "maritime:military": {
+      "id": "maritime:military",
+      "group": "Maritime",
+      "label": "Military vessel",
+      "layer": "maritime",
+      "subtype": "military",
+      "file": "maritime-military.svg",
+      "scale": 0.7,
+      "opacity": 1
+    },
+    "maritime:unknown": {
+      "id": "maritime:unknown",
+      "group": "Maritime",
+      "label": "Unknown vessel",
+      "layer": "maritime",
+      "subtype": "unknown",
+      "file": "maritime-unknown.svg",
+      "scale": 0.7,
+      "opacity": 1
+    },
+    "maritime:dark_vessel": {
+      "id": "maritime:dark_vessel",
+      "group": "Maritime",
+      "label": "AIS dark vessel",
+      "layer": "maritime",
+      "subtype": "dark_vessel",
+      "file": "maritime-dark-vessel.svg",
+      "scale": 1.1,
+      "opacity": 1
+    },
+    "satellites:military": {
+      "id": "satellites:military",
+      "group": "Satellites",
+      "label": "Military satellite",
+      "layer": "satellites",
+      "subtype": "military",
+      "file": "satellites-military.svg",
+      "scale": 1.4,
+      "opacity": 1
+    },
+    "satellites:recon": {
+      "id": "satellites:recon",
+      "group": "Satellites",
+      "label": "Recon satellite",
+      "layer": "satellites",
+      "subtype": "recon",
+      "file": "satellites-recon.svg",
+      "scale": 1.8,
+      "opacity": 1
+    },
+    "satellites:commercial": {
+      "id": "satellites:commercial",
+      "group": "Satellites",
+      "label": "Commercial satellite",
+      "layer": "satellites",
+      "subtype": "commercial",
+      "file": "satellites-commercial.svg",
+      "scale": 1.4,
+      "opacity": 1
+    },
+    "satellites:civilian": {
+      "id": "satellites:civilian",
+      "group": "Satellites",
+      "label": "Civilian satellite",
+      "layer": "satellites",
+      "subtype": "civilian",
+      "file": "satellites-civilian.svg",
+      "scale": 1.4,
+      "opacity": 1
+    },
+    "satellites:cluster": {
+      "id": "satellites:cluster",
+      "group": "Satellites",
+      "label": "Satellite cluster",
+      "layer": "satellites",
+      "subtype": "cluster",
+      "file": "satellites-cluster.svg",
+      "scale": 1.4,
+      "opacity": 1
+    },
+    "conflicts:explosions": {
+      "id": "conflicts:explosions",
+      "group": "Conflicts",
+      "label": "Explosions / remote violence",
+      "layer": "conflicts",
+      "subtype": "explosions",
+      "file": "conflicts-explosions.svg",
+      "scale": 1.1,
+      "opacity": 1
+    },
+    "conflicts:battles": {
+      "id": "conflicts:battles",
+      "group": "Conflicts",
+      "label": "Battles",
+      "layer": "conflicts",
+      "subtype": "battles",
+      "file": "conflicts-battles.svg",
+      "scale": 1.1,
+      "opacity": 1
+    },
+    "conflicts:violence": {
+      "id": "conflicts:violence",
+      "group": "Conflicts",
+      "label": "Violence against civilians",
+      "layer": "conflicts",
+      "subtype": "violence",
+      "file": "conflicts-violence.svg",
+      "scale": 0.6,
+      "opacity": 1
+    },
+    "outages:critical": {
+      "id": "outages:critical",
+      "group": "Outages",
+      "label": "Critical outage",
+      "layer": "outages",
+      "subtype": "critical",
+      "file": "outages-critical.svg",
+      "scale": 1.4,
+      "opacity": 1
+    },
+    "outages:warning": {
+      "id": "outages:warning",
+      "group": "Outages",
+      "label": "Warning outage",
+      "layer": "outages",
+      "subtype": "warning",
+      "file": "outages-warning.svg",
+      "scale": 1.1,
+      "opacity": 1
+    },
+    "gfw:default": {
+      "id": "gfw:default",
+      "group": "GFW",
+      "label": "Fishing activity",
+      "layer": "gfw",
+      "subtype": "default",
+      "file": "gfw-default.svg",
+      "scale": 0.6,
+      "opacity": 1
+    },
+    "webcams:default": {
+      "id": "webcams:default",
+      "group": "Webcams",
+      "label": "Webcam",
+      "layer": "webcams",
+      "subtype": "default",
+      "file": "webcams-default.svg",
+      "scale": 0.5,
+      "opacity": 1
+    },
+    "infrastructure:power_plant": {
+      "id": "infrastructure:power_plant",
+      "group": "Infrastructure",
+      "label": "Power plant",
+      "layer": "infrastructure",
+      "subtype": "power_plant",
+      "file": "infrastructure-power-plant.svg",
+      "scale": 0.85,
+      "opacity": 1
+    },
+    "infrastructure:refinery": {
+      "id": "infrastructure:refinery",
+      "group": "Infrastructure",
+      "label": "Refinery",
+      "layer": "infrastructure",
+      "subtype": "refinery",
+      "file": "infrastructure-refinery.svg",
+      "scale": 0.9,
+      "opacity": 1
+    },
+    "infrastructure:pipeline_oil": {
+      "id": "infrastructure:pipeline_oil",
+      "group": "Infrastructure",
+      "label": "Oil pipeline point",
+      "layer": "infrastructure",
+      "subtype": "pipeline_oil",
+      "file": "infrastructure-pipeline-oil.svg",
+      "scale": 0.82,
+      "opacity": 1
+    },
+    "infrastructure:pipeline_gas": {
+      "id": "infrastructure:pipeline_gas",
+      "group": "Infrastructure",
+      "label": "Gas pipeline point",
+      "layer": "infrastructure",
+      "subtype": "pipeline_gas",
+      "file": "infrastructure-pipeline-gas.svg",
+      "scale": 0.82,
+      "opacity": 1
+    },
+    "infrastructure:pipeline_water": {
+      "id": "infrastructure:pipeline_water",
+      "group": "Infrastructure",
+      "label": "Water pipeline point",
+      "layer": "infrastructure",
+      "subtype": "pipeline_water",
+      "file": "infrastructure-pipeline-water.svg",
+      "scale": 0.82,
+      "opacity": 1
+    },
+    "infrastructure:pipeline_other": {
+      "id": "infrastructure:pipeline_other",
+      "group": "Infrastructure",
+      "label": "Other pipeline point",
+      "layer": "infrastructure",
+      "subtype": "pipeline_other",
+      "file": "infrastructure-pipeline-other.svg",
+      "scale": 0.82,
+      "opacity": 1
+    },
+    "infrastructure:desalination": {
+      "id": "infrastructure:desalination",
+      "group": "Infrastructure",
+      "label": "Desalination plant",
+      "layer": "infrastructure",
+      "subtype": "desalination",
+      "file": "infrastructure-desalination.svg",
+      "scale": 0.9,
+      "opacity": 1
+    },
+    "infrastructure:military": {
+      "id": "infrastructure:military",
+      "group": "Infrastructure",
+      "label": "Military site",
+      "layer": "infrastructure",
+      "subtype": "military",
+      "file": "infrastructure-military.svg",
+      "scale": 0.9,
+      "opacity": 1
+    },
+    "infrastructure:power_substation": {
+      "id": "infrastructure:power_substation",
+      "group": "Infrastructure",
+      "label": "Power substation",
+      "layer": "infrastructure",
+      "subtype": "power_substation",
+      "file": "infrastructure-power-substation.svg",
+      "scale": 0.85,
+      "opacity": 1
+    },
+    "infrastructure:communication_tower": {
+      "id": "infrastructure:communication_tower",
+      "group": "Infrastructure",
+      "label": "Communication tower",
+      "layer": "infrastructure",
+      "subtype": "communication_tower",
+      "file": "infrastructure-communication-tower.svg",
+      "scale": 0.9,
+      "opacity": 1
+    },
+    "infrastructure:aerodrome": {
+      "id": "infrastructure:aerodrome",
+      "group": "Infrastructure",
+      "label": "Aerodrome",
+      "layer": "infrastructure",
+      "subtype": "aerodrome",
+      "file": "infrastructure-aerodrome.svg",
+      "scale": 0.9,
+      "opacity": 1
+    },
+    "infrastructure:dam": {
+      "id": "infrastructure:dam",
+      "group": "Infrastructure",
+      "label": "Dam",
+      "layer": "infrastructure",
+      "subtype": "dam",
+      "file": "infrastructure-dam.svg",
+      "scale": 0.9,
+      "opacity": 1
+    },
+    "disasters:EQ": {
+      "id": "disasters:EQ",
+      "group": "Disasters",
+      "label": "Earthquake",
+      "layer": "disasters",
+      "subtype": "EQ",
+      "file": "disasters-earthquake.svg",
+      "scale": 1.2,
+      "opacity": 1
+    },
+    "disasters:TC": {
+      "id": "disasters:TC",
+      "group": "Disasters",
+      "label": "Tropical cyclone",
+      "layer": "disasters",
+      "subtype": "TC",
+      "file": "disasters-tropical-cyclone.svg",
+      "scale": 1.2,
+      "opacity": 1
+    },
+    "disasters:FL": {
+      "id": "disasters:FL",
+      "group": "Disasters",
+      "label": "Flood",
+      "layer": "disasters",
+      "subtype": "FL",
+      "file": "disasters-flood.svg",
+      "scale": 1.2,
+      "opacity": 1
+    },
+    "disasters:VO": {
+      "id": "disasters:VO",
+      "group": "Disasters",
+      "label": "Volcano",
+      "layer": "disasters",
+      "subtype": "VO",
+      "file": "disasters-volcano.svg",
+      "scale": 1.2,
+      "opacity": 1
+    },
+    "disasters:WF": {
+      "id": "disasters:WF",
+      "group": "Disasters",
+      "label": "Wildfire",
+      "layer": "disasters",
+      "subtype": "WF",
+      "file": "disasters-wildfire.svg",
+      "scale": 1.2,
+      "opacity": 1
+    },
+    "disasters:DR": {
+      "id": "disasters:DR",
+      "group": "Disasters",
+      "label": "Drought",
+      "layer": "disasters",
+      "subtype": "DR",
+      "file": "disasters-drought.svg",
+      "scale": 1.2,
+      "opacity": 1
+    },
+    "disasters:XX": {
+      "id": "disasters:XX",
+      "group": "Disasters",
+      "label": "Other disaster",
+      "layer": "disasters",
+      "subtype": "XX",
+      "file": "disasters-other.svg",
+      "scale": 1.2,
+      "opacity": 1
+    },
+    "wifi:open": {
+      "id": "wifi:open",
+      "group": "Wi-Fi",
+      "label": "Open Wi-Fi",
+      "layer": "wifi",
+      "subtype": "open",
+      "file": "wifi-open.svg",
+      "scale": 0.78,
+      "opacity": 1
+    },
+    "wifi:encrypted": {
+      "id": "wifi:encrypted",
+      "group": "Wi-Fi",
+      "label": "Encrypted Wi-Fi",
+      "layer": "wifi",
+      "subtype": "encrypted",
+      "file": "wifi-encrypted.svg",
+      "scale": 0.78,
+      "opacity": 1
+    },
+    "wifi:unknown": {
+      "id": "wifi:unknown",
+      "group": "Wi-Fi",
+      "label": "Unknown Wi-Fi",
+      "layer": "wifi",
+      "subtype": "unknown",
+      "file": "wifi-unknown.svg",
+      "scale": 0.78,
+      "opacity": 1
+    },
+    "fires:high": {
+      "id": "fires:high",
+      "group": "Fires",
+      "label": "High FRP fire",
+      "layer": "fires",
+      "subtype": "high",
+      "file": "fires-high.svg",
+      "scale": 1.1,
+      "opacity": 1
+    },
+    "fires:medium": {
+      "id": "fires:medium",
+      "group": "Fires",
+      "label": "Medium FRP fire",
+      "layer": "fires",
+      "subtype": "medium",
+      "file": "fires-medium.svg",
+      "scale": 1.1,
+      "opacity": 1
+    },
+    "fires:low": {
+      "id": "fires:low",
+      "group": "Fires",
+      "label": "Low FRP fire",
+      "layer": "fires",
+      "subtype": "low",
+      "file": "fires-low.svg",
+      "scale": 1.1,
+      "opacity": 1
+    },
+    "jamming:high": {
+      "id": "jamming:high",
+      "group": "GPS jamming",
+      "label": "High jamming",
+      "layer": "jamming",
+      "subtype": "high",
+      "file": "jamming-high.svg",
+      "scale": 1.1,
+      "opacity": 1
+    },
+    "jamming:medium": {
+      "id": "jamming:medium",
+      "group": "GPS jamming",
+      "label": "Medium jamming",
+      "layer": "jamming",
+      "subtype": "medium",
+      "file": "jamming-medium.svg",
+      "scale": 1.1,
+      "opacity": 1
+    },
+    "jamming:low": {
+      "id": "jamming:low",
+      "group": "GPS jamming",
+      "label": "Low jamming",
+      "layer": "jamming",
+      "subtype": "low",
+      "file": "jamming-low.svg",
+      "scale": 1.1,
+      "opacity": 1
+    },
+    "asset:default": {
+      "id": "asset:default",
+      "group": "Assets",
+      "label": "Generic asset",
+      "layer": "asset",
+      "subtype": "default",
+      "file": "asset-default.svg",
+      "scale": 1.1,
+      "opacity": 1
+    }
+  }
+}

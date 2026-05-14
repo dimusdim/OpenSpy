@@ -32,6 +32,7 @@ import {
     isReplayRenderBatchLayer,
     listReplayStoreLayerBindings,
     pointIconForStyle,
+    pointOpacityForStyle,
     pointScaleForStyle,
     shouldRunReplayHydrationInParallel,
     styleLikeForReplayFeature,
@@ -1314,6 +1315,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                 position: Cesium.Cartesian3.ZERO,
                 image: icon,
                 scale: pointScaleForStyle('satellite', { subtype: isRecon ? 'recon' : item.subtype || 'civilian', variant: isRecon ? 'recon' : null }),
+                color: Cesium.Color.WHITE.withAlpha(pointOpacityForStyle('satellite', { subtype: isRecon ? 'recon' : item.subtype || 'civilian', variant: isRecon ? 'recon' : null })),
                 rotation: 0,
                 show: false,
                 id: targetId,
@@ -1966,6 +1968,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
             : Number.NaN;
 
         const icon = pointIconForStyle(item.layer_id, styleLikeForReplayItem(item));
+        const opacity = pointOpacityForStyle(item.layer_id, styleLikeForReplayItem(item));
         const visible = computeVisible(targetId, item.layer_id, item.subtype, item.source_id);
         const baseScale = pointScaleForStyle(item.layer_id, styleLikeForReplayItem(item));
         const scale = item.layer_id === 'fire' && 'properties' in item && Number.isFinite(item.properties?.count)
@@ -1981,6 +1984,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
             icon,
             visible ? 1 : 0,
             scale,
+            opacity,
         ].join('|');
         const staticPointUnchanged = !isReplayMotionLayer(item.layer_id)
             && Boolean(existing)
@@ -2001,6 +2005,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                 if (existing.show !== visible) existing.show = visible;
                 if (existing.rotation !== rotation) existing.rotation = rotation;
                 if (existing.scale !== scale) existing.scale = scale;
+                existing.color = Cesium.Color.WHITE.withAlpha(opacity);
             }
         } else {
             if (!position) return;
@@ -2009,6 +2014,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
                 position,
                 image: icon,
                 scale,
+                color: Cesium.Color.WHITE.withAlpha(opacity),
                 rotation,
                 ...(item.layer_id === 'vessel' ? { alignedAxis: Cesium.Cartesian3.UNIT_Z } : {}),
                 show: visible,

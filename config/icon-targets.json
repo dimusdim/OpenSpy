@@ -1,0 +1,421 @@
+{
+  "schemaVersion": 1,
+  "targets": [
+    {
+      "id": "aviation:airliner",
+      "group": "Aviation",
+      "label": "Airliner",
+      "layer": "aviation",
+      "subtype": "airliner",
+      "file": "aviation-airliner.svg"
+    },
+    {
+      "id": "aviation:military",
+      "group": "Aviation",
+      "label": "Military aircraft",
+      "layer": "aviation",
+      "subtype": "military",
+      "file": "aviation-military.svg"
+    },
+    {
+      "id": "aviation:light",
+      "group": "Aviation",
+      "label": "Light aircraft",
+      "layer": "aviation",
+      "subtype": "light",
+      "file": "aviation-light.svg"
+    },
+    {
+      "id": "aviation:general",
+      "group": "Aviation",
+      "label": "General aircraft",
+      "layer": "aviation",
+      "subtype": "general",
+      "file": "aviation-general.svg"
+    },
+    {
+      "id": "maritime:cargo",
+      "group": "Maritime",
+      "label": "Cargo vessel",
+      "layer": "maritime",
+      "subtype": "cargo",
+      "file": "maritime-cargo.svg"
+    },
+    {
+      "id": "maritime:tanker",
+      "group": "Maritime",
+      "label": "Tanker",
+      "layer": "maritime",
+      "subtype": "tanker",
+      "file": "maritime-tanker.svg"
+    },
+    {
+      "id": "maritime:passenger",
+      "group": "Maritime",
+      "label": "Passenger vessel",
+      "layer": "maritime",
+      "subtype": "passenger",
+      "file": "maritime-passenger.svg"
+    },
+    {
+      "id": "maritime:fishing",
+      "group": "Maritime",
+      "label": "Fishing vessel",
+      "layer": "maritime",
+      "subtype": "fishing",
+      "file": "maritime-fishing.svg"
+    },
+    {
+      "id": "maritime:military",
+      "group": "Maritime",
+      "label": "Military vessel",
+      "layer": "maritime",
+      "subtype": "military",
+      "file": "maritime-military.svg"
+    },
+    {
+      "id": "maritime:unknown",
+      "group": "Maritime",
+      "label": "Unknown vessel",
+      "layer": "maritime",
+      "subtype": "unknown",
+      "file": "maritime-unknown.svg"
+    },
+    {
+      "id": "maritime:dark_vessel",
+      "group": "Maritime",
+      "label": "AIS dark vessel",
+      "layer": "maritime",
+      "subtype": "dark_vessel",
+      "file": "maritime-dark-vessel.svg"
+    },
+    {
+      "id": "satellites:military",
+      "group": "Satellites",
+      "label": "Military satellite",
+      "layer": "satellites",
+      "subtype": "military",
+      "file": "satellites-military.svg"
+    },
+    {
+      "id": "satellites:recon",
+      "group": "Satellites",
+      "label": "Recon satellite",
+      "layer": "satellites",
+      "subtype": "recon",
+      "file": "satellites-recon.svg"
+    },
+    {
+      "id": "satellites:commercial",
+      "group": "Satellites",
+      "label": "Commercial satellite",
+      "layer": "satellites",
+      "subtype": "commercial",
+      "file": "satellites-commercial.svg"
+    },
+    {
+      "id": "satellites:civilian",
+      "group": "Satellites",
+      "label": "Civilian satellite",
+      "layer": "satellites",
+      "subtype": "civilian",
+      "file": "satellites-civilian.svg"
+    },
+    {
+      "id": "satellites:cluster",
+      "group": "Satellites",
+      "label": "Satellite cluster",
+      "layer": "satellites",
+      "subtype": "cluster",
+      "file": "satellites-cluster.svg"
+    },
+    {
+      "id": "conflicts:explosions",
+      "group": "Conflicts",
+      "label": "Explosions / remote violence",
+      "layer": "conflicts",
+      "subtype": "explosions",
+      "file": "conflicts-explosions.svg"
+    },
+    {
+      "id": "conflicts:battles",
+      "group": "Conflicts",
+      "label": "Battles",
+      "layer": "conflicts",
+      "subtype": "battles",
+      "file": "conflicts-battles.svg"
+    },
+    {
+      "id": "conflicts:violence",
+      "group": "Conflicts",
+      "label": "Violence against civilians",
+      "layer": "conflicts",
+      "subtype": "violence",
+      "file": "conflicts-violence.svg"
+    },
+    {
+      "id": "outages:critical",
+      "group": "Outages",
+      "label": "Critical outage",
+      "layer": "outages",
+      "subtype": "critical",
+      "file": "outages-critical.svg"
+    },
+    {
+      "id": "outages:warning",
+      "group": "Outages",
+      "label": "Warning outage",
+      "layer": "outages",
+      "subtype": "warning",
+      "file": "outages-warning.svg"
+    },
+    {
+      "id": "gfw:default",
+      "group": "GFW",
+      "label": "Fishing activity",
+      "layer": "gfw",
+      "subtype": "default",
+      "file": "gfw-default.svg"
+    },
+    {
+      "id": "webcams:default",
+      "group": "Webcams",
+      "label": "Webcam",
+      "layer": "webcams",
+      "subtype": "default",
+      "file": "webcams-default.svg"
+    },
+    {
+      "id": "infrastructure:power_plant",
+      "group": "Infrastructure",
+      "label": "Power plant",
+      "layer": "infrastructure",
+      "subtype": "power_plant",
+      "file": "infrastructure-power-plant.svg"
+    },
+    {
+      "id": "infrastructure:refinery",
+      "group": "Infrastructure",
+      "label": "Refinery",
+      "layer": "infrastructure",
+      "subtype": "refinery",
+      "file": "infrastructure-refinery.svg"
+    },
+    {
+      "id": "infrastructure:pipeline_oil",
+      "group": "Infrastructure",
+      "label": "Oil pipeline point",
+      "layer": "infrastructure",
+      "subtype": "pipeline_oil",
+      "file": "infrastructure-pipeline-oil.svg"
+    },
+    {
+      "id": "infrastructure:pipeline_gas",
+      "group": "Infrastructure",
+      "label": "Gas pipeline point",
+      "layer": "infrastructure",
+      "subtype": "pipeline_gas",
+      "file": "infrastructure-pipeline-gas.svg"
+    },
+    {
+      "id": "infrastructure:pipeline_water",
+      "group": "Infrastructure",
+      "label": "Water pipeline point",
+      "layer": "infrastructure",
+      "subtype": "pipeline_water",
+      "file": "infrastructure-pipeline-water.svg"
+    },
+    {
+      "id": "infrastructure:pipeline_other",
+      "group": "Infrastructure",
+      "label": "Other pipeline point",
+      "layer": "infrastructure",
+      "subtype": "pipeline_other",
+      "file": "infrastructure-pipeline-other.svg"
+    },
+    {
+      "id": "infrastructure:desalination",
+      "group": "Infrastructure",
+      "label": "Desalination plant",
+      "layer": "infrastructure",
+      "subtype": "desalination",
+      "file": "infrastructure-desalination.svg"
+    },
+    {
+      "id": "infrastructure:military",
+      "group": "Infrastructure",
+      "label": "Military site",
+      "layer": "infrastructure",
+      "subtype": "military",
+      "file": "infrastructure-military.svg"
+    },
+    {
+      "id": "infrastructure:power_substation",
+      "group": "Infrastructure",
+      "label": "Power substation",
+      "layer": "infrastructure",
+      "subtype": "power_substation",
+      "file": "infrastructure-power-substation.svg"
+    },
+    {
+      "id": "infrastructure:communication_tower",
+      "group": "Infrastructure",
+      "label": "Communication tower",
+      "layer": "infrastructure",
+      "subtype": "communication_tower",
+      "file": "infrastructure-communication-tower.svg"
+    },
+    {
+      "id": "infrastructure:aerodrome",
+      "group": "Infrastructure",
+      "label": "Aerodrome",
+      "layer": "infrastructure",
+      "subtype": "aerodrome",
+      "file": "infrastructure-aerodrome.svg"
+    },
+    {
+      "id": "infrastructure:dam",
+      "group": "Infrastructure",
+      "label": "Dam",
+      "layer": "infrastructure",
+      "subtype": "dam",
+      "file": "infrastructure-dam.svg"
+    },
+    {
+      "id": "disasters:EQ",
+      "group": "Disasters",
+      "label": "Earthquake",
+      "layer": "disasters",
+      "subtype": "EQ",
+      "file": "disasters-earthquake.svg"
+    },
+    {
+      "id": "disasters:TC",
+      "group": "Disasters",
+      "label": "Tropical cyclone",
+      "layer": "disasters",
+      "subtype": "TC",
+      "file": "disasters-tropical-cyclone.svg"
+    },
+    {
+      "id": "disasters:FL",
+      "group": "Disasters",
+      "label": "Flood",
+      "layer": "disasters",
+      "subtype": "FL",
+      "file": "disasters-flood.svg"
+    },
+    {
+      "id": "disasters:VO",
+      "group": "Disasters",
+      "label": "Volcano",
+      "layer": "disasters",
+      "subtype": "VO",
+      "file": "disasters-volcano.svg"
+    },
+    {
+      "id": "disasters:WF",
+      "group": "Disasters",
+      "label": "Wildfire",
+      "layer": "disasters",
+      "subtype": "WF",
+      "file": "disasters-wildfire.svg"
+    },
+    {
+      "id": "disasters:DR",
+      "group": "Disasters",
+      "label": "Drought",
+      "layer": "disasters",
+      "subtype": "DR",
+      "file": "disasters-drought.svg"
+    },
+    {
+      "id": "disasters:XX",
+      "group": "Disasters",
+      "label": "Other disaster",
+      "layer": "disasters",
+      "subtype": "XX",
+      "file": "disasters-other.svg"
+    },
+    {
+      "id": "wifi:open",
+      "group": "Wi-Fi",
+      "label": "Open Wi-Fi",
+      "layer": "wifi",
+      "subtype": "open",
+      "file": "wifi-open.svg"
+    },
+    {
+      "id": "wifi:encrypted",
+      "group": "Wi-Fi",
+      "label": "Encrypted Wi-Fi",
+      "layer": "wifi",
+      "subtype": "encrypted",
+      "file": "wifi-encrypted.svg"
+    },
+    {
+      "id": "wifi:unknown",
+      "group": "Wi-Fi",
+      "label": "Unknown Wi-Fi",
+      "layer": "wifi",
+      "subtype": "unknown",
+      "file": "wifi-unknown.svg"
+    },
+    {
+      "id": "fires:high",
+      "group": "Fires",
+      "label": "High FRP fire",
+      "layer": "fires",
+      "subtype": "high",
+      "file": "fires-high.svg"
+    },
+    {
+      "id": "fires:medium",
+      "group": "Fires",
+      "label": "Medium FRP fire",
+      "layer": "fires",
+      "subtype": "medium",
+      "file": "fires-medium.svg"
+    },
+    {
+      "id": "fires:low",
+      "group": "Fires",
+      "label": "Low FRP fire",
+      "layer": "fires",
+      "subtype": "low",
+      "file": "fires-low.svg"
+    },
+    {
+      "id": "jamming:high",
+      "group": "GPS jamming",
+      "label": "High jamming",
+      "layer": "jamming",
+      "subtype": "high",
+      "file": "jamming-high.svg"
+    },
+    {
+      "id": "jamming:medium",
+      "group": "GPS jamming",
+      "label": "Medium jamming",
+      "layer": "jamming",
+      "subtype": "medium",
+      "file": "jamming-medium.svg"
+    },
+    {
+      "id": "jamming:low",
+      "group": "GPS jamming",
+      "label": "Low jamming",
+      "layer": "jamming",
+      "subtype": "low",
+      "file": "jamming-low.svg"
+    },
+    {
+      "id": "asset:default",
+      "group": "Assets",
+      "label": "Generic asset",
+      "layer": "asset",
+      "subtype": "default",
+      "file": "asset-default.svg"
+    }
+  ]
+}
