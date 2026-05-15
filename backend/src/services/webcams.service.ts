@@ -1,4 +1,5 @@
 import axios from 'axios';
+import crypto from 'crypto';
 import { WindyService } from './windy.service';
 
 // ---------------------------------------------------------------------------
@@ -14,11 +15,17 @@ export interface WebcamRecord {
     source: string;     // 'live-env-streams' | 'caltrans' | 'windy'
     quality?: string;
     country?: string;
+    displayName?: string;
+    upstreamId?: string;
+    sourceFamily?: string;
+    sceneType?: string;
+    coordinateQuality?: string;
+    upstreamStatus?: string;
     playerUrl?: string; // Windy embed player
     imageUrl?: string;  // Windy preview image
 }
 
-export type WebcamRenderRecord = Pick<WebcamRecord, 'id' | 'lat' | 'lng' | 'name' | 'source'>;
+export type WebcamRenderRecord = Pick<WebcamRecord, 'id' | 'lat' | 'lng' | 'name' | 'source' | 'coordinateQuality' | 'upstreamStatus'>;
 
 // ---------------------------------------------------------------------------
 // WebcamsService — aggregates webcam sources into a unified list
@@ -56,6 +63,8 @@ export class WebcamsService {
             lng: cam.lng,
             name: cam.name,
             source: cam.source,
+            coordinateQuality: cam.coordinateQuality,
+            upstreamStatus: cam.upstreamStatus,
         }));
     }
 
@@ -135,6 +144,18 @@ export class WebcamsService {
         }
     }
 
+    private stableLiveEnvStreamId(props: Record<string, any>, url: string, fallbackIndex: number): string {
+        const sourceFamily = String(props?.source_family || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+        const streamToken = url.match(/\/rtplive\/([^/]+)\//i)?.[1]
+            || url.match(/\/([^/?#]+)\.m3u8(?:[?#]|$)/i)?.[1]
+            || '';
+        const stableToken = streamToken.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+        if (sourceFamily && stableToken) return `les-${sourceFamily}-${stableToken}`;
+        if (stableToken) return `les-${stableToken}`;
+        const hash = crypto.createHash('sha1').update(url || `${props?.name || 'stream'}-${fallbackIndex}`).digest('hex').slice(0, 12);
+        return `les-${hash}`;
+    }
+
     // Source 1: Live-Environment-Streams GeoJSON from GitHub
     private async fetchLiveEnvStreams(): Promise<WebcamRecord[]> {
         try {
@@ -148,20 +169,31 @@ export class WebcamsService {
             }
 
             const records: WebcamRecord[] = [];
+            const seenIds = new Map<string, number>();
             for (const feature of geojson.features) {
                 const props = feature.properties;
                 const coords = feature.geometry?.coordinates;
                 if (!coords || coords.length < 2 || !props?.url) continue;
 
+                const baseId = this.stableLiveEnvStreamId(props, String(props.url), records.length);
+                const seen = seenIds.get(baseId) || 0;
+                seenIds.set(baseId, seen + 1);
+                const id = seen === 0 ? baseId : `${baseId}-${seen + 1}`;
                 records.push({
-                    id: `les-${records.length}`,
+                    id,
                     lng: coords[0],
                     lat: coords[1],
                     name: props.name || 'Unnamed Stream',
                     url: props.url,
                     source: 'live-env-streams',
-                    quality: props.quality,
-                    country: props.country,
+                    quality: props.quality || props.quality_tier,
+                    country: props.country || props.country_code,
+                    displayName: props.display_name,
+                    upstreamId: props.url.match(/\/rtplive\/([^/]+)\//i)?.[1] || undefined,
+                    sourceFamily: props.source_family,
+                    sceneType: props.scene_type,
+                    coordinateQuality: props.coordinates_quality,
+                    upstreamStatus: props.status,
                 });
             }
 

@@ -280,13 +280,19 @@ export default function EntityHUD({
                     alt: 0,
                     layer: 'Webcam',
                     source: wcMeta.source,
-                    extra: details ? {
-                        url: details.url,
-                        imageUrl: details.imageUrl,
-                        playerUrl: details.playerUrl,
-                        country: details.country,
-                        quality: details.quality,
-                    } : undefined,
+                    extra: {
+                        url: details?.url,
+                        imageUrl: details?.imageUrl,
+                        playerUrl: details?.playerUrl,
+                        country: details?.country,
+                        quality: details?.quality,
+                        displayName: details?.displayName,
+                        upstreamId: details?.upstreamId,
+                        sourceFamily: details?.sourceFamily,
+                        sceneType: details?.sceneType,
+                        coordinateQuality: details?.coordinateQuality ?? wcMeta.coordinateQuality,
+                        upstreamStatus: details?.upstreamStatus ?? wcMeta.upstreamStatus,
+                    },
                 });
                 requestAnimationFrame(update);
                 return;
@@ -1077,6 +1083,64 @@ export default function EntityHUD({
                         <div>
                             <div className="text-[10px] text-zinc-500 font-mono">SOURCE</div>
                             <div className="text-zinc-300 text-xs font-mono">{live.source}</div>
+                        </div>
+                    )}
+
+                    {/* ---- Webcam source metadata ---- */}
+                    {live?.layer === 'Webcam' && live.extra && (
+                        <div className="space-y-2">
+                            {(live.extra.upstreamId || live.extra.sourceFamily || live.extra.sceneType) && (
+                                <div className="grid grid-cols-2 gap-2">
+                                    {live.extra.upstreamId && (
+                                        <div>
+                                            <div className="text-[10px] text-zinc-500 font-mono">STREAM ID</div>
+                                            <div className="text-zinc-300 text-xs font-mono">{live.extra.upstreamId}</div>
+                                        </div>
+                                    )}
+                                    {live.extra.sceneType && (
+                                        <div>
+                                            <div className="text-[10px] text-zinc-500 font-mono">SCENE</div>
+                                            <div className="text-zinc-300 text-xs font-mono">{live.extra.sceneType}</div>
+                                        </div>
+                                    )}
+                                    {live.extra.sourceFamily && (
+                                        <div>
+                                            <div className="text-[10px] text-zinc-500 font-mono">FEED</div>
+                                            <div className="text-zinc-300 text-xs font-mono">{live.extra.sourceFamily}</div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                            {(live.extra.coordinateQuality || live.extra.upstreamStatus) && (
+                                <div>
+                                    <div className="text-[10px] text-zinc-500 font-mono">SOURCE COORDINATES</div>
+                                    <div className="flex flex-wrap gap-1.5">
+                                        {live.extra.coordinateQuality && (
+                                            <span className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border ${
+                                                live.extra.coordinateQuality === 'exact'
+                                                    ? 'bg-emerald-900/20 text-emerald-300 border-emerald-700/40'
+                                                    : 'bg-amber-900/20 text-amber-300 border-amber-700/40'
+                                            }`}>
+                                                {String(live.extra.coordinateQuality).toUpperCase()}
+                                            </span>
+                                        )}
+                                        {live.extra.upstreamStatus && (
+                                            <span className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border ${
+                                                live.extra.upstreamStatus === 'verified'
+                                                    ? 'bg-emerald-900/20 text-emerald-300 border-emerald-700/40'
+                                                    : 'bg-amber-900/20 text-amber-300 border-amber-700/40'
+                                            }`}>
+                                                {String(live.extra.upstreamStatus).toUpperCase()}
+                                            </span>
+                                        )}
+                                    </div>
+                                    {live.extra.upstreamStatus && live.extra.upstreamStatus !== 'verified' && (
+                                        <div className="mt-1 text-[10px] leading-snug text-amber-300/90">
+                                            Upstream stream metadata is unverified; map marker uses provider coordinates.
+                                        </div>
+                                    )}
+                                </div>
+                            )}
                         </div>
                     )}
 

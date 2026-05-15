@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "dev": "bash ./scripts/dev-with-db.sh",
-    "dev:raw": "ts-node src/index.ts",
+    "dev:raw": "bash ./scripts/dev-raw.sh",
     "build": "tsc -p tsconfig.json && mkdir -p dist/db/migrations && cp src/db/migrations/*.sql dist/db/migrations/",
     "start": "node dist/index.js",
     "test": "node ../tests/smoke-api.mjs",

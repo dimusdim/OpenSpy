@@ -177,7 +177,7 @@ export default function Home() {
   };
 
   return (
-    <main className="os-app selection:bg-cyan-500 selection:text-black">
+    <main className="os-app selection:bg-cyan-500 selection:text-black" data-timeline-hidden={timelineHidden}>
         {settingsHydrated && iconPackHydrated ? <GlobeDynamic /> : null}
 
         {uiMounted ? (
@@ -193,9 +193,6 @@ export default function Home() {
                         <SearchBar variant="topbar" />
                     </div>
                     <div className="flex-1" />
-                    <div className="os-topbar__chips">
-                        <div className="os-chip"><Activity size={12} /> Live OSINT</div>
-                    </div>
                 </div>
 
                 <div className="os-rail os-rail--left">

@@ -13,6 +13,8 @@ export interface WebcamMeta {
     lat: number;
     lng: number;
     source: string;
+    coordinateQuality?: string;
+    upstreamStatus?: string;
 }
 
 // Global registry so Globe.tsx picking + EntityHUD can look up webcam metadata.
@@ -80,6 +82,8 @@ export function useWebcamsLayer(viewer: Cesium.Viewer | null) {
                         lat: cam.lat,
                         lng: cam.lng,
                         source: cam.source,
+                        coordinateQuality: cam.coordinateQuality,
+                        upstreamStatus: cam.upstreamStatus,
                     });
 
                 }
