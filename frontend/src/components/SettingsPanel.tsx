@@ -245,11 +245,11 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
         <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4" onClick={onClose}>
             <div className="absolute inset-0 bg-black/65 backdrop-blur-sm" />
             <div
-                className="relative flex h-[84vh] w-full max-w-[820px] flex-col overflow-hidden rounded-xl border border-zinc-800 bg-[#131315]/95 text-zinc-100 shadow-[0_24px_80px_rgba(0,0,0,0.55)] backdrop-blur-xl"
+                className="relative flex h-[84vh] w-full max-w-[820px] flex-col overflow-hidden rounded-xl border border-zinc-800 bg-[#09090b] text-zinc-100 shadow-[0_24px_80px_rgba(0,0,0,0.55)] backdrop-blur-xl"
                 onClick={e => e.stopPropagation()}
             >
                 <div className="flex shrink-0 items-center gap-3 border-b border-zinc-800 px-4 py-3">
-                    <div className="flex h-8 w-8 items-center justify-center rounded-md border border-zinc-800 bg-zinc-950 text-cyan-300">
+                    <div className="flex h-8 w-8 items-center justify-center rounded-md border border-zinc-800 bg-[#17171b] text-cyan-300">
                         <Settings className="h-4 w-4" />
                     </div>
                     <div className="min-w-0 flex-1">
@@ -371,11 +371,11 @@ function ProviderRow({ provider, status, sources, toggleSource, apiKeys, onKeysC
     }, [provider.envVars, apiKeys]);
 
     return (
-        <div className={`overflow-hidden rounded-md border transition-colors ${isOn ? 'border-zinc-700/70 bg-zinc-950/60' : 'border-zinc-800/50 bg-black/35 opacity-70'}`}>
+        <div className={`overflow-hidden rounded-md border transition-colors ${isOn ? 'border-zinc-700/70 bg-[#1a1a1f]/92' : 'border-zinc-800/60 bg-[#151519]/78 opacity-75'}`}>
             <div className="flex items-stretch">
                 <button
                     onClick={() => setExpanded(!expanded)}
-                    className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-zinc-900/60"
+                    className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-[#24242a]/70"
                 >
                     {expanded ? <ChevronDown size={13} className="shrink-0 text-zinc-600" /> : <ChevronRight size={13} className="shrink-0 text-zinc-600" />}
                     <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${getStatusColor(st)}`} />
@@ -392,7 +392,7 @@ function ProviderRow({ provider, status, sources, toggleSource, apiKeys, onKeysC
                         </div>
                     </div>
                 </button>
-                <div className="flex items-center border-l border-zinc-800 px-3">
+                <div className="flex items-center border-l border-zinc-800/80 bg-black/10 px-3">
                     <ToggleSwitch
                         enabled={isOn}
                         onClick={toggleProvider}
@@ -402,12 +402,12 @@ function ProviderRow({ provider, status, sources, toggleSource, apiKeys, onKeysC
             </div>
 
             {expanded && (
-                <div className="space-y-3 border-t border-zinc-800/70 px-4 pb-3 pt-3">
+                <div className="space-y-3 border-t border-zinc-800/70 bg-black/10 px-4 pb-3 pt-3">
                     <div className="grid grid-cols-2 gap-2 text-[10px] md:grid-cols-4">
-                        <div className="rounded border border-zinc-800 bg-zinc-950/70 px-2 py-1.5"><span className="block text-zinc-600">URL</span><p className="truncate text-zinc-300">{provider.url}</p></div>
-                        <div className="rounded border border-zinc-800 bg-zinc-950/70 px-2 py-1.5"><span className="block text-zinc-600">Type</span><p className="truncate text-zinc-300">{provider.type}</p></div>
-                        <div className="rounded border border-zinc-800 bg-zinc-950/70 px-2 py-1.5"><span className="block text-zinc-600">Poll</span><p className="truncate text-zinc-300">{provider.poll}</p></div>
-                        <div className="rounded border border-zinc-800 bg-zinc-950/70 px-2 py-1.5"><span className="block text-zinc-600">Objects</span><p className="truncate text-zinc-300">{formatCount(status?.count)}</p></div>
+                        <div className="rounded border border-zinc-800/80 bg-[#24242a]/70 px-2 py-1.5"><span className="block text-zinc-500">URL</span><p className="truncate text-zinc-200">{provider.url}</p></div>
+                        <div className="rounded border border-zinc-800/80 bg-[#24242a]/70 px-2 py-1.5"><span className="block text-zinc-500">Type</span><p className="truncate text-zinc-200">{provider.type}</p></div>
+                        <div className="rounded border border-zinc-800/80 bg-[#24242a]/70 px-2 py-1.5"><span className="block text-zinc-500">Poll</span><p className="truncate text-zinc-200">{provider.poll}</p></div>
+                        <div className="rounded border border-zinc-800/80 bg-[#24242a]/70 px-2 py-1.5"><span className="block text-zinc-500">Objects</span><p className="truncate text-zinc-200">{formatCount(status?.count)}</p></div>
                     </div>
                     <p className="text-[11px] leading-relaxed text-zinc-500">{provider.description}</p>
 
@@ -425,7 +425,7 @@ function ProviderRow({ provider, status, sources, toggleSource, apiKeys, onKeysC
 
                     {/* Source toggle per layer */}
                     {provider.layers.map(l => (
-                        <div key={l} className="flex items-center justify-between rounded border border-zinc-800 bg-black/25 px-2 py-1.5">
+                        <div key={l} className="flex items-center justify-between rounded border border-zinc-800/80 bg-[#24242a]/60 px-2 py-1.5">
                             <span className="font-mono text-[10px] text-zinc-500">{l} layer</span>
                             <ToggleSwitch enabled={Boolean(sources[l])} onClick={() => toggleSource(l)} title={sources[l] ? `Disable ${l}` : `Enable ${l}`} />
                         </div>
@@ -460,7 +460,7 @@ function ApiKeyFields({ envVars, note, registrationUrl, registrationLabel, onKey
     };
 
     return (
-        <div className="space-y-2 rounded border border-zinc-800 bg-zinc-950/60 p-2">
+        <div className="space-y-2 rounded border border-zinc-800/80 bg-[#202025]/75 p-2">
             <div className="font-mono text-[9px] uppercase tracking-wider text-zinc-500">API keys</div>
             {note && <p className="text-[10px] leading-relaxed text-zinc-500">{note}</p>}
             {Object.entries(envVars).map(([envVar, info]) => (
@@ -471,7 +471,7 @@ function ApiKeyFields({ envVars, note, registrationUrl, registrationLabel, onKey
                         value={envVar in editing ? editing[envVar] : (info.set ? info.masked : '')}
                         placeholder={info.set ? '' : 'Not configured'}
                         onChange={e => setEditing(prev => ({ ...prev, [envVar]: e.target.value }))}
-                        className="h-7 min-w-0 flex-1 rounded border border-zinc-800 bg-black/40 px-2 font-mono text-[10px] text-zinc-300 placeholder-zinc-600 outline-none focus:border-cyan-700"
+                        className="h-7 min-w-0 flex-1 rounded border border-zinc-800 bg-[#101014]/85 px-2 font-mono text-[10px] text-zinc-300 placeholder-zinc-600 outline-none focus:border-cyan-700"
                     />
                     <button onClick={() => setRevealed(prev => ({ ...prev, [envVar]: !prev[envVar] }))} className="text-zinc-600 hover:text-zinc-300" title={revealed[envVar] ? 'Hide' : 'Reveal'}>
                         {revealed[envVar] ? <EyeOff size={12} /> : <Eye size={12} />}
@@ -517,7 +517,7 @@ function DisplayTab({ showTrajectories, toggleTrajectories, tileMode, setTileMod
     };
     return (
         <div className="space-y-3">
-            <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
+            <div className="rounded-md border border-zinc-800/80 bg-[#1a1a1f]/92 p-3">
                 <label className="flex cursor-pointer items-center justify-between">
                     <div>
                         <div className="text-sm text-zinc-100">Orbital / Flight Trajectories</div>
@@ -526,18 +526,18 @@ function DisplayTab({ showTrajectories, toggleTrajectories, tileMode, setTileMod
                     <ToggleSwitch enabled={showTrajectories} onClick={toggleTrajectories} />
                 </label>
             </div>
-            <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
+            <div className="rounded-md border border-zinc-800/80 bg-[#1a1a1f]/92 p-3">
                 <div className="mb-2 text-sm text-zinc-100">Base Map</div>
                 <div className="flex overflow-hidden rounded border border-zinc-800">
                     {(['google', 'osm', 'modis'] as const).map(mode => (
                         <button key={mode} onClick={() => setTileMode(mode)}
                             className={`flex-1 border-r border-zinc-800 px-3 py-2 font-mono text-xs uppercase tracking-wider transition-colors last:border-r-0 ${
-                                tileMode === mode ? 'bg-cyan-950/40 text-cyan-300' : 'bg-black/25 text-zinc-500 hover:bg-zinc-900/70 hover:text-zinc-300'
+                                tileMode === mode ? 'bg-cyan-950/40 text-cyan-300' : 'bg-[#24242a]/60 text-zinc-500 hover:bg-[#2a2a31]/75 hover:text-zinc-300'
                             }`}>{MODE_LABELS[mode]}</button>
                     ))}
                 </div>
             </div>
-            <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
+            <div className="rounded-md border border-zinc-800/80 bg-[#1a1a1f]/92 p-3">
                 <div className="flex items-start justify-between gap-3">
                     <div>
                         <div className="text-sm text-zinc-100">Satellite render limit</div>
@@ -561,7 +561,7 @@ function DisplayTab({ showTrajectories, toggleTrajectories, tileMode, setTileMod
                                 setSatelliteLimitInput(satelliteRenderLimit == null ? '5000' : String(satelliteRenderLimit));
                             }
                         }}
-                        className="w-28 rounded border border-zinc-800 bg-black/30 px-3 py-2 font-mono text-xs text-zinc-200 disabled:opacity-40"
+                        className="w-28 rounded border border-zinc-800 bg-[#101014]/85 px-3 py-2 font-mono text-xs text-zinc-200 disabled:opacity-40"
                     />
                     <span className="text-[10px] text-zinc-500">Disable the toggle to render the full visible catalog.</span>
                 </div>
@@ -577,7 +577,7 @@ function DisplayTab({ showTrajectories, toggleTrajectories, tileMode, setTileMod
                             className={`rounded border px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider transition-colors ${
                                 satelliteRenderLimit === value
                                     ? 'border-cyan-700/50 bg-cyan-950/40 text-cyan-300'
-                                    : 'border-zinc-800 bg-black/25 text-zinc-500 hover:text-zinc-300 disabled:opacity-40'
+                                    : 'border-zinc-800 bg-[#24242a]/60 text-zinc-500 hover:text-zinc-300 disabled:opacity-40'
                             }`}
                         >
                             {value}

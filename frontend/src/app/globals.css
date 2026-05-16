@@ -32,6 +32,9 @@
   --os-bottombar-h: 56px;
   --os-panel-alpha: 0.88;
   --os-panel-blur: 14px;
+  --os-glass-panel-bg: rgba(19, 19, 21, var(--os-panel-alpha));
+  --os-glass-panel-blur: var(--os-panel-blur);
+  --os-glass-panel-shadow: 0 16px 50px rgba(0, 0, 0, 0.38);
   --bg-0: var(--os-bg-0);
   --bg-1: var(--os-bg-1);
   --bg-2: var(--os-bg-2);
@@ -202,9 +205,9 @@ body {
   padding: 8px 6px;
   border: 1px solid var(--os-line-1);
   border-radius: 8px;
-  background: rgba(14, 14, 16, var(--os-panel-alpha));
-  box-shadow: 0 16px 50px rgba(0, 0, 0, 0.38);
-  backdrop-filter: blur(var(--os-panel-blur));
+  background: var(--os-glass-panel-bg);
+  box-shadow: var(--os-glass-panel-shadow);
+  backdrop-filter: blur(var(--os-glass-panel-blur));
 }
 
 .os-rail--left {
@@ -422,9 +425,10 @@ body {
   border-bottom: 0;
   border-left: 0;
   border-radius: 0;
-  background: rgba(19, 19, 21, var(--os-panel-alpha));
+  background: var(--os-glass-panel-bg);
   padding: 0 12px;
-  backdrop-filter: blur(var(--os-panel-blur));
+  box-shadow: var(--os-glass-panel-shadow);
+  backdrop-filter: blur(var(--os-glass-panel-blur));
 }
 
 .os-bottombar > .os-rail-btn {
@@ -433,6 +437,8 @@ body {
   border-right: 0;
   border-bottom: 0;
   border-radius: 0;
+  background: var(--os-glass-panel-bg);
+  backdrop-filter: blur(var(--os-glass-panel-blur));
 }
 
 .os-timeline__mode {
