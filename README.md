@@ -1,32 +1,33 @@
 # OpenSpy
 
-OpenSpy is an open-source, self-hosted 3D intelligence workspace for watching the world in real time. It combines live aviation, maritime, satellite, conflict, disaster, infrastructure, outage, traffic, webcam, fire, GNSS interference, and satellite imagery data on a Cesium globe, then lets a local AI agent investigate the same data through controlled OpenSpy tools.
+Real-time 3D OSINT workspace. 42 source connectors, 26 map/data layers, local replay, satellite imagery, AI image workflows, and a local agent harness for Codex CLI or Claude Code.
 
-OpenSpy is built for OSINT exploration, situational awareness, visual briefings, and interactive geospatial analysis. It is not a hosted intelligence service and it is not a source of classified data. Every layer is backed by public, user-configured, or locally derived sources.
+OpenSpy is an open-source, self-hosted intelligence interface for watching public activity on Earth in real time. It combines aviation, maritime, satellite, conflict, disaster, infrastructure, outage, traffic, webcam, fire, GNSS interference, and imagery data on a Cesium globe, then lets a local AI agent investigate that same data through controlled OpenSpy tools.
 
-## What It Can Show
+It is built for OSINT exploration, situational awareness, visual briefings, and interactive geospatial analysis. It is not a hosted intelligence service and it is not a source of classified data. Every layer is backed by public, user-configured, or locally derived sources.
 
-- Real-time aircraft from OpenSky, with aircraft class, callsign, altitude, speed, heading, route lookup, and aircraft photo enrichment.
-- Real-time AIS vessels from AISStream, with ship class, heading, speed, tracks, and local dark-vessel gap detection.
-- Satellite tracking with SGP4 propagation, orbital trails, reconnaissance/commercial/civilian/military classes, and sensor footprint metadata.
-- GNSS/GPS jamming zones from GPSJam, rendered as severity-coded 3D regions.
-- Active fires from NASA FIRMS, including FRP/brightness/confidence metadata.
-- Armed conflict and security events from GDELT, with ACLED support when credentials are configured.
-- Disaster and natural-hazard events from GDACS, USGS, and NASA EONET.
-- Internet outage evidence from IODA and Cloudflare Radar.
-- Global webcams from Live-Environment-Streams, Windy, and Caltrans.
-- Critical infrastructure from OpenStreetMap/Overpass and Overture Maps: power plants, substations, lines, cables, refineries, military areas, pipelines, dams, communication towers, and related assets.
-- Restricted and controlled airspace from OpenAIP.
-- Submarine cable routes from TeleGeography.
-- Road traffic from TomTom tiles, with optional HERE flow support.
-- Oil prices and country energy context from Yahoo Finance, EIA, and Our World in Data.
-- Wi-Fi observation lookup through WiGLE at street-level zoom when credentials are configured.
-- Satellite imagery overlays from NASA GIBS/MODIS, NASA FIRMS WMS, Copernicus/Sentinel Hub, and USGS Landsat browse imagery.
-- Google Photorealistic 3D Tiles and OpenStreetMap 3D building modes.
-- Timeline replay from locally persisted snapshots and render chunks.
-- Presentation controls, map annotations, selectable entities, replay cards, icon packs, and visual shader modes.
-- AI image workflow: capture the globe view, send it to a vision/image model through OpenRouter, generate transformed imagery, compare it as a map overlay, and return to the original viewpoint.
-- Local AI agent harness that can run through Codex CLI or Claude Code, read OpenSpy source capabilities, query local data, fetch supported upstream history, control the map, create selections, and prepare visual analysis.
+> **Credits:** OpenSpy was inspired by Bilawal Sidhu's GodEyeView concept: an AI-native OSINT interface centered on a live globe. OpenSpy is a separate open-source implementation focused on self-hosted public-source data, local analysis, and extensible agent tooling.
+
+## Feature Highlights
+
+- ✈️ **Live aircraft tracking** - OpenSky aircraft positions, class, callsign, altitude, speed, heading, route lookup, and aircraft photo enrichment.
+- 🚢 **Live vessel tracking** - AISStream vessels with heading, speed, type, tracks, and local AIS gap detection.
+- 🛰️ **Satellite tracking** - TLE ingestion, SGP4 propagation, orbital trails, satellite classes, and moving sensor footprints.
+- 🛰️ **Satellite imagery** - NASA GIBS/MODIS, NASA FIRMS WMS, Copernicus/Sentinel Hub, and USGS Landsat browse imagery.
+- 💥 **Conflict mapping** - GDELT security events live, with ACLED support when credentials are configured.
+- ⚠️ **GNSS interference** - GPSJam cells rendered as severity-coded 3D regions.
+- 🔥 **Active fires** - NASA FIRMS fire hotspots with FRP, brightness, confidence, and time metadata.
+- 🌐 **Internet outages** - IODA and Cloudflare Radar outage evidence in the same map workspace.
+- 📹 **Live webcams** - HLS/image camera feeds from Live-Environment-Streams, Windy, and Caltrans.
+- 🏭 **Critical infrastructure** - OSM/Overpass plus Overture power, pipelines, substations, refineries, military areas, dams, towers, and related assets.
+- 🚫 **Restricted airspace** - OpenAIP restricted, danger, prohibited, alert, and warning zones with altitude-aware 3D rendering.
+- 🌊 **Submarine cables** - TeleGeography cable routes for internet backbone context.
+- 🚗 **Road traffic** - TomTom traffic tiles and optional HERE flow data.
+- 📈 **Energy and oil context** - Yahoo Finance, EIA, and Our World in Data energy statistics.
+- 🧭 **Timeline replay** - Local snapshot/replay pipeline with render chunks, trails, and timeline controls.
+- 🗺️ **Presentation layer** - Map annotations, selections, replay cards, camera moves, icon packs, and visual shader modes.
+- 🎨 **AI image transformation** - Capture a globe view, send it through OpenRouter-backed image/vision workflows, compare the generated result as an overlay, and return to the exact viewpoint.
+- 🤖 **Integrated local agent** - Codex CLI or Claude Code can query OpenSpy data, read source capabilities, fetch supported upstream history, control the map, create selections, and produce visual analysis.
 
 ## Current Runtime Snapshot
 
@@ -55,6 +56,94 @@ Measured on a local OpenSpy dev instance after live ingest warm-up on 2026-05-18
 | Local PostgreSQL database size in this run | 42.9 GB |
 
 Local retained history in the same database included roughly 16.7M aircraft position fixes, 16.8M vessel position fixes, 552K fire events, 95K GDELT conflict events, 23.5K GFW events, 132K aircraft entities, 72K vessel entities, and 22K satellite entities.
+
+## Features
+
+### ✈️ Aerospace
+
+**Aircraft tracking** - Live aircraft from OpenSky Network. OpenSpy shows positions, altitude, speed, heading, callsign, aircraft class, route enrichment, and photo enrichment by ICAO24 where available. Aircraft are classified into airliner, military, light/general aviation, and general categories.
+
+**Restricted airspace** - OpenAIP restricted, danger, prohibited, alert, and warning areas. The frontend renders zones as altitude-aware 3D volumes rather than flat polygons.
+
+**Historical tracks** - Selected aircraft can be queried through track endpoints and replayed in the globe/timeline workflow when provider history is available.
+
+### 🚢 Maritime
+
+**Vessel tracking** - Live AIS positions from AISStream, rendered with vessel subtype icons for cargo, tanker, passenger, fishing, military, and unknown vessels. Tracks and heading-aware sprites are available in live and replay views.
+
+**Local AIS gap detection** - OpenSpy can flag vessels that were actively tracked and then stop sending accepted AIS fixes. This is a local heuristic over AISStream data, not an external sanctions or shadow-fleet dataset.
+
+**Global Fishing Watch events** - GFW AIS gap events provide an independent public-source signal for AIS-disabling and maritime anomaly analysis when a GFW token is configured.
+
+### 🛰️ Space
+
+**Satellite tracking** - Space-Track/CelesTrak/Ivan TLE chain, SGP4 propagation, orbital trails, and satellite categories. The current runtime loaded 19,059 objects.
+
+**Sensor footprint projection** - Spectator Earth metadata enriches selected Earth-observation and reconnaissance satellites with sensor type, swath, and footprint data. Footprints move with the satellite over the globe.
+
+**Targeted satellite history** - Space-Track GP_HISTORY support exists as a source-fetch path for targeted NORAD/time-window orbital history when Space-Track credentials are configured.
+
+### 🛰️ Imagery
+
+**MODIS and cloud context** - NASA GIBS/Worldview provides public daily global imagery layers, including MODIS true-color and cloud context.
+
+**FIRMS fire imagery** - NASA FIRMS WMS and Area API support active fire context and targeted historical fire fetches when a FIRMS MAP_KEY is configured.
+
+**Copernicus/Sentinel Hub** - Sentinel imagery search/render paths are wired through Copernicus/Sentinel Hub credentials. This is for targeted evidence overlays, not a full global live raster replacement.
+
+**Landsat browse imagery** - USGS Landsat STAC metadata and browse imagery can be used for historical visual context.
+
+**Imagery evidence artifacts** - The backend can create local image artifacts from selected imagery sources or preview payloads so agents and users can reference the same visual evidence.
+
+### 💥 Conflict, Risk, And Disasters
+
+**Conflict events** - GDELT provides live conflict/security event context. ACLED is supported when account credentials are configured.
+
+**Disasters** - GDACS, USGS, and NASA EONET are combined for earthquakes, cyclones, floods, volcanoes, wildfires, droughts, and related natural events.
+
+**GPS/GNSS jamming** - GPSJam interference cells are rendered as severity-coded areas, giving fast context for degraded navigation environments.
+
+### 🏭 Infrastructure
+
+**Critical infrastructure** - OpenStreetMap Overpass and Overture Maps provide power plants, substations, transmission lines, pipelines, refineries, desalination facilities, military areas, dams, communication towers, and related infrastructure.
+
+**Overture cache** - Overture data is kept in a local DuckDB cache. The current local cache contains 5.7M records and is queried by viewport.
+
+**Pipelines** - OSM/Overpass and Overture pipeline geometry support oil, gas, water, and other utility routes where available.
+
+**Submarine cables** - TeleGeography cable routes provide physical internet backbone context.
+
+### 🌐 Connectivity And Monitoring
+
+**Internet outages** - IODA and Cloudflare Radar are surfaced together so outages can be cross-checked between independent sources.
+
+**Webcams** - OpenSpy aggregates Live-Environment-Streams, Windy, and Caltrans camera feeds. Camera cards can show live/preview media directly in the app.
+
+**Wi-Fi observations** - WiGLE lookup is available at street-level zoom when credentials are configured.
+
+### 🚗 Traffic, Energy, And Markets
+
+**Traffic** - TomTom traffic tiles are available for road-flow context, with optional HERE flow support.
+
+**Oil prices** - Yahoo Finance provides Brent/WTI market context, with optional EIA official data.
+
+**Country energy context** - Our World in Data and World Bank enrichment support country-level energy statistics used by the backend.
+
+### 🧭 Replay And Presentation
+
+**Timeline replay** - OpenSpy persists live data into local PostgreSQL/PostGIS and serves replay render chunks for timeline playback, tracks, trails, and feature detail lookup.
+
+**Presentation controls** - Map commands can move the camera, apply selections, annotate places, and build step-by-step visual explanations.
+
+**Icon packs and styles** - The UI supports icon pack configuration, layer styling, visibility controls, and shader modes.
+
+### 🤖 AI And Agent Workflows
+
+**Local product agent** - OpenSpy ships a versioned product-agent harness under `agent-harness/`. The harness can be instantiated for Codex CLI or Claude Code and uses OpenSpy tools rather than private backend prompt logic.
+
+**Agent data tools** - The agent can read source capabilities, run read-only SQL, query entities/events/assets/tracks, fetch supported provider history, control the map, and materialize selections.
+
+**AI image workflow** - The UI can capture a map view, submit it to an OpenRouter-backed model, store the generated result, and compare it against the original globe view as an overlay.
 
 ## Quick Start
 
@@ -246,7 +335,7 @@ Storage:
 These are known public-release gaps rather than hidden features:
 
 - One-command installer is not done. A fresh clone currently uses manual env setup plus `npm run install:all` or Docker Compose.
-- Docker Compose now has the missing Dockerfiles, but it is still a development stack, not a production deployment.
+- Docker Compose now has backend/frontend Dockerfiles, but it is still a development stack, not a production deployment.
 - Public CI and public test harnesses are not included yet. Internal tests are local-only while the public repo is being cleaned up.
 - Contribution governance is intentionally lightweight for the first public release.
 - Some connectors are planned or partially wired: OpenAQ, Road511, NASA DIP NOTAMs, Global Energy Monitor, and some deeper historical provider paths.
@@ -267,7 +356,7 @@ High-value areas:
 - Docker/install improvements;
 - docs and examples that are safe for a public repository.
 
-## Credits
+## Credits And Inspiration
 
 OpenSpy was inspired by Bilawal Sidhu's GodEyeView concept and the idea of an AI-native OSINT interface centered on an interactive globe.
 
@@ -278,3 +367,7 @@ OpenSpy is a separate open-source implementation focused on self-hosted public-s
 OpenSpy is licensed under the [Apache License 2.0](LICENSE).
 
 Third-party data sources, map providers, and AI/model providers are governed by their own terms. Users are responsible for configuring and using provider credentials within those terms.
+
+## Follow
+
+[LinkedIn](https://www.linkedin.com/in/dmitryalekhin/) · [YouTube](https://www.youtube.com/@DimaAlekhin) · [X / Twitter](https://x.com/Dmitry_Alekhin)
