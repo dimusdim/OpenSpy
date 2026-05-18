@@ -49,6 +49,8 @@ frontend/src/icons/test-*.svg
 
 # Documentation (local working docs)
 docs/
+/AGENT_INTEGRATION_COMPLETION_TASKS.md
+frontend/README.md
 
 # Agent config files
 /AGENTS.md
@@ -64,6 +66,10 @@ SOURCES.md
 
 # Marketing materials (not in repo)
 marketing/
+
+# Local ops and test workspaces
+ops/
+tests/
 
 # Playwright/test artifacts
 test-results/
