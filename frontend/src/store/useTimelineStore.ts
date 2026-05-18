@@ -266,6 +266,22 @@ export interface ImageryOverlayContext {
   note: string;
 }
 
+export type VisualShaderPreset =
+  | 'normal'
+  | 'night-ops'
+  | 'signal-grid'
+  | 'thermal'
+  | 'monochrome'
+  | 'tactical-green'
+  | 'cyberpunk'
+  | 'xray'
+  | 'hazard'
+  | 'deep-space'
+  | 'infrared';
+
+export type PowerGridEffectPreset = 'off' | 'electric-flow' | 'ember-pulse' | 'voltage-surge';
+export type TrafficFlowEffectPreset = 'off' | 'flow-particles' | 'congestion-pulse' | 'signal-rain';
+
 interface TimelineStore {
   mode: 'live' | 'playback';
   playbackKind: 'historical' | 'track' | null;
@@ -307,9 +323,13 @@ interface TimelineStore {
   infraViewportPct: number;
   setInfraViewportPct: (pct: number) => void;
   tileMode: 'google' | 'osm' | 'modis';
+  osm3dObjectsVisible: boolean;
   clusteringEnabled: boolean;
   satelliteRenderLimit: number | null;
   activeImageryOverlay: ImageryOverlayContext | null;
+  visualShader: VisualShaderPreset;
+  powerGridEffect: PowerGridEffectPreset;
+  trafficFlowEffect: TrafficFlowEffectPreset;
   // Filter / isolation state
   prevFilterState: { visibility: LayerFlags; subtypeVisibility: Record<string, boolean> } | null;
   activeFilter: ActiveFilter | null;
@@ -317,9 +337,13 @@ interface TimelineStore {
   activeIconSet: 'default' | 'enhanced';
   isolatedEntityId: string | null;
   setTileMode: (mode: 'google' | 'osm' | 'modis') => void;
+  setOsm3dObjectsVisible: (visible: boolean) => void;
   toggleClustering: () => void;
   setSatelliteRenderLimit: (limit: number | null) => void;
   setActiveImageryOverlay: (context: ImageryOverlayContext | null) => void;
+  setVisualShader: (preset: VisualShaderPreset) => void;
+  setPowerGridEffect: (preset: PowerGridEffectPreset) => void;
+  setTrafficFlowEffect: (preset: TrafficFlowEffectPreset) => void;
   setMode: (mode: 'live' | 'playback') => void;
   setPlaybackKind: (kind: 'historical' | 'track' | null) => void;
   setCurrentTime: (time: Date, options?: CurrentTimeUpdateOptions) => void;
@@ -355,7 +379,7 @@ interface TimelineStore {
 
 type PersistedTimelineSettings = Pick<
   TimelineStore,
-  'sources' | 'visibility' | 'subtypeVisibility' | 'sourceVisibility' | 'tileMode' | 'showTrajectories' | 'clusteringEnabled' | 'activePreset' | 'activeIconSet' | 'satelliteRenderLimit'
+  'sources' | 'visibility' | 'subtypeVisibility' | 'sourceVisibility' | 'tileMode' | 'osm3dObjectsVisible' | 'showTrajectories' | 'clusteringEnabled' | 'activePreset' | 'activeIconSet' | 'satelliteRenderLimit' | 'visualShader' | 'powerGridEffect' | 'trafficFlowEffect'
 > & {
   effectiveTileMode?: 'google' | 'osm' | 'modis';
 };
@@ -376,11 +400,15 @@ function saveSettingsToServer(state: PersistedTimelineSettings) {
                 sourceVisibility: state.sourceVisibility,
                 tileMode: state.tileMode,
                 effectiveTileMode: state.effectiveTileMode || state.tileMode,
+                osm3dObjectsVisible: state.osm3dObjectsVisible,
                 showTrajectories: state.showTrajectories,
                 clusteringEnabled: state.clusteringEnabled,
                 satelliteRenderLimit: state.satelliteRenderLimit,
                 activePreset: state.activePreset,
                 activeIconSet: state.activeIconSet,
+                visualShader: state.visualShader,
+                powerGridEffect: state.powerGridEffect,
+                trafficFlowEffect: state.trafficFlowEffect,
             }),
         }).catch(() => { /* ignore save errors */ });
     }, 500);
@@ -473,12 +501,16 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
   infraViewportPct: -1,
   setInfraViewportPct: (pct) => set({ infraViewportPct: pct }),
   tileMode: 'google' as 'google' | 'osm' | 'modis',
+  osm3dObjectsVisible: true,
   clusteringEnabled: true,
   // null = 'all' — показываем весь каталог TLE из backend (~19k). 5000 был
   // артефактом ранней оптимизации и прятал 3.8× спутников. Пользователь
   // 2026-04-24: "5000 ровно это явно обрезка, проблема в логике".
   satelliteRenderLimit: null,
   activeImageryOverlay: null,
+  visualShader: 'normal',
+  powerGridEffect: 'off',
+  trafficFlowEffect: 'off',
   prevFilterState: null,
   activeFilter: null,
   activePreset: null,
@@ -489,6 +521,11 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
       const next = { ...state, tileMode };
       saveSettingsToServer(next);
       return { tileMode };
+  }),
+  setOsm3dObjectsVisible: (osm3dObjectsVisible) => set((state) => {
+      const next = { ...state, osm3dObjectsVisible };
+      saveSettingsToServer(next);
+      return { osm3dObjectsVisible };
   }),
   toggleClustering: () => set(state => {
       const next = { ...state, clusteringEnabled: !state.clusteringEnabled };
@@ -501,6 +538,21 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
       return { satelliteRenderLimit: limit };
   }),
   setActiveImageryOverlay: (activeImageryOverlay) => set({ activeImageryOverlay }),
+  setVisualShader: (visualShader) => set((state) => {
+      const next = { ...state, visualShader };
+      saveSettingsToServer(next);
+      return { visualShader };
+  }),
+  setPowerGridEffect: (powerGridEffect) => set((state) => {
+      const next = { ...state, powerGridEffect };
+      saveSettingsToServer(next);
+      return { powerGridEffect };
+  }),
+  setTrafficFlowEffect: (trafficFlowEffect) => set((state) => {
+      const next = { ...state, trafficFlowEffect };
+      saveSettingsToServer(next);
+      return { trafficFlowEffect };
+  }),
   streamMetrics: {
       aviation: { label: 'OpenSky Network', source: 'api.opensky-network.org', type: 'REST Polling (global)', count: 0, speed: '0 bps', status: 'connecting', poll: '90s', upstream: '5–10s ADS-B' },
       maritime: { label: 'AISStream', source: 'wss://stream.aisstream.io', type: 'WebSocket (persistent)', count: 0, speed: '0 msgs/s', status: 'connecting', poll: 'live (~3m update)', upstream: '2–10s AIS' },

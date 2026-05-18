@@ -20,6 +20,7 @@ import { useConflictsLayer, conflictMetaMap } from '../cesium/useConflictsLayer'
 import { useAirspaceLayer, airspaceMetaMap, airspaceInstanceToLogical } from '../cesium/useAirspaceLayer';
 import { useGFWLayer, gfwMetaMap } from '../cesium/useGFWLayer';
 import { useWifiLayer, wifiMetaMap } from '../cesium/useWifiLayer';
+import { useVisualShader } from '../cesium/useVisualShader';
 import { replayMetaMap, useReplayOverlay } from '../cesium/useReplayOverlay';
 import { fetchReplayRenderBatchMetadata, isReplayRenderBatchId, replayRenderBatchMetaMap } from '../cesium/replayRenderBatch';
 import { API_URL } from '../lib/config';
@@ -863,6 +864,7 @@ export default function Globe() {
     // True Color (WMTS), no 3D tileset involved. When switching away from
     // MODIS we restore the default Cesium Ion aerial base layer.
     const tileMode = useTimelineStore(s => s.tileMode);
+    const osm3dObjectsVisible = useTimelineStore(s => s.osm3dObjectsVisible);
     const googleTileRef = useRef<Cesium.Cesium3DTileset | null>(null);
     const osmTileRef = useRef<Cesium.Cesium3DTileset | null>(null);
     const terrainLoadedRef = useRef(false);
@@ -932,16 +934,19 @@ export default function Globe() {
             }
         }
 
-        async function ensureOsm() {
+        async function ensureOsmTerrain() {
+            if (terrainLoadedRef.current) return;
+            viewer!.terrainProvider = await Cesium.createWorldTerrainAsync();
+            terrainLoadedRef.current = true;
+        }
+
+        async function ensureOsmBuildings() {
             if (osmTileRef.current) return; // already loaded
             try {
-                if (!terrainLoadedRef.current) {
-                    viewer!.terrainProvider = await Cesium.createWorldTerrainAsync();
-                    terrainLoadedRef.current = true;
-                }
+                await ensureOsmTerrain();
                 const buildings = await Cesium.createOsmBuildingsAsync();
                 if (!active || viewer!.isDestroyed()) return;
-                buildings.show = tileMode === 'osm';
+                buildings.show = tileMode === 'osm' && osm3dObjectsVisible;
                 viewer!.scene.primitives.add(buildings);
                 osmTileRef.current = buildings;
                 console.log('[Globe] OSM 3D Buildings loaded (cached)');
@@ -1015,14 +1020,15 @@ export default function Globe() {
             if (tileMode === 'google') {
                 await ensureGoogle();
             } else if (tileMode === 'osm') {
-                await ensureOsm();
+                await ensureOsmTerrain();
+                if (osm3dObjectsVisible) await ensureOsmBuildings();
             }
             // modis mode needs no async tileset load — base imagery swap is sync.
             if (viewer!.isDestroyed()) return;
 
             // Apply show flags (refs may be non-null after first switch)
             if (googleTileRef.current) googleTileRef.current.show = tileMode === 'google';
-            if (osmTileRef.current)    osmTileRef.current.show    = tileMode === 'osm';
+            if (osmTileRef.current)    osmTileRef.current.show    = tileMode === 'osm' && osm3dObjectsVisible;
 
             // MODIS base-imagery swap: apply when entering modis, restore otherwise.
             if (tileMode === 'modis') {
@@ -1041,7 +1047,7 @@ export default function Globe() {
         })();
 
         return () => { active = false; };
-    }, [viewer, tileMode]);
+    }, [viewer, tileMode, osm3dObjectsVisible]);
 
     useEffect(() => {
         if (!viewer) return;
@@ -1182,6 +1188,7 @@ export default function Globe() {
     useGFWLayer(viewer);
     useWifiLayer(viewer);
     useReplayOverlay(viewer);
+    useVisualShader(viewer);
 
     return (
         <div ref={containerRef} className="absolute inset-0 w-full h-full" />

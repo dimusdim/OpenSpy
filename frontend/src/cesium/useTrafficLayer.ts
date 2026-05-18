@@ -1,7 +1,23 @@
 import { useEffect, useRef } from 'react';
 import * as Cesium from 'cesium';
-import { useTimelineStore } from '../store/useTimelineStore';
+import { useTimelineStore, type TrafficFlowEffectPreset } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
+
+const TRAFFIC_LAYER_ALPHA = 0.6;
+
+function alphaForTrafficEffect(effect: TrafficFlowEffectPreset): number {
+    switch (effect) {
+        case 'flow-particles':
+            return 0.611;
+        case 'congestion-pulse':
+            return 0.612;
+        case 'signal-rain':
+            return 0.613;
+        case 'off':
+        default:
+            return TRAFFIC_LAYER_ALPHA;
+    }
+}
 
 /**
  * TomTom Traffic Flow raster overlay.
@@ -24,6 +40,7 @@ export function useTrafficLayer(viewer: Cesium.Viewer | null) {
     const isSourceOn = useTimelineStore(s => s.sources.traffic);
     const isVisible = useTimelineStore(s => s.visibility.traffic);
     const mode = useTimelineStore(s => s.mode);
+    const trafficFlowEffect = useTimelineStore(s => s.trafficFlowEffect);
     const layerRef = useRef<Cesium.ImageryLayer | null>(null);
     const tickRef = useRef<Cesium.Event.RemoveCallback | null>(null);
 
@@ -45,7 +62,7 @@ export function useTrafficLayer(viewer: Cesium.Viewer | null) {
         });
 
         const layer = viewer.imageryLayers.addImageryProvider(provider);
-        layer.alpha = 0.6;
+        layer.alpha = alphaForTrafficEffect(useTimelineStore.getState().trafficFlowEffect);
         layer.show = false; // controlled by tick listener + store flag
         layerRef.current = layer;
 
@@ -121,4 +138,13 @@ export function useTrafficLayer(viewer: Cesium.Viewer | null) {
         layerRef.current.show = shouldShow;
         console.log(`[Traffic] toggle: source=${isSourceOn} vis=${isVisible} alt=${Math.round(heightKm)}km globe.show=${viewer.scene.globe.show} → layer.show=${shouldShow}`);
     }, [isSourceOn, isVisible, mode, viewer]);
+
+    // Traffic effects are encoded into this imagery layer's alpha uniform and
+    // decoded by the Cesium GlobeFS patch before imagery is blended with other
+    // layers. This keeps traffic animation isolated from power-line primitives.
+    useEffect(() => {
+        if (!layerRef.current || !viewer || viewer.isDestroyed()) return;
+        layerRef.current.alpha = alphaForTrafficEffect(trafficFlowEffect);
+        viewer.scene.requestRender();
+    }, [trafficFlowEffect, viewer]);
 }

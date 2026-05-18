@@ -283,6 +283,8 @@ export default function Legend({ embedded = false }: { embedded?: boolean }) {
     const toggleTrajectories = useTimelineStore(s => s.toggleTrajectories);
     const tileMode = useTimelineStore(s => s.tileMode);
     const setTileMode = useTimelineStore(s => s.setTileMode);
+    const osm3dObjectsVisible = useTimelineStore(s => s.osm3dObjectsVisible);
+    const setOsm3dObjectsVisible = useTimelineStore(s => s.setOsm3dObjectsVisible);
     const clusteringEnabled = useTimelineStore(s => s.clusteringEnabled);
     const toggleClustering = useTimelineStore(s => s.toggleClustering);
 
@@ -392,6 +394,21 @@ export default function Legend({ embedded = false }: { embedded?: boolean }) {
                             <Satellite size={13} /> MODIS
                         </button>
                     </div>
+                    {tileMode === 'osm' && (
+                        <div className="setting-row py-1.5">
+                            <div className="label">
+                                <b className="!text-xs">OSM 3D Objects</b>
+                                <small>Show building blocks in OpenStreetMap mode</small>
+                            </div>
+                            <button
+                                type="button"
+                                className="toggle"
+                                data-on={osm3dObjectsVisible ? 'true' : 'false'}
+                                onClick={() => setOsm3dObjectsVisible(!osm3dObjectsVisible)}
+                                aria-label="Toggle OSM 3D objects"
+                            />
+                        </div>
+                    )}
                     <div className="setting-row py-1.5">
                         <div className="label">
                             <b className="!text-xs">Clustering</b>

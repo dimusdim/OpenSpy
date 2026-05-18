@@ -179,6 +179,8 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
     const toggleTrajectories = useTimelineStore(s => s.toggleTrajectories);
     const tileMode = useTimelineStore(s => s.tileMode);
     const setTileMode = useTimelineStore(s => s.setTileMode);
+    const osm3dObjectsVisible = useTimelineStore(s => s.osm3dObjectsVisible);
+    const setOsm3dObjectsVisible = useTimelineStore(s => s.setOsm3dObjectsVisible);
     const satelliteRenderLimit = useTimelineStore(s => s.satelliteRenderLimit);
     const setSatelliteRenderLimit = useTimelineStore(s => s.setSatelliteRenderLimit);
 
@@ -296,6 +298,8 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                             toggleTrajectories={toggleTrajectories}
                             tileMode={tileMode}
                             setTileMode={setTileMode}
+                            osm3dObjectsVisible={osm3dObjectsVisible}
+                            setOsm3dObjectsVisible={setOsm3dObjectsVisible}
                             satelliteRenderLimit={satelliteRenderLimit}
                             setSatelliteRenderLimit={setSatelliteRenderLimit}
                         />
@@ -497,9 +501,10 @@ function ApiKeyFields({ envVars, note, registrationUrl, registrationLabel, onKey
 // ---------------------------------------------------------------------------
 // Display Tab
 // ---------------------------------------------------------------------------
-function DisplayTab({ showTrajectories, toggleTrajectories, tileMode, setTileMode, satelliteRenderLimit, setSatelliteRenderLimit }: {
+function DisplayTab({ showTrajectories, toggleTrajectories, tileMode, setTileMode, osm3dObjectsVisible, setOsm3dObjectsVisible, satelliteRenderLimit, setSatelliteRenderLimit }: {
     showTrajectories: boolean; toggleTrajectories: () => void;
     tileMode: 'google' | 'osm' | 'modis'; setTileMode: (m: 'google' | 'osm' | 'modis') => void;
+    osm3dObjectsVisible: boolean; setOsm3dObjectsVisible: (visible: boolean) => void;
     satelliteRenderLimit: number | null; setSatelliteRenderLimit: (limit: number | null) => void;
 }) {
     const [satelliteLimitInput, setSatelliteLimitInput] = useState(
@@ -536,6 +541,15 @@ function DisplayTab({ showTrajectories, toggleTrajectories, tileMode, setTileMod
                             }`}>{MODE_LABELS[mode]}</button>
                     ))}
                 </div>
+                {tileMode === 'osm' && (
+                    <label className="mt-3 flex cursor-pointer items-center justify-between rounded border border-zinc-800/70 bg-[#24242a]/55 px-3 py-2">
+                        <div>
+                            <div className="text-xs text-zinc-100">OSM 3D Objects</div>
+                            <div className="mt-0.5 text-[10px] text-zinc-500">Show building blocks in OpenStreetMap mode</div>
+                        </div>
+                        <ToggleSwitch enabled={osm3dObjectsVisible} onClick={() => setOsm3dObjectsVisible(!osm3dObjectsVisible)} />
+                    </label>
+                )}
             </div>
             <div className="rounded-md border border-zinc-800/80 bg-[#1a1a1f]/92 p-3">
                 <div className="flex items-start justify-between gap-3">

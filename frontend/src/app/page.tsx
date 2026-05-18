@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
 import dynamic from 'next/dynamic';
-import { Activity, Bot, ChevronDown, ChevronUp, History, Image as ImageIcon, Layers, Palette, Settings, Sparkles, X } from 'lucide-react';
+import { Activity, Bot, ChevronDown, ChevronUp, History, Image as ImageIcon, Layers, Palette, ScanLine, Settings, Sparkles, X } from 'lucide-react';
 import TimelinePlayer from '../components/TimelinePlayer';
 import SearchBar from '../components/SearchBar';
 import Legend from '../components/Legend';
@@ -15,8 +15,10 @@ import AIImagePanel from '../components/AIImagePanel';
 import AgentPanel from '../components/AgentPanel';
 import ImageryPanel, { ImageryContextBadge } from '../components/ImageryPanel';
 import IconPackPanel from '../components/IconPackPanel';
+import GlobeShaderPanel from '../components/GlobeShaderPanel';
 import { useAIImageStore } from '../store/useAIImageStore';
 import { useTimelineStore } from '../store/useTimelineStore';
+import type { PowerGridEffectPreset, TrafficFlowEffectPreset, VisualShaderPreset } from '../store/useTimelineStore';
 import { useStatusPoller } from '../hooks/useStatusPoller';
 import { API_URL } from '../lib/config';
 import { setRuntimeIconPack } from '../icons/map-icons';
@@ -26,10 +28,38 @@ const GlobeDynamic = dynamic(() => import('../components/Globe'), {
 });
 
 type LeftDock = 'layers' | 'imagery' | 'replay' | null;
-type RightDock = 'agent' | 'vision' | 'icons' | 'status' | null;
+type RightDock = 'agent' | 'vision' | 'icons' | 'shaders' | 'status' | null;
 type OpenSpyWindow = Window & {
   __openspyTimelineStore?: typeof useTimelineStore;
 };
+
+function isVisualShaderPreset(value: unknown): value is VisualShaderPreset {
+  return value === 'normal'
+    || value === 'night-ops'
+    || value === 'signal-grid'
+    || value === 'thermal'
+    || value === 'monochrome'
+    || value === 'tactical-green'
+    || value === 'cyberpunk'
+    || value === 'xray'
+    || value === 'hazard'
+    || value === 'deep-space'
+    || value === 'infrared';
+}
+
+function isPowerGridEffectPreset(value: unknown): value is PowerGridEffectPreset {
+  return value === 'off'
+    || value === 'electric-flow'
+    || value === 'ember-pulse'
+    || value === 'voltage-surge';
+}
+
+function isTrafficFlowEffectPreset(value: unknown): value is TrafficFlowEffectPreset {
+  return value === 'off'
+    || value === 'flow-particles'
+    || value === 'congestion-pulse'
+    || value === 'signal-rain';
+}
 
 export default function Home() {
   const aiActive = useAIImageStore((s) => s.isActive);
@@ -62,9 +92,11 @@ export default function Home() {
       ? 'AI Vision'
       : activeRight === 'icons'
         ? 'Icon Packs'
-        : activeRight === 'status'
-          ? 'Status'
-          : '';
+        : activeRight === 'shaders'
+          ? 'Shaders'
+          : activeRight === 'status'
+            ? 'Status'
+            : '';
 
   // Status polling — always-on, independent of which panels are open
   useStatusPoller();
@@ -121,6 +153,9 @@ export default function Home() {
         if (saved.tileMode) {
           patch.tileMode = saved.tileMode;
         }
+        if (typeof saved.osm3dObjectsVisible === 'boolean') {
+          patch.osm3dObjectsVisible = saved.osm3dObjectsVisible;
+        }
         if (typeof saved.showTrajectories === 'boolean') {
           patch.showTrajectories = saved.showTrajectories;
         }
@@ -138,6 +173,15 @@ export default function Home() {
         }
         if (saved.activeIconSet === 'default' || saved.activeIconSet === 'enhanced') {
           patch.activeIconSet = saved.activeIconSet;
+        }
+        if (isVisualShaderPreset(saved.visualShader)) {
+          patch.visualShader = saved.visualShader;
+        }
+        if (isPowerGridEffectPreset(saved.powerGridEffect)) {
+          patch.powerGridEffect = saved.powerGridEffect;
+        }
+        if (isTrafficFlowEffectPreset(saved.trafficFlowEffect)) {
+          patch.trafficFlowEffect = saved.trafficFlowEffect;
         }
         if (Object.keys(patch).length > 0) useTimelineStore.setState(patch);
       })
@@ -244,6 +288,9 @@ export default function Home() {
                         <button className="os-rail-btn" data-active={activeRight === 'icons'} title="Icon packs" onClick={() => toggleRight('icons')}>
                             <Palette size={18} />
                         </button>
+                        <button className="os-rail-btn" data-active={activeRight === 'shaders'} title="Shaders" onClick={() => toggleRight('shaders')}>
+                            <ScanLine size={18} />
+                        </button>
                         <div className="os-rail__divider" />
                         <button className="os-rail-btn" data-active={activeRight === 'status'} title="System status" onClick={() => toggleRight('status')}>
                             <Activity size={18} />
@@ -270,6 +317,9 @@ export default function Home() {
                         )}
                         {activeRight === 'icons' && (
                             <IconPackPanel />
+                        )}
+                        {activeRight === 'shaders' && (
+                            <GlobeShaderPanel />
                         )}
                         {activeRight === 'status' && (
                             <div className="os-status-dock">

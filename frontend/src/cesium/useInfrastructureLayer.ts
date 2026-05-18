@@ -2,12 +2,79 @@ import { useEffect, useRef, useCallback } from 'react';
 import * as Cesium from 'cesium';
 import axios from 'axios';
 import { useTimelineStore } from '../store/useTimelineStore';
+import type { PowerGridEffectPreset } from '../store/useTimelineStore';
 import { API_URL } from '../lib/config';
 import { perfLog } from '../lib/perf-log';
 import { getIconOpacity, getIconScale, getInfraIcon } from '../icons/map-icons';
 import { getViewerAltitudeMeters } from './position-utils';
 
 const POWER_LINE_COLOR = Cesium.Color.ORANGE.withAlpha(0.85);
+
+function createPowerLineAppearance(effect: PowerGridEffectPreset): Cesium.Appearance {
+  if (effect === 'off') {
+    return new Cesium.PolylineColorAppearance();
+  }
+
+  const palette =
+    effect === 'electric-flow'
+      ? {
+          base: Cesium.Color.fromCssColorString('#0d3b66').withAlpha(0.20),
+          core: Cesium.Color.fromCssColorString('#22d3ee').withAlpha(0.95),
+          hot: Cesium.Color.fromCssColorString('#e0f2fe').withAlpha(1.00),
+          speed: 0.030,
+          repeat: 18.0,
+        }
+      : effect === 'ember-pulse'
+        ? {
+            base: Cesium.Color.fromCssColorString('#5a2500').withAlpha(0.24),
+            core: Cesium.Color.fromCssColorString('#fb923c').withAlpha(0.92),
+            hot: Cesium.Color.fromCssColorString('#fde68a').withAlpha(1.00),
+            speed: 0.022,
+            repeat: 12.0,
+          }
+        : {
+            base: Cesium.Color.fromCssColorString('#02111f').withAlpha(0.24),
+            core: Cesium.Color.fromCssColorString('#60a5fa').withAlpha(0.96),
+            hot: Cesium.Color.fromCssColorString('#ffffff').withAlpha(1.00),
+            speed: 0.050,
+            repeat: 22.0,
+          };
+
+  const material = new Cesium.Material({
+    translucent: true,
+    fabric: {
+      type: `OpenSpyPowerLine${effect.replace(/-/g, '')}`,
+      uniforms: {
+        baseColor: palette.base,
+        coreColor: palette.core,
+        hotColor: palette.hot,
+        speed: palette.speed,
+        repeat: palette.repeat,
+      },
+      source: `
+        czm_material czm_getMaterial(czm_materialInput materialInput)
+        {
+          czm_material material = czm_getDefaultMaterial(materialInput);
+          float phase = fract(materialInput.st.s * repeat - czm_frameNumber * speed);
+          float current = 1.0 - smoothstep(0.055, 0.18, abs(phase - 0.5));
+          float spark = 1.0 - smoothstep(0.010, 0.070, abs(fract(materialInput.st.s * repeat * 2.7 + czm_frameNumber * speed * 1.6) - 0.5));
+          float side = 1.0 - smoothstep(0.30, 0.50, abs(materialInput.st.t - 0.5));
+          float pulse = 0.62 + 0.38 * sin(czm_frameNumber * speed * 7.0 + materialInput.st.s * 20.0);
+          vec3 glow = mix(baseColor.rgb, coreColor.rgb, current * side);
+          glow = mix(glow, hotColor.rgb, spark * current * side * 0.65);
+          material.diffuse = glow;
+          material.alpha = max(baseColor.a, coreColor.a * current * side * pulse);
+          return material;
+        }
+      `,
+    },
+  });
+
+  return new Cesium.PolylineMaterialAppearance({
+    material,
+    translucent: true,
+  } as any);
+}
 
 // ---------------------------------------------------------------------------
 // Metadata + exports for picking/HUD
@@ -221,6 +288,7 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
   const mode = useTimelineStore((s) => s.mode);
   const subtypeVisibility = useTimelineStore((s) => s.subtypeVisibility);
   const isolatedEntityId = useTimelineStore((s) => s.isolatedEntityId);
+  const powerGridEffect = useTimelineStore((s) => s.powerGridEffect);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tilesRef = useRef<Map<string, TileState>>(new Map());
   // Cells with fetches currently in flight.
@@ -642,7 +710,7 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
             if (powerLineInstances.length > 0) {
               const linePrim = new Cesium.GroundPolylinePrimitive({
                 geometryInstances: powerLineInstances,
-                appearance: new Cesium.PolylineColorAppearance(),
+                appearance: createPowerLineAppearance(useTimelineStore.getState().powerGridEffect),
                 releaseGeometryInstances: false,
               });
               linePrim.show = (useTimelineStore.getState().sources.infrastructure && useTimelineStore.getState().visibility.infrastructure);
@@ -883,6 +951,25 @@ export function useInfrastructureLayer(viewer: Cesium.Viewer | null) {
       if (tile.powerLinePrimitive) tile.powerLinePrimitive.show = show;
     });
   }, [isSourceOn, isVisible, mode]);
+
+  // ---- Effect 3a: animated power-line shader mode ----
+  useEffect(() => {
+    if (!viewer || viewer.isDestroyed()) return;
+    tilesRef.current.forEach((tile) => {
+      if (tile.powerLinePrimitive) {
+        tile.powerLinePrimitive.appearance = createPowerLineAppearance(powerGridEffect);
+      }
+    });
+    viewer.scene.requestRender();
+  }, [viewer, powerGridEffect]);
+
+  useEffect(() => {
+    if (!viewer || viewer.isDestroyed() || powerGridEffect === 'off') return;
+    const interval = window.setInterval(() => {
+      if (!viewer.isDestroyed()) viewer.scene.requestRender();
+    }, 33);
+    return () => window.clearInterval(interval);
+  }, [viewer, powerGridEffect]);
 
   // ---- Effect 4: per-subtype visibility + Solo isolation ----
   useEffect(() => {

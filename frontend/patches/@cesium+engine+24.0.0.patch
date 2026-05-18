@@ -22,3 +22,104 @@ index e5a842a..2cceb33 100644
    billboardTexture._width = rectangle.width;
    billboardTexture._height = rectangle.height;
  
+diff --git a/node_modules/@cesium/engine/Source/Shaders/GlobeFS.js b/node_modules/@cesium/engine/Source/Shaders/GlobeFS.js
+index 30e0817..4304a0b 100644
+--- a/node_modules/@cesium/engine/Source/Shaders/GlobeFS.js
++++ b/node_modules/@cesium/engine/Source/Shaders/GlobeFS.js
+@@ -175,6 +175,73 @@ vec4 alphaBlend(vec4 sourceColor, vec4 destinationColor)\n\
+ }\n\
+ #endif\n\
+ \n\
++float openspyTrafficHash(vec2 p)\n\
++{\n\
++    vec3 p3 = fract(vec3(p.xyx) * 0.1031);\n\
++    p3 += dot(p3, p3.yzx + 33.33);\n\
++    return fract((p3.x + p3.y) * p3.z);\n\
++}\n\
++\n\
++vec3 openspyTrafficMasks(vec3 color)\n\
++{\n\
++    float maxChannel = max(max(color.r, color.g), color.b);\n\
++    float minChannel = min(min(color.r, color.g), color.b);\n\
++    float saturation = maxChannel - minChannel;\n\
++    float vivid = smoothstep(0.13, 0.34, saturation) * smoothstep(0.10, 0.32, maxChannel);\n\
++    float redMask = smoothstep(0.08, 0.26, color.r - max(color.g, color.b)) * smoothstep(0.18, 0.50, color.r) * vivid;\n\
++    float greenMask = smoothstep(0.06, 0.22, color.g - max(color.r * 0.82, color.b)) * smoothstep(0.14, 0.42, color.g) * vivid;\n\
++    float yellowMask = smoothstep(0.05, 0.22, min(color.r, color.g) - color.b) * smoothstep(0.20, 0.52, max(color.r, color.g)) * vivid;\n\
++    return vec3(redMask, greenMask, yellowMask);\n\
++}\n\
++\n\
++vec3 openspyApplyTrafficLayerEffect(vec3 color, vec2 textureCoordinates, float effect)\n\
++{\n\
++    vec3 masks = openspyTrafficMasks(color);\n\
++    float trafficMask = max(max(masks.r, masks.g), masks.b);\n\
++    if (trafficMask < 0.025) {\n\
++        return color;\n\
++    }\n\
++\n\
++    vec3 trafficColor = normalize(\n\
++        vec3(1.0, 0.05, 0.02) * masks.r +\n\
++        vec3(1.0, 0.78, 0.04) * masks.b +\n\
++        vec3(0.05, 1.0, 0.34) * masks.g +\n\
++        vec3(0.001)\n\
++    );\n\
++    float congestion = clamp(masks.r + masks.b * 0.58 + masks.g * 0.18, 0.0, 1.0);\n\
++    vec2 flowAxis = normalize(vec2(0.82, 0.57));\n\
++    vec2 crossAxis = vec2(-flowAxis.y, flowAxis.x);\n\
++    float lane = dot(textureCoordinates, flowAxis) * (effect < 2.5 ? 96.0 : 132.0);\n\
++    float cross = dot(textureCoordinates, crossAxis) * 44.0;\n\
++    vec2 cell = floor(vec2(lane, cross));\n\
++    float rnd = openspyTrafficHash(cell);\n\
++    float speed = mix(0.45, 1.35, masks.g + 0.25 * masks.b) * mix(0.58, 0.95, 1.0 - masks.r);\n\
++    float phase = fract(lane - czm_frameNumber * 0.022 * speed + rnd * 0.65);\n\
++    float bead = 1.0 - smoothstep(0.035, 0.17, abs(phase - 0.5));\n\
++    float dotGate = step(0.34 + congestion * 0.10, rnd);\n\
++    float particle = bead * dotGate * smoothstep(0.035, 0.28, trafficMask);\n\
++    float lum = dot(color, vec3(0.299, 0.587, 0.114));\n\
++    vec3 suppressed = mix(color, vec3(lum * 0.24), 0.86);\n\
++\n\
++    if (effect < 1.5) {\n\
++        color = mix(color, suppressed, trafficMask * 0.92);\n\
++        color += trafficColor * particle * 1.65;\n\
++    } else if (effect < 2.5) {\n\
++        float pulse = 0.58 + 0.42 * sin(czm_frameNumber * 0.080 + rnd * 6.28318);\n\
++        float pressure = clamp(masks.r * 1.35 + masks.b * 0.72, 0.0, 1.0);\n\
++        color = mix(color, suppressed * vec3(0.75, 0.62, 0.58), trafficMask * 0.88);\n\
++        color += vec3(1.0, 0.08, 0.025) * particle * pressure * (1.2 + pulse);\n\
++        color += vec3(1.0, 0.55, 0.05) * particle * masks.b * 0.75;\n\
++    } else {\n\
++        float column = 1.0 - smoothstep(0.045, 0.16, abs(fract(cross * 1.55 + rnd) - 0.5));\n\
++        float rain = particle * column * (0.72 + 0.28 * sin(czm_frameNumber * 0.060 + rnd * 9.0));\n\
++        color = mix(color, suppressed, trafficMask * 0.90);\n\
++        color += trafficColor * rain * 1.55;\n\
++    }\n\
++\n\
++    return clamp(color, 0.0, 1.0);\n\
++}\n\
++\n\
+ #ifdef TRANSLUCENT\n\
+ bool inTranslucencyRectangle()\n\
+ {\n\
+@@ -227,6 +294,11 @@ vec4 sampleAndBlend(\n\
+     vec4 value = texture(textureToSample, textureCoordinates);\n\
+     vec3 color = value.rgb;\n\
+     float alpha = value.a;\n\
++    float openspyTrafficEffect = 0.0;\n\
++    if (textureAlpha > 0.6105 && textureAlpha < 0.6135) {\n\
++        openspyTrafficEffect = floor((textureAlpha - 0.6100) * 1000.0 + 0.5);\n\
++        textureAlpha = 0.60;\n\
++    }\n\
+ \n\
+ #ifdef APPLY_COLOR_TO_ALPHA\n\
+     vec3 colorDiff = abs(color.rgb - colorToAlpha.rgb);\n\
+@@ -269,6 +341,10 @@ vec4 sampleAndBlend(\n\
+ #ifdef APPLY_SATURATION\n\
+     color = czm_saturation(color, textureSaturation);\n\
+ #endif\n\
++\n\
++    if (openspyTrafficEffect > 0.5) {\n\
++        color = openspyApplyTrafficLayerEffect(color, textureCoordinates, openspyTrafficEffect);\n\
++    }\n\
+ \n\
+     float sourceAlpha = alpha * textureAlpha;\n\
+     float outAlpha = mix(previousColor.a, 1.0, sourceAlpha);\n\
