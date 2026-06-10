@@ -1,1 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><defs><filter id="openspyIconOutline" x="-40%" y="-40%" width="180%" height="180%"><feMorphology in="SourceAlpha" result="dilated" operator="dilate" radius="0.75"/><feFlood flood-color="#000000" flood-opacity="0.5" result="outlineColor"/><feComposite in="outlineColor" in2="dilated" operator="in" result="outline"/><feMerge><feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><g filter="url(#openspyIconOutline)"><path d="M4 19h16"/><path d="M6 19V8l4 3V8l4 3V7h4v12" fill="#e5e7eb" stroke="#0f172a"/><circle cx="17" cy="6" r="2" fill="#fb923c" stroke="#0f172a"/></g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24">
+<rect x="2.6" y="2.6" width="18.8" height="18.8" rx="4.2" fill="#39414d" stroke="#0b0f14" stroke-width="1.3" stroke-linejoin="round" paint-order="stroke"/>
+<rect x="6.4" y="8.2" width="2.4" height="9.4" rx="0.6" fill="#f2f4f6"/>
+<rect x="10.8" y="10.2" width="2.4" height="7.4" rx="0.6" fill="#f2f4f6"/>
+<rect x="15.2" y="6.8" width="2.4" height="10.8" rx="0.6" fill="#f2f4f6"/>
+<path d="M6.4 13.6 L17.6 13.6" stroke="#f2f4f6" stroke-width="1.1"/>
+<circle cx="16.4" cy="5" r="1.3" fill="#de9460"/>
+</svg>

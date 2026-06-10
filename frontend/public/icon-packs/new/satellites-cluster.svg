@@ -1,8 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="32" height="32" color="#fff"><defs><filter id="openspyIconOutline" x="-40%" y="-40%" width="180%" height="180%"><feMorphology in="SourceAlpha" result="dilated" operator="dilate" radius="0.75"/><feFlood flood-color="#000000" flood-opacity="0.5" result="outlineColor"/><feComposite in="outlineColor" in2="dilated" operator="in" result="outline"/><feMerge><feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><g filter="url(#openspyIconOutline)">
-<rect x="4" y="4" width="3" height="3" fill="currentColor"></rect>
-  <rect x="4" y="17" width="3" height="3" fill="currentColor"></rect>
-  <rect x="17" y="4" width="3" height="3" fill="currentColor"></rect>
-  <rect x="17" y="17" width="3" height="3" fill="currentColor"></rect>
-  <rect x="10.5" y="10.5" width="3" height="3" fill="currentColor"></rect>
-  <path d="M5.5 7 L12 10.5 M18.5 7 L12 10.5 M5.5 17 L12 13.5 M18.5 17 L12 13.5" stroke="#22d3ee" stroke-width="0.5"></path>
-</g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24">
+<path d="M12 6.1 L6.6 16.9 M12 6.1 L17.4 16.9 M6.6 16.9 L17.4 16.9" fill="none" stroke="#0b0f14" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M12 6.1 L6.6 16.9 M12 6.1 L17.4 16.9 M6.6 16.9 L17.4 16.9" fill="none" stroke="#8fd0e8" stroke-width="0.9" stroke-linecap="round" stroke-linejoin="round"/>
+<g transform="translate(12 5.4) scale(0.42) translate(-12 -12)"><rect x="2.4" y="10.3" width="5.8" height="3.4" rx="0.7" fill="#f2f4f6" stroke="#0b0f14" stroke-width="2.2" paint-order="stroke"/><rect x="15.8" y="10.3" width="5.8" height="3.4" rx="0.7" fill="#f2f4f6" stroke="#0b0f14" stroke-width="2.2" paint-order="stroke"/><rect x="9.2" y="8.7" width="5.6" height="6.6" rx="1.2" fill="#f2f4f6" stroke="#0b0f14" stroke-width="2.6" paint-order="stroke"/></g>
+<g transform="translate(6.2 17.2) scale(0.42) translate(-12 -12)"><rect x="2.4" y="10.3" width="5.8" height="3.4" rx="0.7" fill="#f2f4f6" stroke="#0b0f14" stroke-width="2.2" paint-order="stroke"/><rect x="15.8" y="10.3" width="5.8" height="3.4" rx="0.7" fill="#f2f4f6" stroke="#0b0f14" stroke-width="2.2" paint-order="stroke"/><rect x="9.2" y="8.7" width="5.6" height="6.6" rx="1.2" fill="#f2f4f6" stroke="#0b0f14" stroke-width="2.6" paint-order="stroke"/></g>
+<g transform="translate(17.8 17.2) scale(0.42) translate(-12 -12)"><rect x="2.4" y="10.3" width="5.8" height="3.4" rx="0.7" fill="#f2f4f6" stroke="#0b0f14" stroke-width="2.2" paint-order="stroke"/><rect x="15.8" y="10.3" width="5.8" height="3.4" rx="0.7" fill="#f2f4f6" stroke="#0b0f14" stroke-width="2.2" paint-order="stroke"/><rect x="9.2" y="8.7" width="5.6" height="6.6" rx="1.2" fill="#f2f4f6" stroke="#0b0f14" stroke-width="2.6" paint-order="stroke"/></g>
+</svg>

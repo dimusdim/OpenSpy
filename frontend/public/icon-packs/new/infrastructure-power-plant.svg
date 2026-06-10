@@ -1,1 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><defs><filter id="openspyIconOutline" x="-40%" y="-40%" width="180%" height="180%"><feMorphology in="SourceAlpha" result="dilated" operator="dilate" radius="0.75"/><feFlood flood-color="#000000" flood-opacity="0.5" result="outlineColor"/><feComposite in="outlineColor" in2="dilated" operator="in" result="outline"/><feMerge><feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><g filter="url(#openspyIconOutline)"><rect x="5" y="10" width="14" height="8" rx="1.5" fill="#e5e7eb" stroke="#0f172a"/><path d="M7 10V6h3v4M14 10V5h3v5" fill="#38bdf8" stroke="#0f172a"/><path d="M8 18v-4m4 4v-5m4 5v-4" stroke="#0f172a"/></g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24">
+<rect x="2.6" y="2.6" width="18.8" height="18.8" rx="4.2" fill="#39414d" stroke="#0b0f14" stroke-width="1.3" stroke-linejoin="round" paint-order="stroke"/>
+<path d="M6.2 17.8 L6.2 11.4 L8.6 11.4 L8.6 6.2 L11 6.2 L11 11.4 L13.4 11.4 L13.4 8.4 L15.8 8.4 L15.8 11.4 L17.8 11.4 L17.8 17.8 Z" fill="#f2f4f6"/>
+<path d="M15.9 12.4 L13.9 15.3 L15.4 15.3 L14.9 17.6 L17 14.6 L15.5 14.6 Z" fill="#e0b765"/>
+</svg>
