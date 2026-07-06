@@ -92,6 +92,19 @@
       "notes": "GDELT near-real-time conflict event feed."
     },
     {
+      "sourceId": "eyes_on_russia",
+      "layerId": "conflict",
+      "canonicalTarget": "events",
+      "recordKind": "conflict_event",
+      "transformerId": "gdelt-conflict-event",
+      "writerId": "event-snapshot",
+      "storagePolicyId": "event-snapshots",
+      "rawCaptureMode": "none",
+      "rawFormat": "json",
+      "coverageScope": "regional",
+      "notes": "Eyes on Russia / CIR ArcGIS — volunteer-geolocated, source-linked conflict events. Renders on the conflict layer. Attribution: CIR."
+    },
+    {
       "sourceId": "celestrak",
       "layerId": "satellite",
       "canonicalTarget": "orbital_elements",

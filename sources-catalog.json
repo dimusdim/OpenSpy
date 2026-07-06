@@ -36,6 +36,26 @@
       "notes": "Authoritative military airframes (readsb dbFlags bit 1) that OpenSky does not flag or fully cover. Unioned by icao24 across feeds, tagged subtype=military, merged into the Aircraft layer. Carries registration + type code for identification."
     },
     {
+      "id": "eyes_on_russia",
+      "name": "Eyes on Russia (CIR)",
+      "provider": "Centre for Information Resilience",
+      "category": "conflict",
+      "layer": "Conflict",
+      "status": "LIVE",
+      "type": "archive-incremental",
+      "refresh": "30min polling",
+      "endpoints": [
+        "https://services-eu1.arcgis.com/06WOSMGHsCnaFyMp/arcgis/rest/services/EoR_completed_entries/FeatureServer/0/query"
+      ],
+      "auth": {
+        "required": false,
+        "method": "none",
+        "env_keys": [],
+        "limits": "Keyless ArcGIS FeatureServer. No explicit reuse license — attribute CIR; user accepts provider terms (BYOK/self-host)."
+      },
+      "notes": "Volunteer-geolocated, source-linked conflict events (Ukraine + CIR Sudan/Gaza portfolio) with precise lat/lon, category, description and source URL. Fills the gap left by the broken ACLED live feed. Renders on the Conflict layer as conflict_event."
+    },
+    {
       "id": "opensky",
       "name": "OpenSky Network",
       "provider": "OpenSky Network Foundation",

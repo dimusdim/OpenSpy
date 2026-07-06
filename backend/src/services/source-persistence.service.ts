@@ -9,6 +9,7 @@ import { COUNTRY_CENTROIDS, type OutageRecord } from './ioda.service';
 import type { CloudflareOutage } from './cloudflare.service';
 import type { AcledDeletedEvent, ConflictEvent } from './acled.service';
 import type { GdeltConflictEvent } from './gdelt.service';
+import type { CirConflictEvent } from './cir.service';
 import type { AirspaceZone } from './airspace.service';
 import type { PipelineRecord } from './infrastructure.service';
 import type { SatelliteRecord } from './satellite.service';
@@ -2657,6 +2658,61 @@ export class SourcePersistenceService {
                     event_kind: binding.recordKind,
                     subtype: record.subEventType || record.eventType,
                     observed_at: observedAt,
+                    lat: record.lat,
+                    lng: record.lng,
+                    properties: {
+                        ...properties,
+                        _state_hash: stateHash,
+                    },
+                };
+            });
+
+        await this.runTrackedIngest(
+            {
+                source_id: binding.sourceId,
+                layer_id: binding.layerId,
+                record_count: rows.length,
+                metadata: { canonicalTarget: binding.canonicalTarget },
+            },
+            async (ingestRunId) => {
+                await this.executeEventSnapshotWriter(binding.sourceId, rows, ingestRunId);
+            },
+        );
+    }
+
+    async persistCirConflicts(records: CirConflictEvent[]): Promise<void> {
+        if (!this.database.isReady() || records.length === 0) return;
+
+        const binding = requireSourceBinding('eyes_on_russia');
+        const rows: EventUpsertRow[] = records
+            .filter((record) => Number.isFinite(record.lat) && Number.isFinite(record.lng))
+            .map((record) => {
+                const eventId = `conflict:cir:${record.id}`;
+                const properties = {
+                    category: record.category,
+                    secondaryCategory: record.secondaryCategory,
+                    description: record.description,
+                    sourceUrl: record.sourceUrl,
+                    town: record.town,
+                    province: record.province,
+                    country: record.country,
+                    graphicLevel: record.graphicLevel,
+                    credit: 'CIR / Eyes on Russia',
+                };
+                const stateHash = stableHash({
+                    lat: Number(record.lat.toFixed(4)),
+                    lng: Number(record.lng.toFixed(4)),
+                    observedAt: record.observedAt,
+                    ...properties,
+                });
+                return {
+                    event_id: eventId,
+                    event_snapshot_id: `event-snap:${eventId}:${stateHash}`,
+                    layer_id: binding.layerId,
+                    source_id: binding.sourceId,
+                    event_kind: binding.recordKind,
+                    subtype: record.category,
+                    observed_at: record.observedAt,
                     lat: record.lat,
                     lng: record.lng,
                     properties: {
