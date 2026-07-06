@@ -3,7 +3,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Settings, X, Radio, Database, Eye, EyeOff, Save, ChevronDown, ChevronRight } from 'lucide-react';
 import { useTimelineStore, type LayerName } from '../store/useTimelineStore';
-import { API_URL, CESIUM_ION_TOKEN } from '../lib/config';
+import { API_URL, CESIUM_ION_TOKEN, MAPBOX_ENABLED } from '../lib/config';
 
 // ---------------------------------------------------------------------------
 // Status helpers
@@ -542,9 +542,11 @@ function ApiKeyFields({ envVars, note, registrationUrl, registrationLabel, onKey
 // ---------------------------------------------------------------------------
 // Display Tab
 // ---------------------------------------------------------------------------
+type TileMode = 'google' | 'osm' | 'modis' | 'esri' | 'mapbox';
+
 function DisplayTab({ showTrajectories, toggleTrajectories, tileMode, setTileMode, osm3dObjectsVisible, setOsm3dObjectsVisible, satelliteRenderLimit, setSatelliteRenderLimit }: {
     showTrajectories: boolean; toggleTrajectories: () => void;
-    tileMode: 'google' | 'osm' | 'modis'; setTileMode: (m: 'google' | 'osm' | 'modis') => void;
+    tileMode: TileMode; setTileMode: (m: TileMode) => void;
     osm3dObjectsVisible: boolean; setOsm3dObjectsVisible: (visible: boolean) => void;
     satelliteRenderLimit: number | null; setSatelliteRenderLimit: (limit: number | null) => void;
 }) {
@@ -556,11 +558,17 @@ function DisplayTab({ showTrajectories, toggleTrajectories, tileMode, setTileMod
         setSatelliteLimitInput(satelliteRenderLimit == null ? '5000' : String(satelliteRenderLimit));
     }, [satelliteRenderLimit]);
 
-    const MODE_LABELS: Record<'google' | 'osm' | 'modis', string> = {
-        google: 'Google 3D',
-        osm: 'OpenStreetMap',
+    const MODE_LABELS: Record<TileMode, string> = {
+        google: 'Google',
+        osm: 'OSM',
         modis: 'MODIS',
+        esri: 'Esri',
+        mapbox: 'Mapbox',
     };
+    // Mapbox is token-gated: only offer it when NEXT_PUBLIC_MAPBOX_TOKEN is set.
+    const BASE_MODES: TileMode[] = MAPBOX_ENABLED
+        ? ['google', 'osm', 'modis', 'esri', 'mapbox']
+        : ['google', 'osm', 'modis', 'esri'];
     return (
         <div className="space-y-3">
             <div className="rounded-md border border-zinc-800/80 bg-[#1a1a1f]/92 p-3">
@@ -575,13 +583,18 @@ function DisplayTab({ showTrajectories, toggleTrajectories, tileMode, setTileMod
             <div className="rounded-md border border-zinc-800/80 bg-[#1a1a1f]/92 p-3">
                 <div className="mb-2 text-sm text-zinc-100">Base Map</div>
                 <div className="flex overflow-hidden rounded border border-zinc-800">
-                    {(['google', 'osm', 'modis'] as const).map(mode => (
+                    {BASE_MODES.map(mode => (
                         <button key={mode} onClick={() => setTileMode(mode)}
-                            className={`flex-1 border-r border-zinc-800 px-3 py-2 font-mono text-xs uppercase tracking-wider transition-colors last:border-r-0 ${
+                            className={`flex-1 border-r border-zinc-800 px-2 py-2 font-mono text-[11px] uppercase tracking-wide transition-colors last:border-r-0 ${
                                 tileMode === mode ? 'bg-cyan-950/40 text-cyan-300' : 'bg-[#24242a]/60 text-zinc-500 hover:bg-[#2a2a31]/75 hover:text-zinc-300'
                             }`}>{MODE_LABELS[mode]}</button>
                     ))}
                 </div>
+                {tileMode === 'esri' && (
+                    <div className="mt-2 rounded border border-cyan-900/40 bg-cyan-950/15 px-2.5 py-1.5 text-[10px] leading-relaxed text-cyan-100/70">
+                        Keyless Esri World Imagery. Left-click any point to read its capture date, resolution and source.
+                    </div>
+                )}
                 {tileMode === 'osm' && (
                     <label className="mt-3 flex cursor-pointer items-center justify-between rounded border border-zinc-800/70 bg-[#24242a]/55 px-3 py-2">
                         <div>

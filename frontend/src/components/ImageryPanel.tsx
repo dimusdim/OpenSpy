@@ -42,6 +42,11 @@ type TimelineSnapshot = {
 const MAX_IMAGERY_AOI_SPAN_DEG = 4.5;
 const MAX_IMAGERY_AOI_AREA_DEG2 = 25;
 
+// The last right-click seed nonce we searched. Module-scoped so it survives the
+// panel unmount/remount that happens when the left dock is toggled — reopening
+// the panel must not re-fire a search for a stale point.
+let lastConsumedSeedNonce: number | null = null;
+
 function clampNumber(value: number, min: number, max: number): number {
     return Math.max(min, Math.min(max, value));
 }
@@ -100,6 +105,41 @@ function currentViewBbox(): [number, number, number, number] | null {
 
 function isoDaysAgo(days: number): string {
     return new Date(Date.now() - days * 86_400_000).toISOString();
+}
+
+type SortBy = 'date' | 'cloud' | 'resolution';
+
+function sceneTimeValue(scene: ImageryScene): number {
+    const time = new Date(scene.datetime || scene.date || 0).getTime();
+    return Number.isFinite(time) ? time : 0;
+}
+
+function sceneCloudValue(scene: ImageryScene): number {
+    return scene.cloud_cover == null ? Number.POSITIVE_INFINITY : Number(scene.cloud_cover);
+}
+
+function sceneResolutionValue(scene: ImageryScene): number {
+    const raw = (scene as Record<string, unknown>).resolution
+        ?? (scene as Record<string, unknown>).gsd
+        ?? (scene as Record<string, unknown>).samp_res
+        ?? (scene as Record<string, unknown>).sample_resolution;
+    const num = Number(raw);
+    return Number.isFinite(num) && num > 0 ? num : Number.POSITIVE_INFINITY;
+}
+
+// Sort a copy of the scenes for display. Date is the default (newest first);
+// cloud (clearest first) and resolution (finest first) are also offered.
+// Missing values sort to the bottom.
+function sortScenes(scenes: ImageryScene[], sortBy: SortBy): ImageryScene[] {
+    const copy = [...scenes];
+    if (sortBy === 'cloud') {
+        copy.sort((a, b) => sceneCloudValue(a) - sceneCloudValue(b));
+    } else if (sortBy === 'resolution') {
+        copy.sort((a, b) => sceneResolutionValue(a) - sceneResolutionValue(b));
+    } else {
+        copy.sort((a, b) => sceneTimeValue(b) - sceneTimeValue(a));
+    }
+    return copy;
 }
 
 function sceneLabel(scene: ImageryScene): string {
@@ -213,7 +253,7 @@ export function ImageryContextBadge() {
     );
 }
 
-export default function ImageryPanel({ isOpen, onClose, embedded = false }: { isOpen: boolean; onClose: () => void; embedded?: boolean }) {
+export default function ImageryPanel({ isOpen, onClose, embedded = false, seedPoint = null }: { isOpen: boolean; onClose: () => void; embedded?: boolean; seedPoint?: { lat: number; lng: number; nonce: number } | null }) {
     const tileMode = useTimelineStore((state) => state.tileMode);
     const setTileMode = useTimelineStore((state) => state.setTileMode);
     const [source, setSource] = useState<ImagerySource>('nasa_gibs');
@@ -225,10 +265,12 @@ export default function ImageryPanel({ isOpen, onClose, embedded = false }: { is
     const [error, setError] = useState<string | null>(null);
     const [notice, setNotice] = useState<string | null>(null);
     const [scenes, setScenes] = useState<ImageryScene[]>([]);
+    const [sortBy, setSortBy] = useState<SortBy>('date');
     const [selectedIndex, setSelectedIndex] = useState(0);
     const [activeAction, setActiveAction] = useState<{ mode: 'single' | 'compare'; key: string } | null>(null);
     const focusRestoreRef = useRef<TimelineSnapshot | null>(null);
-    const selectedScene = scenes[selectedIndex] || null;
+    const displayScenes = useMemo(() => sortScenes(scenes, sortBy), [scenes, sortBy]);
+    const selectedScene = displayScenes[selectedIndex] || null;
     const selectedSceneKey = sceneKey(selectedScene, selectedIndex);
     const copernicusRadar = source === 'copernicus' && layer === 'radar_vv';
     const providerNote = useMemo(() => (
@@ -245,7 +287,10 @@ export default function ImageryPanel({ isOpen, onClose, embedded = false }: { is
         setNotice(null);
     }, [source, layer]);
 
-    if (!isOpen) return null;
+    // Re-selecting the top item keeps selection meaningful after a re-sort.
+    useEffect(() => {
+        setSelectedIndex(0);
+    }, [sortBy]);
 
     const imageryBaseSwitchPayload = () => ({ switchBase: true, switch_base: true });
 
@@ -288,32 +333,43 @@ export default function ImageryPanel({ isOpen, onClose, embedded = false }: { is
         });
     };
 
-    const search = async () => {
+    // runSearch performs the actual backend scene search. Options let callers
+    // (the right-click "imagery here" seed) override the AOI bbox, source,
+    // layer and window without waiting for React state to settle.
+    const runSearch = async (opts?: {
+        bbox?: [number, number, number, number];
+        source?: ImagerySource;
+        layer?: string;
+        days?: number;
+    }) => {
+        const useSource = opts?.source ?? source;
+        const useLayer = opts?.layer ?? layer;
+        const useDays = opts?.days ?? days;
         setLoading(true);
         setError(null);
         setNotice(null);
         setScenes([]);
         setSelectedIndex(0);
         try {
-            const bbox = currentViewBbox();
+            const bbox = opts?.bbox ?? currentViewBbox();
             if (!bbox) throw new Error('Map camera is not ready for imagery search');
-            const operation = source === 'copernicus' ? 'copernicus-sentinel-imagery' : 'imagery-search-latest';
+            const operation = useSource === 'copernicus' ? 'copernicus-sentinel-imagery' : 'imagery-search-latest';
             const body = {
                 operation,
-                args: source === 'copernicus'
+                args: useSource === 'copernicus'
                     ? {
                         bbox: bbox.join(','),
-                        from: isoDaysAgo(days),
+                        from: isoDaysAgo(useDays),
                         to: new Date().toISOString(),
-                        collection: copernicusCollectionForLayer(layer),
-                        layer,
+                        collection: copernicusCollectionForLayer(useLayer),
+                        layer: useLayer,
                         max_cloud_cover: maxCloudCover,
                         limit: 5,
                         opacity,
                     }
                     : {
                         bbox: bbox.join(','),
-                        layer,
+                        layer: useLayer,
                         opacity,
                     },
             };
@@ -341,6 +397,25 @@ export default function ImageryPanel({ isOpen, onClose, embedded = false }: { is
             setLoading(false);
         }
     };
+
+    const search = () => runSearch();
+
+    // Right-click "imagery here": when a new seed point arrives, aim the search
+    // at a small bbox around it, force fresh Sentinel scenes (dated + sortable),
+    // and reflect that in the UI controls. The nonce guard prevents re-firing
+    // on unrelated re-renders.
+    useEffect(() => {
+        if (!isOpen || !seedPoint) return;
+        if (lastConsumedSeedNonce === seedPoint.nonce) return;
+        lastConsumedSeedNonce = seedPoint.nonce;
+        const seedBbox = boundedBboxAround(seedPoint.lat, seedPoint.lng);
+        setSource('copernicus');
+        setLayer('true_color');
+        setDays(14);
+        setSortBy('date');
+        void runSearch({ bbox: seedBbox, source: 'copernicus', layer: 'true_color', days: 14 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isOpen, seedPoint?.nonce]);
 
     const showSelected = () => {
         if (!selectedScene) return;
@@ -387,7 +462,7 @@ export default function ImageryPanel({ isOpen, onClose, embedded = false }: { is
                 time: offsetIsoDate(selectedScene.datetime || selectedScene.date, Math.max(1, Math.min(days, 7))),
             }
             : null;
-        const beforeScene = scenes[selectedIndex + 1] || scenes.find((_, index) => index !== selectedIndex) || null;
+        const beforeScene = displayScenes[selectedIndex + 1] || displayScenes.find((_, index) => index !== selectedIndex) || null;
         const before = beforeScene
             ? { ...sceneActionPayload(beforeScene, { source, layer, opacity: 0.4 }), ...baseSwitchPayload }
             : fallbackBefore;
@@ -421,6 +496,8 @@ export default function ImageryPanel({ isOpen, onClose, embedded = false }: { is
         setNotice(null);
         viewer.scene.requestRender();
     };
+
+    if (!isOpen) return null;
 
     return (
         <div className={embedded ? 'flex h-full min-h-0 flex-col text-zinc-200' : 'fixed inset-0 z-40 pointer-events-none'}>
@@ -573,8 +650,29 @@ export default function ImageryPanel({ isOpen, onClose, embedded = false }: { is
                     )}
 
                     {scenes.length > 0 && (
+                        <div className="flex items-center gap-1.5">
+                            <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-600">Sort</span>
+                            <div className="flex flex-1 overflow-hidden rounded border border-zinc-800">
+                                {([
+                                    { key: 'date', label: 'Newest' },
+                                    { key: 'cloud', label: 'Clearest' },
+                                    { key: 'resolution', label: 'Finest' },
+                                ] as const).map(({ key, label }) => (
+                                    <button
+                                        key={key}
+                                        onClick={() => setSortBy(key)}
+                                        className={`flex-1 border-r border-zinc-800 px-2 py-1 text-center font-mono text-[10px] uppercase tracking-wider transition-colors last:border-r-0 ${sortBy === key ? 'bg-cyan-950/40 text-cyan-200' : 'bg-black/25 text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300'}`}
+                                    >
+                                        {label}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {scenes.length > 0 && (
                         <div className="max-h-52 space-y-1 overflow-y-auto pr-1">
-                            {scenes.map((scene, index) => (
+                            {displayScenes.map((scene, index) => (
                                 <button
                                     key={scene.scene_id || index}
                                     onClick={() => setSelectedIndex(index)}

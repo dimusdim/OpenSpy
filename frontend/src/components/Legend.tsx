@@ -5,12 +5,13 @@ import {
     ShieldAlert, ChevronDown, ChevronRight, PanelRightClose, PanelRight,
     Camera, Zap, Factory, Droplets, Shield, Fuel, WifiOff, Car, Ban,
     Bomb, Swords, Search, X, Globe2, Target, List, Wifi,
-    Anchor, Eye, EyeOff, Skull, Building2,
+    Anchor, Eye, EyeOff, Skull, Building2, Image as ImageIcon, Map as MapIcon,
 } from 'lucide-react';
 import { useTimelineStore, MISSION_PRESETS } from '../store/useTimelineStore';
 import type { LayerName } from '../store/useTimelineStore';
 import type { LucideIcon } from 'lucide-react';
 import { COMPOSITE_LAYER_SOURCES, getLayerSourceVisibilityKey, type CompositeLayerCode } from '../lib/source-visibility';
+import { MAPBOX_ENABLED } from '../lib/config';
 
 // ---------------------------------------------------------------------------
 // Status dot color (matches LayerManager / SettingsPanel)
@@ -393,7 +394,23 @@ export default function Legend({ embedded = false }: { embedded?: boolean }) {
                         <button data-active={tileMode === 'modis' ? 'true' : 'false'} onClick={() => setTileMode('modis')}>
                             <Satellite size={13} /> MODIS
                         </button>
+                        <button data-active={tileMode === 'esri' ? 'true' : 'false'} onClick={() => setTileMode('esri')}>
+                            <ImageIcon size={13} /> Esri
+                        </button>
+                        {MAPBOX_ENABLED && (
+                            <button data-active={tileMode === 'mapbox' ? 'true' : 'false'} onClick={() => setTileMode('mapbox')}>
+                                <MapIcon size={13} /> Mapbox
+                            </button>
+                        )}
                     </div>
+                    {tileMode === 'esri' && (
+                        <div className="setting-row py-1.5">
+                            <div className="label">
+                                <b className="!text-xs">Capture date</b>
+                                <small>Left-click any point for its date, resolution and source</small>
+                            </div>
+                        </div>
+                    )}
                     {tileMode === 'osm' && (
                         <div className="setting-row py-1.5">
                             <div className="label">

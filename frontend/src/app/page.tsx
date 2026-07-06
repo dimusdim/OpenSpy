@@ -14,6 +14,7 @@ import RenderPerfStatus from '../components/RenderPerfStatus';
 import AIImagePanel from '../components/AIImagePanel';
 import AgentPanel from '../components/AgentPanel';
 import ImageryPanel, { ImageryContextBadge } from '../components/ImageryPanel';
+import EsriDateReadout from '../components/EsriDateReadout';
 import IconPackPanel from '../components/IconPackPanel';
 import GlobeShaderPanel from '../components/GlobeShaderPanel';
 import ErrorBoundary from '../components/ErrorBoundary';
@@ -71,6 +72,7 @@ export default function Home() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [activeLeft, setActiveLeft] = useState<LeftDock>('layers');
   const [activeRight, setActiveRight] = useState<RightDock>('agent');
+  const [imagerySeed, setImagerySeed] = useState<{ lat: number; lng: number; nonce: number } | null>(null);
   const [timelineHidden, setTimelineHidden] = useState(false);
   const [settingsHydrated, setSettingsHydrated] = useState(false);
   const [iconPackHydrated, setIconPackHydrated] = useState(false);
@@ -220,6 +222,18 @@ export default function Home() {
     }
   }, [activeRight, aiActive]);
 
+  // Globe right-click → open the Imagery panel seeded with the clicked point.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent).detail as { lat?: number; lng?: number } | undefined;
+      if (!detail || typeof detail.lat !== 'number' || typeof detail.lng !== 'number') return;
+      setImagerySeed({ lat: detail.lat, lng: detail.lng, nonce: Date.now() });
+      setActiveLeft('imagery');
+    };
+    document.addEventListener('openspy:imagery-here', handler);
+    return () => document.removeEventListener('openspy:imagery-here', handler);
+  }, []);
+
   const toggleLeft = (panel: Exclude<LeftDock, null>) => {
     setActiveLeft((current) => current === panel ? null : panel);
   };
@@ -289,7 +303,7 @@ export default function Home() {
                             <Legend embedded />
                         )}
                         {activeLeft === 'imagery' && (
-                            <ImageryPanel isOpen embedded onClose={() => setActiveLeft(null)} />
+                            <ImageryPanel isOpen embedded seedPoint={imagerySeed} onClose={() => setActiveLeft(null)} />
                         )}
                         {activeLeft === 'replay' && (
                             <div className="p-3">
@@ -355,6 +369,7 @@ export default function Home() {
                 </div>
 
                 <div className="os-floating-context">
+                    <EsriDateReadout />
                     <ImageryContextBadge />
                 </div>
 

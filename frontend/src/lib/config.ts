@@ -12,6 +12,13 @@ export const API_URL = process.env.NEXT_PUBLIC_API_URL || DEFAULT_API_URL;
 export const CESIUM_ION_TOKEN = process.env.NEXT_PUBLIC_CESIUM_ION_TOKEN || '';
 export const CESIUM_ION_ENABLED = CESIUM_ION_TOKEN.length > 0;
 
+// Mapbox access token for the token-gated "Mapbox Satellite" base mode.
+// Mapbox Satellite (mapbox.satellite) is high-resolution Maxar imagery served
+// as raster tiles. When this is empty the Mapbox base-map option is hidden in
+// the UI and the base-map effect falls back to the keyless Esri layer.
+export const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || '';
+export const MAPBOX_ENABLED = MAPBOX_TOKEN.length > 0;
+
 // OTLP HTTP collector endpoint. The collector (ops/telemetry/otel-collector.yaml)
 // listens on :4318 by default. Frontend OTEL exports go straight here so we
 // can correlate frontend rendering spans with backend tile-builder spans.

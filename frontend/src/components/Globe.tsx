@@ -23,7 +23,7 @@ import { useWifiLayer, wifiMetaMap } from '../cesium/useWifiLayer';
 import { useVisualShader } from '../cesium/useVisualShader';
 import { replayMetaMap, useReplayOverlay } from '../cesium/useReplayOverlay';
 import { fetchReplayRenderBatchMetadata, isReplayRenderBatchId, replayRenderBatchMetaMap } from '../cesium/replayRenderBatch';
-import { API_URL, CESIUM_ION_ENABLED, CESIUM_ION_TOKEN } from '../lib/config';
+import { API_URL, CESIUM_ION_ENABLED, CESIUM_ION_TOKEN, MAPBOX_ENABLED, MAPBOX_TOKEN } from '../lib/config';
 import { perfLog } from '../lib/perf-log';
 
 if (typeof window !== 'undefined') {
@@ -39,6 +39,79 @@ if (CESIUM_ION_ENABLED) {
     Cesium.Ion.defaultAccessToken = CESIUM_ION_TOKEN;
 } else if (typeof window !== 'undefined') {
     console.info('[Globe] NEXT_PUBLIC_CESIUM_ION_TOKEN not set — using OSM raster base; ion world terrain and OSM 3D buildings are disabled.');
+}
+
+// Esri World Imagery identify — resolve the per-point capture date, ground
+// resolution and source for a lon/lat and broadcast it for EsriDateReadout.
+// The attribute keys vary by mosaic tile, so parse defensively rather than
+// hard-coding a single field name. Fails silently (no readout) on empty
+// results or network errors.
+function formatEsriDate(raw: string): string {
+    const value = String(raw || '').trim();
+    if (!value) return '';
+    if (/^\d{8}$/.test(value)) {
+        return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
+    }
+    if (/^\d{4}$/.test(value)) return value; // bare year
+    return value;
+}
+
+function parseEsriIdentifyAttributes(attrs: Record<string, unknown>): {
+    date: string; resolution: string; source: string; summary: string;
+} {
+    const entries = Object.entries(attrs);
+    const pick = (re: RegExp): string => {
+        for (const [key, val] of entries) {
+            if (!re.test(key)) continue;
+            const str = String(val ?? '').trim();
+            if (str && str.toLowerCase() !== 'null') return str;
+        }
+        return '';
+    };
+    return {
+        summary: pick(/nice_desc|nice_name/i),
+        date: formatEsriDate(pick(/src_date|(^|_)date($|_)|acquisition/i)),
+        resolution: pick(/samp_res|src_res|(^|_)res($|_)|resolution|gsd/i),
+        source: pick(/src_desc|(^|_)source|provider/i),
+    };
+}
+
+async function fetchEsriIdentify(lon: number, lat: number): Promise<void> {
+    const dispatch = (detail: Record<string, unknown>) => {
+        document.dispatchEvent(new CustomEvent('openspy:esri-identify', { detail }));
+    };
+    dispatch({ status: 'loading', lat, lng: lon });
+    // A small map extent around the point keeps the identify tolerant without
+    // matching a distant neighbour tile.
+    const d = 0.0015;
+    const params = new URLSearchParams({
+        geometry: `${lon},${lat}`,
+        geometryType: 'esriGeometryPoint',
+        sr: '4326',
+        layers: 'all',
+        tolerance: '1',
+        mapExtent: `${lon - d},${lat - d},${lon + d},${lat + d}`,
+        imageDisplay: '256,256,96',
+        returnGeometry: 'false',
+        f: 'json',
+    });
+    try {
+        const response = await fetch(
+            `https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/identify?${params.toString()}`,
+        );
+        if (!response.ok) { dispatch({ status: 'empty', lat, lng: lon }); return; }
+        const json = await response.json();
+        const attrs = json?.results?.[0]?.attributes;
+        if (!attrs || typeof attrs !== 'object') { dispatch({ status: 'empty', lat, lng: lon }); return; }
+        const parsed = parseEsriIdentifyAttributes(attrs as Record<string, unknown>);
+        if (!parsed.date && !parsed.summary && !parsed.resolution && !parsed.source) {
+            dispatch({ status: 'empty', lat, lng: lon });
+            return;
+        }
+        dispatch({ status: 'result', lat, lng: lon, ...parsed });
+    } catch {
+        dispatch({ status: 'empty', lat, lng: lon });
+    }
 }
 
 export default function Globe() {
@@ -882,9 +955,13 @@ export default function Globe() {
     const googleTileRef = useRef<Cesium.Cesium3DTileset | null>(null);
     const osmTileRef = useRef<Cesium.Cesium3DTileset | null>(null);
     const terrainLoadedRef = useRef(false);
-    // MODIS True Color base layer + stashed default Ion aerial, used to
-    // swap/restore the globe's bottom imagery layer as tileMode changes.
-    const modisBaseLayerRef = useRef<Cesium.ImageryLayer | null>(null);
+    // Custom raster base layer (MODIS True Color / Esri World Imagery /
+    // Mapbox Satellite) + stashed default Ion aerial, used to swap/restore
+    // the globe's bottom imagery layer as tileMode changes. rasterBaseModeRef
+    // records which raster mode is currently applied so we can no-op on
+    // re-runs and swap providers when moving between raster modes.
+    const rasterBaseLayerRef = useRef<Cesium.ImageryLayer | null>(null);
+    const rasterBaseModeRef = useRef<'modis' | 'esri' | 'mapbox' | null>(null);
     const defaultBaseLayerRef = useRef<Cesium.ImageryLayer | null>(null);
 
     useEffect(() => {
@@ -974,22 +1051,34 @@ export default function Globe() {
             }
         }
 
-        // Swap the globe's base imagery to NASA GIBS MODIS True Color.
-        // Stashes the original Cesium Ion aerial in defaultBaseLayerRef so
-        // restoreDefaultBase() can put it back when switching away. The
-        // MODIS layer is inserted at index 0 so cloud/other overlays sit
-        // above it just as they did above the Ion aerial.
-        function applyModis() {
-            if (viewer!.isDestroyed()) return;
-            if (modisBaseLayerRef.current) return; // already applied
-
-            const layers = viewer!.imageryLayers;
-            if (layers.length > 0 && !defaultBaseLayerRef.current) {
-                defaultBaseLayerRef.current = layers.get(0);
-                // Remove without destroying so we can re-insert on switch-away.
-                layers.remove(defaultBaseLayerRef.current, false);
+        // Build the imagery provider for a raster base mode. Returns null when
+        // the mode can't be satisfied (e.g. Mapbox without a token) so the
+        // caller can fall back instead of leaving a blank globe.
+        function makeRasterBaseProvider(mode: 'modis' | 'esri' | 'mapbox'): Cesium.ImageryProvider | null {
+            if (mode === 'esri') {
+                // Esri World Imagery — keyless, global high-resolution aerial /
+                // satellite mosaic (Web Mercator {z}/{y}/{x}, so Cesium's default
+                // WebMercatorTilingScheme aligns out of the box). Per-point
+                // capture date is exposed via the identify endpoint (see the
+                // left-click handler), which is the headline "fresh dated
+                // imagery" feature.
+                return new Cesium.UrlTemplateImageryProvider({
+                    url: 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+                    maximumLevel: 19,
+                    credit: 'Esri, Maxar/Vantor',
+                });
             }
-
+            if (mode === 'mapbox') {
+                if (!MAPBOX_ENABLED) return null; // guarded by fallback below
+                // Mapbox Satellite — Maxar high-resolution raster tiles. @2x for
+                // retina, .jpg90 for quality/size balance. Web Mercator.
+                return new Cesium.UrlTemplateImageryProvider({
+                    url: `https://api.mapbox.com/v4/mapbox.satellite/{z}/{x}/{y}@2x.jpg90?access_token=${MAPBOX_TOKEN}`,
+                    maximumLevel: 22,
+                    credit: '© Mapbox © Maxar',
+                });
+            }
+            // modis: NASA GIBS MODIS Terra True Color.
             // UTC yesterday — GIBS warns that today's date often returns empty
             // areas (MODIS Terra orbits once per day, mosaic isn't complete).
             const now = new Date();
@@ -1001,7 +1090,7 @@ export default function Globe() {
             // of the box. The EPSG:4326 endpoint uses a NASA-padded matrix
             // layout (-180,90 → 396,-198) that doesn't match Cesium's default
             // GeographicTilingScheme, causing visible offsets.
-            const provider = new Cesium.WebMapTileServiceImageryProvider({
+            return new Cesium.WebMapTileServiceImageryProvider({
                 url: `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MODIS_Terra_CorrectedReflectance_TrueColor/default/${utcYesterday}/GoogleMapsCompatible_Level9/{TileMatrix}/{TileRow}/{TileCol}.jpg`,
                 layer: 'MODIS_Terra_CorrectedReflectance_TrueColor',
                 style: 'default',
@@ -1013,20 +1102,49 @@ export default function Globe() {
                 format: 'image/jpeg',
                 credit: 'NASA GIBS MODIS',
             });
-            // Insert at index 0 — this is the base imagery, not an overlay.
-            const layer = layers.addImageryProvider(provider, 0);
-            modisBaseLayerRef.current = layer;
-            console.log('[Globe] MODIS True Color base imagery applied');
         }
 
-        // Remove the MODIS base layer (destroying its provider) and
+        // Swap the globe's base imagery to the given raster mode. Stashes the
+        // original Cesium Ion aerial in defaultBaseLayerRef so restoreDefaultBase()
+        // can put it back when switching away. The raster layer is inserted at
+        // index 0 so cloud/other overlays sit above it just as they did above
+        // the Ion aerial. Switching between raster modes (e.g. esri → mapbox)
+        // destroys the previous raster layer and inserts the new one.
+        function applyRasterBase(mode: 'modis' | 'esri' | 'mapbox') {
+            if (viewer!.isDestroyed()) return;
+            if (rasterBaseModeRef.current === mode && rasterBaseLayerRef.current) return; // already applied
+
+            const layers = viewer!.imageryLayers;
+            // Stash the Ion aerial once, the first time we replace it.
+            if (layers.length > 0 && !defaultBaseLayerRef.current && !rasterBaseLayerRef.current) {
+                defaultBaseLayerRef.current = layers.get(0);
+                // Remove without destroying so we can re-insert on switch-away.
+                layers.remove(defaultBaseLayerRef.current, false);
+            }
+            // Remove any previously applied raster base (destroying its provider).
+            if (rasterBaseLayerRef.current) {
+                layers.remove(rasterBaseLayerRef.current, true);
+                rasterBaseLayerRef.current = null;
+                rasterBaseModeRef.current = null;
+            }
+            const provider = makeRasterBaseProvider(mode);
+            if (!provider) return; // e.g. mapbox without a token (handled by fallback)
+            // Insert at index 0 — this is the base imagery, not an overlay.
+            const layer = layers.addImageryProvider(provider, 0);
+            rasterBaseLayerRef.current = layer;
+            rasterBaseModeRef.current = mode;
+            console.log(`[Globe] ${mode} base imagery applied`);
+        }
+
+        // Remove the custom raster base layer (destroying its provider) and
         // re-insert the stashed default Ion aerial at index 0.
         function restoreDefaultBase() {
             if (viewer!.isDestroyed()) return;
             const layers = viewer!.imageryLayers;
-            if (modisBaseLayerRef.current) {
-                layers.remove(modisBaseLayerRef.current, true); // destroy
-                modisBaseLayerRef.current = null;
+            if (rasterBaseLayerRef.current) {
+                layers.remove(rasterBaseLayerRef.current, true); // destroy
+                rasterBaseLayerRef.current = null;
+                rasterBaseModeRef.current = null;
             }
             if (defaultBaseLayerRef.current) {
                 layers.add(defaultBaseLayerRef.current, 0);
@@ -1036,30 +1154,42 @@ export default function Globe() {
 
         // Load whichever is needed, then apply visibility + imagery
         (async () => {
+            // Mapbox mode needs a token — if it's missing (e.g. a persisted
+            // tileMode from an env that had one), fall back to keyless Esri.
+            // Mirrors the Google → OSM runtime fallback: setState (not
+            // setTileMode) so we don't persist a runtime fallback as a
+            // user preference. The effect re-runs with the new mode.
+            if (tileMode === 'mapbox' && !MAPBOX_ENABLED) {
+                console.warn('[Globe] NEXT_PUBLIC_MAPBOX_TOKEN not set — falling back to Esri');
+                useTimelineStore.setState({ tileMode: 'esri' });
+                return;
+            }
             if (tileMode === 'google') {
                 await ensureGoogle();
             } else if (tileMode === 'osm') {
                 await ensureOsmTerrain();
                 if (osm3dObjectsVisible) await ensureOsmBuildings();
             }
-            // modis mode needs no async tileset load — base imagery swap is sync.
+            // raster modes (modis/esri/mapbox) need no async tileset load —
+            // the base imagery swap is sync.
             if (viewer!.isDestroyed()) return;
 
             // Apply show flags (refs may be non-null after first switch)
             if (googleTileRef.current) googleTileRef.current.show = tileMode === 'google';
             if (osmTileRef.current)    osmTileRef.current.show    = tileMode === 'osm' && osm3dObjectsVisible;
 
-            // MODIS base-imagery swap: apply when entering modis, restore otherwise.
-            if (tileMode === 'modis') {
-                applyModis();
+            // Raster base-imagery swap: apply when entering a raster mode,
+            // restore the Ion aerial otherwise.
+            if (tileMode === 'modis' || tileMode === 'esri' || tileMode === 'mapbox') {
+                applyRasterBase(tileMode);
             } else {
                 restoreDefaultBase();
             }
 
             // Globe surface visibility:
-            //   google → hidden (3D photo mesh covers everything)
-            //   osm    → visible (terrain + aerial imagery beneath buildings)
-            //   modis  → visible (MODIS true-color imagery IS the globe surface)
+            //   google        → hidden (3D photo mesh covers everything)
+            //   osm           → visible (terrain + aerial imagery beneath buildings)
+            //   modis/esri/mapbox → visible (raster imagery IS the globe surface)
             if (!viewer!.isDestroyed()) {
                 viewer!.scene.globe.show = tileMode !== 'google';
             }
@@ -1067,6 +1197,62 @@ export default function Globe() {
 
         return () => { active = false; };
     }, [viewer, tileMode, osm3dObjectsVisible]);
+
+    // --- Imagery-aware globe clicks ---
+    // Left-click in Esri base mode → query the Esri World Imagery identify
+    // endpoint for the clicked point and surface the capture date / resolution
+    // / source via a custom event (EsriDateReadout renders it). Right-click
+    // (any mode) → dispatch "imagery here" so the Imagery panel opens seeded
+    // with fresh scenes for that point. Runs on its own ScreenSpaceEventHandler
+    // so it composes with the existing entity-picking LEFT_CLICK handler.
+    useEffect(() => {
+        if (!viewer || viewer.isDestroyed()) return;
+        const canvas = viewer.scene.canvas;
+        const handler = new Cesium.ScreenSpaceEventHandler(canvas);
+        const ellipsoid = viewer.scene.globe.ellipsoid;
+
+        const pickLonLat = (position: Cesium.Cartesian2): { lon: number; lat: number } | null => {
+            const cartesian = viewer.camera.pickEllipsoid(position, ellipsoid);
+            if (!cartesian) return null;
+            const carto = Cesium.Cartographic.fromCartesian(cartesian, ellipsoid);
+            return {
+                lon: Cesium.Math.toDegrees(carto.longitude),
+                lat: Cesium.Math.toDegrees(carto.latitude),
+            };
+        };
+
+        handler.setInputAction((movement: { position: Cesium.Cartesian2 }) => {
+            // Only identify in Esri mode, and only for the empty globe surface —
+            // clicks on entities are handled by the entity-picking handler.
+            if (useTimelineStore.getState().tileMode !== 'esri') return;
+            if (Cesium.defined(viewer.scene.pick(movement.position))) return;
+            const point = pickLonLat(movement.position);
+            if (!point) return;
+            void fetchEsriIdentify(point.lon, point.lat);
+        }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+
+        handler.setInputAction((movement: { position: Cesium.Cartesian2 }) => {
+            const point = pickLonLat(movement.position);
+            if (!point) return;
+            // Frame the point, then let the Imagery panel search a bbox around it.
+            document.dispatchEvent(new CustomEvent('fly-to', {
+                detail: { lng: point.lon, lat: point.lat, height: 120000 },
+            }));
+            document.dispatchEvent(new CustomEvent('openspy:imagery-here', {
+                detail: { lat: point.lat, lng: point.lon },
+            }));
+        }, Cesium.ScreenSpaceEventType.RIGHT_CLICK);
+
+        // Suppress the native browser context menu so right-click reads as an
+        // app gesture (right-drag tilt is unaffected — that's a drag, not a click).
+        const onContextMenu = (e: MouseEvent) => e.preventDefault();
+        canvas.addEventListener('contextmenu', onContextMenu);
+
+        return () => {
+            canvas.removeEventListener('contextmenu', onContextMenu);
+            if (!handler.isDestroyed()) handler.destroy();
+        };
+    }, [viewer]);
 
     useEffect(() => {
         if (!viewer) return;
