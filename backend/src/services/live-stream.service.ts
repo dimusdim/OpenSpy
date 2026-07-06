@@ -384,7 +384,19 @@ export class LiveStreamService {
         };
     }
 
+    // Optional OpenSanctions provider — flags sanctioned vessels by MMSI/IMO.
+    private sanctionsProvider?: {
+        getSanctionInfo(mmsi?: string | null, imo?: string | null): { risk: string | null } | null;
+    };
+
+    setSanctionsProvider(provider: { getSanctionInfo(mmsi?: string | null, imo?: string | null): { risk: string | null } | null }) {
+        this.sanctionsProvider = provider;
+    }
+
     private toVesselRenderPayload(vessel: any): any {
+        const mmsi = String(vessel.mmsi ?? vessel.id ?? '').replace(/^.*:/, '');
+        const imo = vessel.imo != null ? String(vessel.imo).replace(/\D/g, '') || null : null;
+        const sanction = this.sanctionsProvider?.getSanctionInfo(mmsi, imo) || null;
         return {
             id: vessel.id,
             lat: vessel.lat,
@@ -393,6 +405,8 @@ export class LiveStreamService {
             type: vessel.type || 'unknown',
             speed: vessel.speed || 0,
             cog: vessel.cog ?? null,
+            sanctioned: !!sanction,
+            sanctionRisk: sanction?.risk ?? null,
         };
     }
 
