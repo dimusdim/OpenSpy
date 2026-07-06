@@ -322,7 +322,7 @@ interface TimelineStore {
   // Infrastructure viewport loading progress (0-100). Set by useInfrastructureLayer.
   infraViewportPct: number;
   setInfraViewportPct: (pct: number) => void;
-  tileMode: 'google' | 'osm' | 'modis';
+  tileMode: 'google' | 'osm' | 'modis' | 'esri' | 'mapbox';
   osm3dObjectsVisible: boolean;
   clusteringEnabled: boolean;
   satelliteRenderLimit: number | null;
@@ -336,7 +336,7 @@ interface TimelineStore {
   activePreset: string | null;
   activeIconSet: 'default' | 'enhanced';
   isolatedEntityId: string | null;
-  setTileMode: (mode: 'google' | 'osm' | 'modis') => void;
+  setTileMode: (mode: 'google' | 'osm' | 'modis' | 'esri' | 'mapbox') => void;
   setOsm3dObjectsVisible: (visible: boolean) => void;
   toggleClustering: () => void;
   setSatelliteRenderLimit: (limit: number | null) => void;
@@ -381,7 +381,7 @@ type PersistedTimelineSettings = Pick<
   TimelineStore,
   'sources' | 'visibility' | 'subtypeVisibility' | 'sourceVisibility' | 'tileMode' | 'osm3dObjectsVisible' | 'showTrajectories' | 'clusteringEnabled' | 'activePreset' | 'activeIconSet' | 'satelliteRenderLimit' | 'visualShader' | 'powerGridEffect' | 'trafficFlowEffect'
 > & {
-  effectiveTileMode?: 'google' | 'osm' | 'modis';
+  effectiveTileMode?: 'google' | 'osm' | 'modis' | 'esri' | 'mapbox';
 };
 
 // Persist control-plane state to server on change (debounced)
@@ -500,7 +500,7 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
   sourceCounts: {},
   infraViewportPct: -1,
   setInfraViewportPct: (pct) => set({ infraViewportPct: pct }),
-  tileMode: 'google' as 'google' | 'osm' | 'modis',
+  tileMode: 'google' as 'google' | 'osm' | 'modis' | 'esri' | 'mapbox',
   osm3dObjectsVisible: true,
   clusteringEnabled: true,
   // null = 'all' — показываем весь каталог TLE из backend (~19k). 5000 был

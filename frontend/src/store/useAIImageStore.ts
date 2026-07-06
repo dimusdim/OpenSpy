@@ -12,7 +12,7 @@ export interface ViewportData {
     heading: number;
     pitch: number;
     roll: number;
-    tileMode: 'google' | 'osm' | 'modis';
+    tileMode: 'google' | 'osm' | 'modis' | 'esri' | 'mapbox';
 }
 
 export type AIContextSourceId =
