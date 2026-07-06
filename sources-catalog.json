@@ -3,6 +3,39 @@
   "generated": "2026-04-15",
   "sources": [
     {
+      "id": "adsb_mil",
+      "name": "ADS-B Military (adsb.lol / adsb.fi / airplanes.live)",
+      "provider": "Community readsb aggregators",
+      "category": "aviation",
+      "layer": "Aircraft",
+      "status": "LIVE",
+      "type": "real-time",
+      "refresh": "30s polling",
+      "live_contract": {
+        "delivery_mode": "delta",
+        "poll_ms": 30000,
+        "motion_max_gap_sec": 120,
+        "stale_after_sec": 300,
+        "remove_after_sec": 300
+      },
+      "endpoints": [
+        "https://api.adsb.lol/v2/mil",
+        "https://opendata.adsb.fi/api/v2/mil",
+        "https://api.airplanes.live/v2/mil"
+      ],
+      "auth": {
+        "required": false,
+        "method": "none",
+        "env_keys": [],
+        "limits": "Keyless; ~1 req/s per feed. adsb.lol ODbL; airplanes.live/adsb.fi non-commercial. User accepts provider terms (BYOK/self-host)."
+      },
+      "legend": {
+        "subtypes": ["military"],
+        "colors": { "military": "red" }
+      },
+      "notes": "Authoritative military airframes (readsb dbFlags bit 1) that OpenSky does not flag or fully cover. Unioned by icao24 across feeds, tagged subtype=military, merged into the Aircraft layer. Carries registration + type code for identification."
+    },
+    {
       "id": "opensky",
       "name": "OpenSky Network",
       "provider": "OpenSky Network Foundation",

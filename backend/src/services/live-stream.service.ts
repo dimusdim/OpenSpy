@@ -197,6 +197,13 @@ export class LiveStreamService {
     private openSkyNextRetry: string | null = null;
     private openSkyPollTimer: NodeJS.Timeout | null = null;
     private openSkyFailureCount = 0;
+    // Military aircraft from community readsb aggregators (/v2/mil). Kept in a
+    // separate map so the wholesale OpenSky refresh (this.aircrafts = new Map)
+    // does not wipe them; merged into the aircraft payload by icao24.
+    private milAircrafts = new Map<string, any>();
+    private milPollTimer: NodeJS.Timeout | null = null;
+    private milHealth: 'streaming' | 'error' = 'streaming';
+    private milLastError: string | null = null;
     private aisStreamHealth: 'streaming' | 'error' | 'auth-missing' | 'rate-limited' = 'streaming';
     private aisStreamLastError: string | null = null;
     private aisStreamNextRetry: string | null = null;
@@ -226,6 +233,7 @@ export class LiveStreamService {
         console.log('Initializing Real Data Streams (OpenSky, AISStream, GDACS+USGS+EONET)...');
         this.loadVesselTypesCache();
         this.initOpenSky();
+        this.initMilitaryAircraft();
         this.initAisStream();
         this.initDisasterFeeds();
         void this.refreshLiveCaches(true);
@@ -317,10 +325,26 @@ export class LiveStreamService {
         }
     }
 
+    // Add military aircraft (from /v2/mil aggregators) not already present in the
+    // base list, deduped by icao24. The DB projection already carries persisted
+    // mil aircraft; this guarantees they still show during the cold-cache window
+    // and covers airframes OpenSky never returns.
+    private mergeMilAircraft(base: any[]): any[] {
+        if (this.milAircrafts.size === 0) return base;
+        const seen = new Set(base.map((a: any) => String(a.icao24 || a.id || '').toLowerCase()));
+        const extra: any[] = [];
+        for (const m of this.milAircrafts.values()) {
+            const key = String(m.icao24 || m.id || '').toLowerCase();
+            if (key && !seen.has(key)) extra.push(m);
+        }
+        return extra.length ? base.concat(extra) : base;
+    }
+
     private buildLivePayload(darkVesselsArr: DarkVessel[], includeAircraft: boolean): any {
-        const aircraftPayload = this.liveAircraftCache.length > 0
+        const aircraftBase = this.liveAircraftCache.length > 0
             ? this.liveAircraftCache
             : Array.from(this.aircrafts.values());
+        const aircraftPayload = this.mergeMilAircraft(aircraftBase);
         const vesselPayload = this.liveVesselCache.length > 0
             ? this.liveVesselCache
             : Array.from(this.vessels.values());
@@ -648,6 +672,103 @@ export class LiveStreamService {
 
 	        fetchOpenSky();
 	    }
+
+    // Military aircraft from community readsb aggregators. These are free, no-key
+    // /v2/mil endpoints returning authoritative military airframes (dbFlags bit 1)
+    // that OpenSky's /states/all neither flags nor fully covers. We union several
+    // feeds by icao24, tag type='military', persist under the adsb_mil source, and
+    // merge into the aircraft layer.
+    private async initMilitaryAircraft() {
+        const MIL_INTERVAL_MS = positiveIntFromEnv('ADSB_MIL_INTERVAL_MS', 30_000);
+        // Endpoints verified live returning readsb v2 JSON ({ ac: [...] }). All are
+        // free and keyless; airplanes.live requires a browser-like UA and is
+        // best-effort. Failures on any one feed are non-fatal.
+        const endpoints = [
+            'https://api.adsb.lol/v2/mil',
+            'https://opendata.adsb.fi/api/v2/mil',
+            'https://api.airplanes.live/v2/mil',
+        ];
+        const headers = {
+            'User-Agent': process.env.ADSB_USER_AGENT
+                || 'OpenSpy-OSINT/1.0 (+https://github.com/dimusdim/OpenSpy)',
+            'Accept': 'application/json',
+        };
+
+        const toFinite = (v: any): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+        const mapAircraft = (a: any): any | null => {
+            const hex = String(a?.hex || '').trim().toLowerCase();
+            const lat = toFinite(a?.lat);
+            const lng = toFinite(a?.lon);
+            if (!hex || lat === null || lng === null) return null;
+            const onGround = a?.alt_baro === 'ground';
+            const altFeet = onGround ? 0 : (toFinite(a?.alt_baro) ?? toFinite(a?.alt_geom));
+            const altMeters = altFeet !== null ? altFeet * 0.3048 : null;
+            const gsKnots = toFinite(a?.gs);
+            const speedMps = gsKnots !== null ? gsKnots * 0.514444 : null;
+            const vrFpm = toFinite(a?.geom_rate) ?? toFinite(a?.baro_rate);
+            const heading = toFinite(a?.track) ?? toFinite(a?.nav_heading) ?? 0;
+            return {
+                id: hex,
+                icao24: hex,
+                callsign: String(a?.flight || '').trim() || hex,
+                origin: null,
+                lat,
+                lng,
+                altMeters,
+                alt: altFeet !== null ? altFeet : (altMeters !== null ? altMeters * 3.28084 : 0),
+                heading,
+                type: 'military',
+                speedMps,
+                speed: speedMps !== null ? speedMps * 3.6 : 0,
+                onGround,
+                verticalRate: vrFpm !== null ? vrFpm / 196.850394 : null,
+                squawk: a?.squawk || null,
+                lastContact: null,
+                // Military-identity enrichment carried in-memory for the HUD.
+                registration: a?.r || null,
+                typeCode: a?.t || null,
+            };
+        };
+
+        const fetchMil = async () => {
+            const merged = new Map<string, any>();
+            let anyOk = false;
+            for (const url of endpoints) {
+                try {
+                    const res = await axios.get(url, { headers, timeout: 15_000 });
+                    const list: any[] = Array.isArray(res.data?.ac) ? res.data.ac : [];
+                    for (const raw of list) {
+                        const rec = mapAircraft(raw);
+                        if (rec && !merged.has(rec.icao24)) merged.set(rec.icao24, rec);
+                    }
+                    anyOk = true;
+                } catch (err: any) {
+                    // Best-effort per feed (e.g. airplanes.live may 403 non-browsers).
+                    console.warn(`[ADSB-mil] feed failed ${url}: ${err?.message || err}`);
+                }
+            }
+
+            if (anyOk) {
+                this.milAircrafts = merged;
+                this.milHealth = 'streaming';
+                this.milLastError = null;
+                try {
+                    await this.persistence?.persistAircraftPositions(Array.from(merged.values()), 'adsb_mil');
+                } catch (err: any) {
+                    console.warn('[ADSB-mil] failed to persist military aircraft:', err?.message || err);
+                }
+                console.log(`[ADSB-mil] Updated ${merged.size} military aircraft.`);
+            } else {
+                this.milHealth = 'error';
+                this.milLastError = 'all /v2/mil feeds failed';
+            }
+
+            this.milPollTimer = setTimeout(fetchMil, MIL_INTERVAL_MS);
+        };
+
+        fetchMil();
+    }
 
     // Singleton guard — prevents duplicate WebSocket connections if
     // multiple frontends or hot-reloads trigger initAisStream.
@@ -1054,6 +1175,11 @@ export class LiveStreamService {
                 note: this.openSkyLastError || undefined,
                 count: this.liveAircraftCache.length,
                 nextRetry: this.openSkyNextRetry || undefined,
+            },
+            aviationMilitary: {
+                status: this.milHealth,
+                note: this.milLastError || undefined,
+                count: this.milAircrafts.size,
             },
             maritime: {
                 status: this.aisStreamHealth,

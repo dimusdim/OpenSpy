@@ -21,6 +21,19 @@
       "notes": "OpenSky state vector polling feed."
     },
     {
+      "sourceId": "adsb_mil",
+      "layerId": "aircraft",
+      "canonicalTarget": "entities",
+      "recordKind": "aircraft",
+      "transformerId": "opensky-state-vector",
+      "writerId": "position-fix-entity",
+      "storagePolicyId": "time-series-position-fixes",
+      "rawCaptureMode": "none",
+      "rawFormat": "json",
+      "coverageScope": "global",
+      "notes": "Community readsb /v2/mil aggregators (adsb.lol, adsb.fi, airplanes.live) — authoritative military aircraft. Renders on the aircraft layer as subtype=military."
+    },
+    {
       "sourceId": "aisstream",
       "layerId": "vessel",
       "canonicalTarget": "entities",

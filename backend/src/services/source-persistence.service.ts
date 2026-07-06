@@ -1913,10 +1913,21 @@ export class SourcePersistenceService {
         }
     }
 
-    async persistAircraftPositions(records: AircraftPositionRecord[]): Promise<void> {
+    // Serialize aircraft persistence so concurrent writers (opensky + adsb_mil)
+    // upserting overlapping entity rows do not deadlock on core.entities. The
+    // chain swallows errors so one failed batch does not block the next.
+    private aircraftPersistQueue: Promise<void> = Promise.resolve();
+
+    async persistAircraftPositions(records: AircraftPositionRecord[], sourceBindingId: string = 'opensky'): Promise<void> {
+        const run = this.aircraftPersistQueue.then(() => this.persistAircraftPositionsImpl(records, sourceBindingId));
+        this.aircraftPersistQueue = run.catch(() => undefined);
+        return run;
+    }
+
+    private async persistAircraftPositionsImpl(records: AircraftPositionRecord[], sourceBindingId: string = 'opensky'): Promise<void> {
         if (!this.database.isReady() || records.length === 0) return;
 
-        const binding = requireSourceBinding('opensky');
+        const binding = requireSourceBinding(sourceBindingId);
         const entities: EntityUpsertRow[] = [];
         const entitySnapshotsSeed: Array<EntitySnapshotUpsertRow & { state_hash: string }> = [];
         const aliases: EntityAliasUpsertRow[] = [];
