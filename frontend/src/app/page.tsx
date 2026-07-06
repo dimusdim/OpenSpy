@@ -16,6 +16,8 @@ import AgentPanel from '../components/AgentPanel';
 import ImageryPanel, { ImageryContextBadge } from '../components/ImageryPanel';
 import IconPackPanel from '../components/IconPackPanel';
 import GlobeShaderPanel from '../components/GlobeShaderPanel';
+import ErrorBoundary from '../components/ErrorBoundary';
+import { ToastProvider } from '../components/Toast';
 import { useAIImageStore } from '../store/useAIImageStore';
 import { useTimelineStore } from '../store/useTimelineStore';
 import type { PowerGridEffectPreset, TrafficFlowEffectPreset, VisualShaderPreset } from '../store/useTimelineStore';
@@ -107,6 +109,11 @@ export default function Home() {
 
   useEffect(() => {
     let cancelled = false;
+    // Boot must not hang on a stalled /api/icon-packs: proceed with defaults
+    // after a short timeout so the globe can still mount.
+    const fallback = window.setTimeout(() => {
+      if (!cancelled) setIconPackHydrated(true);
+    }, 3000);
     fetch(`${API_URL}/api/icon-packs`)
       .then(r => r.json())
       .then((data) => {
@@ -115,13 +122,16 @@ export default function Home() {
         setRuntimeIconPack(pack);
       })
       .catch(() => {
+        if (cancelled) return;
         setRuntimeIconPack(null);
       })
       .finally(() => {
+        window.clearTimeout(fallback);
         if (!cancelled) setIconPackHydrated(true);
       });
     return () => {
       cancelled = true;
+      window.clearTimeout(fallback);
     };
   }, []);
 
@@ -220,9 +230,21 @@ export default function Home() {
     setAIActive(next === 'vision');
   };
 
+  const globeReady = settingsHydrated && iconPackHydrated;
+
   return (
+    <ToastProvider>
     <main className="os-app selection:bg-cyan-500 selection:text-black" data-timeline-hidden={timelineHidden}>
-        {settingsHydrated && iconPackHydrated ? <GlobeDynamic /> : null}
+        {globeReady ? (
+            <ErrorBoundary label="Globe">
+                <GlobeDynamic />
+            </ErrorBoundary>
+        ) : (
+            <div className="os-boot">
+                <div className="os-boot__spinner" />
+                <div className="os-boot__status">Loading globe…</div>
+            </div>
+        )}
 
         {uiMounted ? (
             <>
@@ -309,24 +331,26 @@ export default function Home() {
                         </button>
                     </div>
                     <div className={activeRight === 'status' ? 'os-dock__body' : 'os-dock__body os-dock__body--flush'}>
-                        {activeRight === 'agent' && (
-                            <AgentPanel isOpen embedded onClose={() => setActiveRight(null)} />
-                        )}
-                        {activeRight === 'vision' && (
-                            <AIImagePanel embedded />
-                        )}
-                        {activeRight === 'icons' && (
-                            <IconPackPanel />
-                        )}
-                        {activeRight === 'shaders' && (
-                            <GlobeShaderPanel />
-                        )}
-                        {activeRight === 'status' && (
-                            <div className="os-status-dock">
-                                <SystemStorageStatus />
-                                <RenderPerfStatus />
-                            </div>
-                        )}
+                        <ErrorBoundary label={rightTitle || 'Panel'} compact key={activeRight ?? 'none'}>
+                            {activeRight === 'agent' && (
+                                <AgentPanel isOpen embedded onClose={() => setActiveRight(null)} />
+                            )}
+                            {activeRight === 'vision' && (
+                                <AIImagePanel embedded />
+                            )}
+                            {activeRight === 'icons' && (
+                                <IconPackPanel />
+                            )}
+                            {activeRight === 'shaders' && (
+                                <GlobeShaderPanel />
+                            )}
+                            {activeRight === 'status' && (
+                                <div className="os-status-dock">
+                                    <SystemStorageStatus />
+                                    <RenderPerfStatus />
+                                </div>
+                            )}
+                        </ErrorBoundary>
                     </div>
                 </div>
 
@@ -360,5 +384,6 @@ export default function Home() {
             </>
         ) : null}
     </main>
+    </ToastProvider>
   );
 }

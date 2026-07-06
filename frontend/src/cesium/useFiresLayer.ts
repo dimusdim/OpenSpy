@@ -60,6 +60,57 @@ function getClusterGridDegrees(altitudeMeters: number | null): number | null {
     return null;
 }
 
+// Client-side grid clustering (mirrors useConflictsLayer). Fires are fetched
+// once as raw hotspots and re-clustered locally as the camera zooms, so
+// camera moves never touch the network.
+function clusterCoordinate(value: number, min: number, max: number, gridDegrees: number): number {
+    const cell = Math.floor((value - min) / gridDegrees);
+    return Math.max(min, Math.min(max, min + cell * gridDegrees + gridDegrees / 2));
+}
+
+function clusterFireRecords(records: FireRecord[], gridDegrees: number): FireRecord[] {
+    const clusters = new Map<string, {
+        id: string;
+        latSum: number;
+        lngSum: number;
+        count: number;
+        maxFrp: number;
+        subtype: 'high' | 'medium' | 'low';
+    }>();
+
+    for (const record of records) {
+        const latCell = clusterCoordinate(record.lat, -90, 90, gridDegrees);
+        const lngCell = clusterCoordinate(record.lng, -180, 180, gridDegrees);
+        const key = `${lngCell.toFixed(3)}:${latCell.toFixed(3)}:${record.subtype}`;
+        const existing = clusters.get(key);
+        if (existing) {
+            existing.latSum += record.lat;
+            existing.lngSum += record.lng;
+            existing.count += 1;
+            existing.maxFrp = Math.max(existing.maxFrp, record.frp);
+            continue;
+        }
+        clusters.set(key, {
+            id: `fire-cluster-${key.replace(/[^a-z0-9:.-]/gi, '_')}`,
+            latSum: record.lat,
+            lngSum: record.lng,
+            count: 1,
+            maxFrp: record.frp,
+            subtype: record.subtype,
+        });
+    }
+
+    return Array.from(clusters.values()).map((cluster) => ({
+        id: cluster.id,
+        lat: cluster.latSum / cluster.count,
+        lng: cluster.lngSum / cluster.count,
+        frp: cluster.maxFrp,
+        subtype: cluster.subtype,
+        aggregated: true,
+        count: cluster.count,
+    }));
+}
+
 const CAMERA_CULL_DEBOUNCE_MS = 150;
 
 export function useFiresLayer(viewer: Cesium.Viewer | null) {
@@ -81,7 +132,6 @@ export function useFiresLayer(viewer: Cesium.Viewer | null) {
     const rawBuiltVersionRef = useRef(-1);
     const renderModeRef = useRef<'raw' | 'cluster'>('raw');
     const activeGridDegreesRef = useRef<number | null>(null);
-    const responseAggregatedRef = useRef(false);
     const fetchInFlightRef = useRef(false);
     const refreshPresentationRef = useRef<(() => Promise<void>) | null>(null);
     const updateCollectionVisibilityRef = useRef<(() => void) | null>(null);
@@ -203,34 +253,49 @@ export function useFiresLayer(viewer: Cesium.Viewer | null) {
             rawBuiltVersionRef.current = dataVersionRef.current;
         };
 
-        const rebuildClusterCollection = () => {
+        const rebuildClusterCollection = (gridDegrees: number) => {
             clearClusterCollection();
 
             const storeState = useTimelineStore.getState();
             const subVis = storeState.subtypeVisibility;
             const isolated = storeState.isolatedEntityId;
 
-            for (const fire of fireRecordsRef.current) {
-                if (isolated && isolated !== fire.id) continue;
-                if (subVis[`fires:${fire.subtype}`] === false) continue;
+            // Filter the raw cache to what should be visible, then cluster the
+            // survivors locally at the current zoom grid.
+            const visible = fireRecordsRef.current.filter((fire) =>
+                (!isolated || isolated === fire.id)
+                && subVis[`fires:${fire.subtype}`] !== false
+            );
+            const clusters = clusterFireRecords(visible, gridDegrees);
+
+            for (const cluster of clusters) {
                 clusterCollection.add({
-                    position: Cesium.Cartesian3.fromDegrees(fire.lng, fire.lat, 0),
-                    color: colorForSubtype(fire.subtype),
+                    position: Cesium.Cartesian3.fromDegrees(cluster.lng, cluster.lat, 0),
+                    color: colorForSubtype(cluster.subtype),
                     outlineColor: Cesium.Color.BLACK.withAlpha(0.45),
                     outlineWidth: 1,
-                    pixelSize: pixelSizeForCluster(fire.count || 1, fire.frp),
-                    id: fire.id,
+                    pixelSize: pixelSizeForCluster(cluster.count || 1, cluster.frp),
+                    id: cluster.id,
                 });
-                fireMetaMap.set(fire.id, fire);
-                clusterIdsRef.current.add(fire.id);
+                fireMetaMap.set(cluster.id, cluster);
+                clusterIdsRef.current.add(cluster.id);
             }
         };
 
         const refreshPresentation = async () => {
             if (!viewer || viewer.isDestroyed()) return;
-            if (responseAggregatedRef.current) {
+            // Decide raw-vs-cluster from the current altitude client-side (the
+            // clustering toggle + Solo isolation force raw), so zooming just
+            // re-clusters the cache instead of re-fetching.
+            const state = useTimelineStore.getState();
+            const gridDegrees = state.clusteringEnabled && !state.isolatedEntityId
+                ? getClusterGridDegrees(getViewerAltitudeMeters(viewer))
+                : null;
+            activeGridDegreesRef.current = gridDegrees;
+
+            if (gridDegrees != null) {
                 renderModeRef.current = 'cluster';
-                rebuildClusterCollection();
+                rebuildClusterCollection(gridDegrees);
             } else {
                 renderModeRef.current = 'raw';
                 clearClusterCollection();
@@ -245,18 +310,19 @@ export function useFiresLayer(viewer: Cesium.Viewer | null) {
 
         refreshPresentationRef.current = refreshPresentation;
 
-        let cullTimer: ReturnType<typeof setTimeout> | null = null;
+        let refreshTimer: ReturnType<typeof setTimeout> | null = null;
         const onCameraMoveEnd = () => {
-            if (cullTimer) clearTimeout(cullTimer);
-            cullTimer = setTimeout(() => {
-                cullTimer = null;
-                void fetchNowRef.current?.();
+            if (refreshTimer) clearTimeout(refreshTimer);
+            refreshTimer = setTimeout(() => {
+                refreshTimer = null;
+                // Re-cluster/re-cull from the cached hotspots — no network.
+                void refreshPresentationRef.current?.();
             }, CAMERA_CULL_DEBOUNCE_MS);
         };
         const removeMoveEnd = viewer.camera.moveEnd.addEventListener(onCameraMoveEnd);
 
         return () => {
-            if (cullTimer) clearTimeout(cullTimer);
+            if (refreshTimer) clearTimeout(refreshTimer);
             removeMoveEnd();
             refreshPresentationRef.current = null;
             updateCollectionVisibilityRef.current = null;
@@ -283,29 +349,11 @@ export function useFiresLayer(viewer: Cesium.Viewer | null) {
             if (fetchInFlightRef.current || !viewer || viewer.isDestroyed()) return;
             fetchInFlightRef.current = true;
             try {
-                const storeState = useTimelineStore.getState();
-                const rect = viewer.camera.computeViewRectangle();
-                const bbox = rect
-                    ? [
-                        Cesium.Math.toDegrees(rect.west),
-                        Cesium.Math.toDegrees(rect.south),
-                        Cesium.Math.toDegrees(rect.east),
-                        Cesium.Math.toDegrees(rect.north),
-                    ]
-                    : null;
-                // Clustering toggle is authoritative. When OFF, force raw
-                // (null grid) regardless of altitude. When ON, default
-                // altitude-based grid still applies.
-                const gridDegrees = !storeState.isolatedEntityId && storeState.clusteringEnabled
-                    ? getClusterGridDegrees(getViewerAltitudeMeters(viewer))
-                    : null;
-                const params = new URLSearchParams();
-                if (bbox) params.set('bbox', bbox.join(','));
-                if (gridDegrees != null) params.set('gridDegrees', String(gridDegrees));
-                responseAggregatedRef.current = gridDegrees != null;
-                activeGridDegreesRef.current = gridDegrees;
-
-                const res = await axios.get(`${API_URL}/api/fires${params.size ? `?${params.toString()}` : ''}`, {
+                // Fetch raw global hotspots once; the client caches them and
+                // re-clusters locally on camera move (see refreshPresentation).
+                // No bbox/gridDegrees params — aggregation happens client-side
+                // so panning/zooming never re-fetches.
+                const res = await axios.get(`${API_URL}/api/fires`, {
                     signal: abortController.signal,
                 });
                 if (!active) return;
@@ -373,7 +421,9 @@ export function useFiresLayer(viewer: Cesium.Viewer | null) {
     }, [isSourceOn, isVisible, mode]);
 
     useEffect(() => {
-        void fetchNowRef.current?.();
+        // Subtype/isolation/clustering toggles only change presentation, so
+        // re-cluster from the cached hotspots instead of re-fetching.
+        void refreshPresentationRef.current?.();
     }, [subtypeVisibility, isolatedEntityId, clusteringEnabled]);
 
     useEffect(() => {
@@ -383,7 +433,6 @@ export function useFiresLayer(viewer: Cesium.Viewer | null) {
         fireRecordsRef.current = [];
         fireMetaMap.clear();
         clusterIdsRef.current.clear();
-        responseAggregatedRef.current = false;
         dataVersionRef.current += 1;
         rawBuiltVersionRef.current = -1;
         delete window.__openspyFireStats;

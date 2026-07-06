@@ -23,12 +23,22 @@ import { useWifiLayer, wifiMetaMap } from '../cesium/useWifiLayer';
 import { useVisualShader } from '../cesium/useVisualShader';
 import { replayMetaMap, useReplayOverlay } from '../cesium/useReplayOverlay';
 import { fetchReplayRenderBatchMetadata, isReplayRenderBatchId, replayRenderBatchMetaMap } from '../cesium/replayRenderBatch';
-import { API_URL } from '../lib/config';
+import { API_URL, CESIUM_ION_ENABLED, CESIUM_ION_TOKEN } from '../lib/config';
 import { perfLog } from '../lib/perf-log';
 
 if (typeof window !== 'undefined') {
     (window as any).CESIUM_BASE_URL = '/cesium';
     (window as any).__openspyCesiumVersion = (Cesium as unknown as { VERSION?: string }).VERSION ?? null;
+}
+
+// Ion assets (world imagery/terrain, OSM buildings) need a real account
+// token; the demo token bundled with Cesium returns 401 INVALID_TOKEN.
+// Without a configured token the globe uses keyless providers instead of
+// firing failing ion requests on every load.
+if (CESIUM_ION_ENABLED) {
+    Cesium.Ion.defaultAccessToken = CESIUM_ION_TOKEN;
+} else if (typeof window !== 'undefined') {
+    console.info('[Globe] NEXT_PUBLIC_CESIUM_ION_TOKEN not set — using OSM raster base; ion world terrain and OSM 3D buildings are disabled.');
 }
 
 export default function Globe() {
@@ -57,11 +67,15 @@ export default function Globe() {
             scene3DOnly: true,
             requestRenderMode: true,
             useBrowserRecommendedResolution: false,
-            baseLayer: Cesium.ImageryLayer.fromProviderAsync(
-                Cesium.createWorldImageryAsync({
-                    style: Cesium.IonWorldImageryStyle.AERIAL_WITH_LABELS,
-                })
-            )
+            baseLayer: CESIUM_ION_ENABLED
+                ? Cesium.ImageryLayer.fromProviderAsync(
+                    Cesium.createWorldImageryAsync({
+                        style: Cesium.IonWorldImageryStyle.AERIAL_WITH_LABELS,
+                    })
+                )
+                : new Cesium.ImageryLayer(new Cesium.OpenStreetMapImageryProvider({
+                    url: 'https://tile.openstreetmap.org/',
+                }))
         });
 
         // Render the globe at CSS-pixel resolution even on Retina displays.
@@ -936,12 +950,17 @@ export default function Globe() {
 
         async function ensureOsmTerrain() {
             if (terrainLoadedRef.current) return;
+            if (!CESIUM_ION_ENABLED) return; // world terrain is an ion asset
             viewer!.terrainProvider = await Cesium.createWorldTerrainAsync();
             terrainLoadedRef.current = true;
         }
 
         async function ensureOsmBuildings() {
             if (osmTileRef.current) return; // already loaded
+            if (!CESIUM_ION_ENABLED) {
+                console.info('[Globe] OSM 3D Buildings need NEXT_PUBLIC_CESIUM_ION_TOKEN — skipping (flat OSM base stays).');
+                return;
+            }
             try {
                 await ensureOsmTerrain();
                 const buildings = await Cesium.createOsmBuildingsAsync();

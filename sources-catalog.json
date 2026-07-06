@@ -996,13 +996,57 @@
         "authorization_status": "whether vessel was authorized to fish in that area. Compliance indicator"
       },
       "api_capabilities_not_used": {
-        "vessel_search": "/v3/vessels — search vessel database by name, MMSI, IMO, flag, gear type",
+        "_vessel_search_now_used": "/v3/vessels/search is consumed by the vessel-enrichment source-fetch operation (registry identity by IMO, cached in core.vessel_enrichment)",
         "vessel_tracks": "/v3/vessels/{id}/tracks — full AIS track history of a vessel",
         "fishing_effort": "/v3/4wings/tile — fishing effort heatmap tiles (gridded fishing hours)",
         "encounters": "/v3/events?datasets=encounters — ship-to-ship meetings at sea",
         "loitering": "/v3/events?datasets=loitering — vessels stopping in open ocean",
         "port_visits": "/v3/events?datasets=port-visits — vessel port call history",
         "eez_crossing": "vessel movement across Exclusive Economic Zone boundaries"
+      }
+    },
+    {
+      "id": "wikimedia_commons",
+      "name": "Wikimedia Commons — Vessel Photos (by IMO)",
+      "provider": "Wikimedia Commons (MediaWiki API)",
+      "category": "reference",
+      "layer": "Vessel",
+      "status": "LIVE",
+      "type": "on-demand",
+      "refresh": "on-demand per entity card / source-fetch, cached 30d (24h for empty lookups)",
+      "live_contract": null,
+      "endpoints": [
+        "https://commons.wikimedia.org/w/api.php"
+      ],
+      "auth": {
+        "required": false,
+        "method": "none",
+        "env_keys": [],
+        "limits": "keyless MediaWiki API; descriptive User-Agent sent, requests are per-click and cached in core.vessel_enrichment"
+      },
+      "legend": {
+        "subtypes": [],
+        "note": "no map glyphs — reference enrichment source, rendered inside the vessel entity card"
+      },
+      "fields_displayed": {
+        "map_visual": {},
+        "hud": {
+          "photos[0].url": "vessel photo thumbnail in the entity card",
+          "photos[0].attribution": "photographer credit line",
+          "photos[0].license": "CC license short name"
+        }
+      },
+      "fields_loaded_not_displayed": {
+        "photos[1..]": "up to 20 photos per vessel are cached; the card shows the first with a count badge",
+        "descriptionUrl": "Commons file page (click-through target of the photo)"
+      },
+      "fields_available_not_loaded": {
+        "structured_data": "Commons structured data (depicts, coordinates) per file",
+        "full_resolution": "original uploads; only 640px thumbnails are requested"
+      },
+      "api_capabilities_not_used": {
+        "wikidata_link": "Wikidata ship items (P458 IMO -> P18 image) as an alternative photo resolver",
+        "deeper_category_walk": "only one subcategory level under Category:IMO <imo> is traversed"
       }
     },
     {

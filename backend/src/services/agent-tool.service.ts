@@ -500,7 +500,7 @@ export class AgentToolService {
                 region.display_name.toLowerCase().includes(query)
                 || region.aliases.some((alias) => alias.toLowerCase().includes(query) || query.includes(alias.toLowerCase()))
             ))
-            .map((region) => ({ ...region, source: 'built_in_gazetteer' }));
+            .map((region) => ({ ...region, bbox_order: 'west,south,east,north', source: 'built_in_gazetteer' }));
 
         let dbRegions: any[] = [];
         if (this.database.isReady()) {
@@ -509,10 +509,10 @@ export class AgentToolService {
                         ST_Y(ST_PointOnSurface(geom)) AS lat,
                         ST_X(ST_PointOnSurface(geom)) AS lng,
                         ARRAY[
-                            ST_YMin(Box2D(geom))::float8,
                             ST_XMin(Box2D(geom))::float8,
-                            ST_YMax(Box2D(geom))::float8,
-                            ST_XMax(Box2D(geom))::float8
+                            ST_YMin(Box2D(geom))::float8,
+                            ST_XMax(Box2D(geom))::float8,
+                            ST_YMax(Box2D(geom))::float8
                         ] AS bbox,
                         properties
                  FROM core.regions
@@ -528,6 +528,7 @@ export class AgentToolService {
                 region_kind: row.region_kind,
                 slug: row.slug,
                 bbox: row.bbox,
+                bbox_order: 'west,south,east,north',
                 center: { lat: Number(row.lat), lng: Number(row.lng) },
                 properties: row.properties,
                 source: 'core.regions',

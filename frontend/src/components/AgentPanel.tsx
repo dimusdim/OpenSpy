@@ -25,6 +25,7 @@ import { API_URL } from '../lib/config';
 import { clearOpenSpyImageryLayers, showOpenSpyImageryCompare, showOpenSpyImageryLayer } from '../lib/imageryOverlay';
 import { useTimelineStore } from '../store/useTimelineStore';
 import { replayMetaMap } from '../cesium/useReplayOverlay';
+import { useToast } from './Toast';
 
 type ProviderInfo = {
     provider: string;
@@ -2710,6 +2711,10 @@ export default function AgentPanel({ isOpen, onClose, embedded = false }: AgentP
     const activeSessionIdRef = useRef<string | null>(null);
     const sessionPickerRef = useRef<HTMLDivElement | null>(null);
     const sessionsLoadSeqRef = useRef(0);
+    const messagesScrollRef = useRef<HTMLDivElement | null>(null);
+    const messagesEndRef = useRef<HTMLDivElement | null>(null);
+    const nearBottomRef = useRef(true);
+    const { showToast } = useToast();
     const visibleSessions = useMemo(() => dedupeSessions(sessions), [sessions]);
     const pickerSessions = useMemo(() => {
         const limited = visibleSessions.slice(0, SESSION_PICKER_DISPLAY_LIMIT);
@@ -2738,6 +2743,35 @@ export default function AgentPanel({ isOpen, onClose, embedded = false }: AgentP
 
     const availableProviders = providers.filter((provider) => provider.available);
     const defaultProvider = availableProviders[0]?.provider || 'claude_code';
+
+    // Track whether the user is near the bottom so streamed tokens keep the view
+    // pinned, but don't yank the view down if they've scrolled up to read.
+    const handleMessagesScroll = useCallback(() => {
+        const el = messagesScrollRef.current;
+        if (!el) return;
+        const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+        nearBottomRef.current = distanceFromBottom < 80;
+    }, []);
+
+    // Serialized signal of the visible transcript (message count + streamed
+    // content length) so the autoscroll effect fires on every streamed token.
+    const messagesSignal = useMemo(() => {
+        let signal = `${messages.length}`;
+        const last = messages[messages.length - 1];
+        if (last) {
+            const streamLen = Array.isArray(last.metadata?.streamParts)
+                ? last.metadata.streamParts.reduce((sum: number, part: any) => sum + (typeof part?.text === 'string' ? part.text.length : 0), 0)
+                : 0;
+            signal += `:${(last.content || '').length}:${streamLen}`;
+        }
+        return signal;
+    }, [messages]);
+
+    useEffect(() => {
+        if (sessionPickerOpen) return;
+        if (!nearBottomRef.current) return;
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }, [messagesSignal, sessionPickerOpen]);
 
     useEffect(() => {
         runningRunsRef.current = runningRunsBySession;
@@ -3195,9 +3229,11 @@ export default function AgentPanel({ isOpen, onClose, embedded = false }: AgentP
                 if (sessionId) delete next[sessionId];
                 return next;
             });
-            setError(err instanceof Error ? err.message : 'Failed to send message');
+            const message = err instanceof Error ? err.message : 'Failed to send message';
+            setError(message);
+            showToast(message, 'error');
         }
-    }, [activeSessionId, attachRunStream, createSession, defaultProvider, draft, selectedProvider]);
+    }, [activeSessionId, attachRunStream, createSession, defaultProvider, draft, selectedProvider, showToast]);
 
     const cancelRun = useCallback(async () => {
         if (!runningRunId) return;
@@ -3956,7 +3992,11 @@ export default function AgentPanel({ isOpen, onClose, embedded = false }: AgentP
                 </div>
             )}
 
-            <div className={embedded ? 'chat__messages' : 'flex-1 min-h-0 overflow-y-auto p-3 space-y-3'}>
+            <div
+                ref={messagesScrollRef}
+                onScroll={handleMessagesScroll}
+                className={embedded ? 'chat__messages' : 'flex-1 min-h-0 overflow-y-auto p-3 space-y-3'}
+            >
                 {embedded && sessionPickerOpen ? (
                     <div className="section w-full !border-b-0 !p-0">
                         <h4>Recent sessions</h4>
@@ -4152,6 +4192,7 @@ export default function AgentPanel({ isOpen, onClose, embedded = false }: AgentP
                         </div>
                     </div>
                 )}
+                <div ref={messagesEndRef} aria-hidden="true" />
             </div>
 
             <div className={embedded ? (sessionPickerOpen ? 'hidden' : 'chat__compose') : 'p-2 border-t border-zinc-800'}>
@@ -4159,7 +4200,9 @@ export default function AgentPanel({ isOpen, onClose, embedded = false }: AgentP
                     value={draft}
                     onChange={(e) => setDraft(e.target.value)}
                     onKeyDown={(e) => {
-                        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                        // Enter sends; Shift+Enter inserts a newline. Ignore Enter
+                        // while an IME composition is active so it commits text.
+                        if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                             e.preventDefault();
                             void sendMessage();
                         }

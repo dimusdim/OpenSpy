@@ -5,6 +5,13 @@ const DEFAULT_API_URL =
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL || DEFAULT_API_URL;
 
+// Cesium ion access token. Without it the bundled Cesium demo token would be
+// used for ion assets (world imagery/terrain, OSM buildings) and those
+// requests now fail with 401 INVALID_TOKEN. When unset, the globe falls back
+// to keyless providers and skips ion-only features instead of erroring.
+export const CESIUM_ION_TOKEN = process.env.NEXT_PUBLIC_CESIUM_ION_TOKEN || '';
+export const CESIUM_ION_ENABLED = CESIUM_ION_TOKEN.length > 0;
+
 // OTLP HTTP collector endpoint. The collector (ops/telemetry/otel-collector.yaml)
 // listens on :4318 by default. Frontend OTEL exports go straight here so we
 // can correlate frontend rendering spans with backend tile-builder spans.

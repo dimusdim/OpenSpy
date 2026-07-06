@@ -49,6 +49,7 @@ Examples:
 ./tools/source-fetch.sh opensky-tracks --icao24 <icao24> --time <iso>
 ./tools/source-fetch.sh spacetrack-gp-history --norad <norad_id> --from <iso> --to <iso>
 ./tools/source-fetch.sh imagery-evidence-artifact --source <source_id> --bbox <west,south,east,north> --layer <layer>
+./tools/source-fetch.sh vessel-enrichment --imo <imo7> [--mmsi <mmsi>] [--refresh true]
 ```
 
 Implemented backend operations:
@@ -63,6 +64,13 @@ Implemented backend operations:
   evidence window directly.
 - `gfw-events`: Global Fishing Watch events by `--from` and `--to`; requires
   backend `GFW_TOKEN`.
+- `vessel-enrichment`: reference lookup for one vessel by `--imo` (7 digits,
+  optional `--mmsi`, `--refresh true` to bypass the cache). Returns Wikimedia
+  Commons photos (with attribution/license) plus GFW registry identity in one
+  payload; per-provider state is reported in `provider_status` (`gfw` is
+  `auth-missing` without `GFW_TOKEN`, photos still work). Results are cached
+  in `core.vessel_enrichment` (30 d hits / 24 h empty lookups). Photos exist
+  only for vessels that have an IMO; small craft without IMO return empty.
 - `acled-conflicts`: explicit ACLED capability answer. ACLED incremental ingest
   exists when credentials are configured, but arbitrary user-triggered ACLED
   historical data import is still planned/auth-required until the connector is

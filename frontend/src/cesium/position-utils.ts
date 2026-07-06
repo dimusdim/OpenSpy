@@ -1,4 +1,5 @@
 import * as Cesium from 'cesium';
+import { CESIUM_ION_ENABLED } from '../lib/config';
 
 export function safeCartesianFromDegrees(
     lng: number | string | null | undefined,
@@ -112,6 +113,9 @@ export async function getViewerHeightAboveGroundMetersMostDetailed(viewer: Cesiu
     const cameraHeight = cartographic?.height;
     if (!cartographic || !Number.isFinite(cameraHeight)) return null;
 
+    // World terrain is a Cesium ion asset; without a configured token the
+    // request fails with 401, so fall back to the immediate estimates only.
+    if (!CESIUM_ION_ENABLED) return null;
     try {
         if (!worldTerrainForHeightPromise) {
             worldTerrainForHeightPromise = Cesium.createWorldTerrainAsync();

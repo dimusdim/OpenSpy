@@ -429,6 +429,8 @@ body {
   padding: 0 12px;
   box-shadow: var(--os-glass-panel-shadow);
   backdrop-filter: blur(var(--os-glass-panel-blur));
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .os-bottombar > .os-rail-btn {
@@ -470,17 +472,50 @@ body {
 
 .os-timeline__scrub {
   position: relative;
-  height: 26px;
+  height: 34px;
   min-width: 120px;
   flex: 1;
+  touch-action: none;
+  outline: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
-.os-timeline__range {
+.os-timeline__scrub--compact {
+  height: 32px;
+}
+
+.os-timeline__scrub:focus-visible {
+  border-radius: 3px;
+  box-shadow: 0 0 0 1px rgba(74, 222, 128, 0.55);
+}
+
+.os-timeline__ticks {
   position: absolute;
-  inset: 0;
-  width: 100%;
-  cursor: pointer;
-  opacity: 0;
+  top: 50%;
+  right: 0;
+  left: 0;
+  z-index: 4;
+  height: 13px;
+  transform: translateY(-50%);
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.os-timeline__tick {
+  position: absolute;
+  top: 3px;
+  width: 1px;
+  height: 7px;
+  transform: translateX(-50%);
+  background: rgba(226, 232, 240, 0.22);
+}
+
+.os-timeline__tick--major {
+  top: 2px;
+  height: 9px;
+  background: rgba(226, 232, 240, 0.34);
 }
 
 .os-timeline__track {
@@ -488,31 +523,112 @@ body {
   top: 50%;
   right: 0;
   left: 0;
-  height: 4px;
-  transform: translateY(-50%);
-  border-radius: 2px;
+  height: 14px;
+  overflow: hidden;
+  border-radius: 4px;
   background: var(--os-bg-3);
+  transform: translateY(-50%);
+  box-shadow:
+    inset 0 0 0 1px rgba(148, 163, 184, 0.22),
+    inset 0 -8px 16px rgba(0, 0, 0, 0.28);
+  cursor: grab;
 }
 
-.os-timeline__fill {
+.os-timeline__scrub--compact .os-timeline__track {
+  height: 13px;
+}
+
+.os-timeline__scrub[data-panning="true"] .os-timeline__track {
+  cursor: grabbing;
+}
+
+.os-timeline__data-segment {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: 0;
-  border-radius: 2px;
-  background: var(--os-accent);
+  z-index: 3;
+  min-width: 1px;
+  border-radius: 0;
+  background: rgba(74, 222, 128, 0.48);
+  box-shadow: none;
 }
 
 .os-timeline__thumb {
   position: absolute;
   top: 50%;
-  width: 12px;
-  height: 12px;
-  border: 2px solid var(--os-accent);
-  border-radius: 999px;
-  background: var(--os-fg-0);
-  box-shadow: 0 0 0 4px rgba(127, 174, 196, 0.22);
+  z-index: 5;
+  width: 13px;
+  height: 14px;
+  border: 1px solid rgba(8, 45, 22, 0.9);
+  border-radius: 1px;
+  background: rgba(187, 247, 208, 0.84);
+  box-shadow: none;
+  cursor: ew-resize;
   transform: translate(-50%, -50%);
+}
+
+.os-timeline__scrub--compact .os-timeline__thumb {
+  height: 13px;
+  width: 13px;
+}
+
+.os-timeline__preview {
+  position: absolute;
+  top: 0;
+  z-index: 60;
+  height: 100%;
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.os-timeline__preview-head {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 13px;
+  height: 13px;
+  border: 1px solid rgba(20, 83, 45, 0.8);
+  border-radius: 1px;
+  background: rgba(74, 222, 128, 0.38);
+  transform: translate(-50%, -50%);
+}
+
+/* Seek-preview tooltip floats above the bar (and the whole bottombar) so it
+   is never covered by docks/panels; parents must not clip (no overflow). */
+.os-timeline__preview-tooltip {
+  position: absolute;
+  top: -30px;
+  left: 50%;
+  max-width: 240px;
+  transform: translateX(-50%);
+  border: 1px solid rgba(74, 222, 128, 0.4);
+  border-radius: 4px;
+  background: rgba(5, 15, 10, 0.96);
+  padding: 4px 8px;
+  color: rgba(220, 252, 231, 0.96);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.15;
+  white-space: nowrap;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+
+.os-timeline__preview[data-edge="start"] .os-timeline__preview-tooltip {
+  left: 0;
+  transform: translateX(0);
+}
+
+.os-timeline__preview[data-edge="end"] .os-timeline__preview-tooltip {
+  left: auto;
+  right: 0;
+  transform: translateX(0);
+}
+
+body.os-timeline-dragging,
+body.os-timeline-dragging * {
+  user-select: none !important;
+  -webkit-user-select: none !important;
 }
 
 .os-timeline__time {
@@ -984,6 +1100,199 @@ body {
 
 .os-floating-context > * {
   pointer-events: auto;
+}
+
+/* Error boundary fallback */
+.os-error-boundary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px;
+  border: 1px solid var(--os-line-2);
+  border-radius: 8px;
+  background: var(--os-bg-2);
+  padding: 14px;
+  box-shadow: var(--os-glass-panel-shadow);
+}
+
+.os-error-boundary--compact {
+  margin: 10px;
+  padding: 12px;
+}
+
+.os-error-boundary__title {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--os-fg-0);
+}
+
+.os-error-boundary__msg {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--os-fg-2);
+  word-break: break-word;
+}
+
+.os-error-boundary__actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.os-error-boundary__btn {
+  border: 1px solid var(--os-line-2);
+  border-radius: 4px;
+  background: var(--os-bg-3);
+  padding: 5px 12px;
+  color: var(--os-fg-1);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+
+.os-error-boundary__btn:hover {
+  border-color: var(--os-line-3);
+  color: var(--os-fg-0);
+}
+
+.os-error-boundary__btn--primary {
+  border-color: var(--os-accent-line);
+  background: var(--os-accent-soft);
+  color: var(--os-accent);
+}
+
+/* Boot skeleton / spinner */
+.os-boot {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: var(--os-bg-0);
+  color: var(--os-fg-2);
+}
+
+.os-boot__spinner {
+  width: 26px;
+  height: 26px;
+  border: 2px solid var(--os-line-2);
+  border-top-color: var(--os-accent);
+  border-radius: 50%;
+  animation: os-boot-spin 0.8s linear infinite;
+}
+
+.os-boot__status {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--os-fg-3);
+}
+
+@keyframes os-boot-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Toast notifications */
+.os-toasts {
+  position: fixed;
+  top: calc(var(--os-topbar-h) + 12px);
+  right: 12px;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(340px, calc(100vw - 24px));
+  pointer-events: none;
+}
+
+.os-toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  border: 1px solid var(--os-line-2);
+  border-left-width: 3px;
+  border-radius: 6px;
+  background: var(--os-glass-panel-bg);
+  padding: 9px 10px;
+  box-shadow: var(--os-glass-panel-shadow);
+  backdrop-filter: blur(var(--os-glass-panel-blur));
+  pointer-events: auto;
+  animation: os-toast-in 160ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+.os-toast__icon {
+  display: flex;
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--os-fg-2);
+}
+
+.os-toast__msg {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--os-fg-0);
+  word-break: break-word;
+}
+
+.os-toast__close {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  color: var(--os-fg-3);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.os-toast__close:hover {
+  background: var(--os-bg-3);
+  color: var(--os-fg-0);
+}
+
+.os-toast--error {
+  border-left-color: var(--crit);
+}
+
+.os-toast--error .os-toast__icon {
+  color: var(--crit);
+}
+
+.os-toast--success {
+  border-left-color: var(--ok);
+}
+
+.os-toast--success .os-toast__icon {
+  color: var(--ok);
+}
+
+.os-toast--info {
+  border-left-color: var(--os-accent);
+}
+
+.os-toast--info .os-toast__icon {
+  color: var(--os-accent);
+}
+
+@keyframes os-toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
 }
 
 ::-webkit-scrollbar {

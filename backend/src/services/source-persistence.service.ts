@@ -1168,6 +1168,7 @@ export class SourcePersistenceService {
                 ON CONFLICT (alias_type, alias_value)
                 DO UPDATE SET
                     entity_id = EXCLUDED.entity_id
+                WHERE core.entity_aliases.entity_id IS DISTINCT FROM EXCLUDED.entity_id
             `,
             [JSON.stringify([...deduped.values()])],
         );

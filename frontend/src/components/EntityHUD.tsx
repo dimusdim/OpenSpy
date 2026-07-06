@@ -108,6 +108,30 @@ type EntityHUDProps = {
     avoidBottomPx?: number;
 };
 
+type ScreenPos = { x: number; y: number };
+
+type LiveState = {
+    lat: number;
+    lng: number;
+    alt: number;
+    layer?: string;
+    subtype?: string;
+    alertLevel?: string;
+    source?: string;
+    speed?: number;
+    heading?: number;
+    description?: string;
+    // Enrichment fields (populated per layer type)
+    extra?: Record<string, any>;
+};
+
+// The Cesium preRender loop feeds this HUD ~60×/s. Position (the target
+// reticle + leader line) is written imperatively every frame so it tracks
+// smoothly during camera moves, while the low-frequency state mirrors below
+// keep panel layout + rendered metadata off the per-frame React path.
+const LIVE_THROTTLE_MS = 250; // ~4 Hz metadata refresh
+const SCREENPOS_SYNC_MS = 250; // ~4 Hz panel-placement state sync
+
 export default function EntityHUD({
     avoidLeftPx = 0,
     avoidRightPx = 0,
@@ -121,26 +145,97 @@ export default function EntityHUD({
     const selectedEntityId = useTimelineStore(s => s.selectedEntityId);
     const selectedEntityData = useTimelineStore(s => s.selectedEntityData);
     const mode = useTimelineStore(s => s.mode);
-    const [screenPos, setScreenPos] = useState<{ x: number, y: number } | null>(null);
+    const [screenPos, setScreenPosRaw] = useState<ScreenPos | null>(null);
     const panelRef = useRef<HTMLDivElement | null>(null);
     const dragRef = useRef<{ pointerId: number; offsetX: number; offsetY: number } | null>(null);
     const [measuredPanelHeightPx, setMeasuredPanelHeightPx] = useState(0);
     const [manualPanelPosition, setManualPanelPosition] = useState<{ x: number; y: number } | null>(null);
-    const [live, setLive] = useState<{
-        lat: number;
-        lng: number;
-        alt: number;
-        layer?: string;
-        subtype?: string;
-        alertLevel?: string;
-        source?: string;
-        speed?: number;
-        heading?: number;
-        description?: string;
-        // Enrichment fields (populated per layer type)
-        extra?: Record<string, any>;
-    } | null>(null);
+    const [live, setLiveRaw] = useState<LiveState | null>(null);
     const [liveDetails, setLiveDetails] = useState<Record<string, any> | null>(null);
+
+    // Imperative handles for the per-frame reticle so position updates never
+    // re-render this large component.
+    const hudLineRef = useRef<SVGLineElement | null>(null);
+    const hudCircleRef = useRef<SVGCircleElement | null>(null);
+    const screenPosStateRef = useRef<ScreenPos | null>(null);
+    const screenPosSyncRef = useRef(0);
+    const liveThrottleRef = useRef(0);
+    const lastLiveSerializedRef = useRef<string | null>(null);
+
+    // Throttled replacements for the raw setters. The RAF loop below calls
+    // these ~60×/s; keeping the same names means every call site is unchanged.
+    //
+    // Position: write the projected target straight to the SVG reticle every
+    // frame (no re-render), and only mirror it into React state at ~4 Hz — or
+    // immediately when it appears/disappears, so the leader line + panel
+    // mount/unmount stays correct when the entity goes behind the globe.
+    const setScreenPos = useCallback((canvasPos: ScreenPos | null) => {
+        const line = hudLineRef.current;
+        const circle = hudCircleRef.current;
+        if (canvasPos) {
+            const x = String(canvasPos.x);
+            const y = String(canvasPos.y);
+            if (line) { line.setAttribute('x1', x); line.setAttribute('y1', y); }
+            if (circle) { circle.setAttribute('cx', x); circle.setAttribute('cy', y); }
+        }
+        const prev = screenPosStateRef.current;
+        const wasNull = prev === null;
+        const isNull = canvasPos === null;
+        const moved = !prev || !canvasPos
+            || Math.abs(prev.x - canvasPos.x) > 0.5
+            || Math.abs(prev.y - canvasPos.y) > 0.5;
+        const now = Date.now();
+        // Sync state immediately on appear/disappear (so the leader line +
+        // panel mount correctly), otherwise at most ~4 Hz and only when the
+        // target actually moved — a static target triggers zero re-renders.
+        if (wasNull !== isNull || (moved && now - screenPosSyncRef.current >= SCREENPOS_SYNC_MS)) {
+            screenPosSyncRef.current = now;
+            screenPosStateRef.current = canvasPos;
+            setScreenPosRaw(canvasPos);
+        }
+    }, []);
+
+    // Metadata: throttle to ~4 Hz and skip the setState entirely when nothing
+    // the panel renders has changed.
+    const setLive = useCallback((next: LiveState | null) => {
+        if (next === null) {
+            liveThrottleRef.current = 0;
+            lastLiveSerializedRef.current = null;
+            setLiveRaw(null);
+            return;
+        }
+        const now = Date.now();
+        if (now - liveThrottleRef.current < LIVE_THROTTLE_MS) return;
+        const serialized = JSON.stringify(next);
+        if (serialized === lastLiveSerializedRef.current) {
+            liveThrottleRef.current = now;
+            return;
+        }
+        liveThrottleRef.current = now;
+        lastLiveSerializedRef.current = serialized;
+        setLiveRaw(next);
+    }, []);
+
+    // Stable ref callbacks that seed the reticle at mount and then leave the
+    // x1/y1/cx/cy attributes fully under the RAF loop's control. Because these
+    // coordinates are never passed as JSX props, the ~4 Hz state re-renders
+    // can't reset them mid-drag, so the target tracks smoothly at frame rate.
+    const attachHudLine = useCallback((el: SVGLineElement | null) => {
+        hudLineRef.current = el;
+        const pos = screenPosStateRef.current;
+        if (el && pos) {
+            el.setAttribute('x1', String(pos.x));
+            el.setAttribute('y1', String(pos.y));
+        }
+    }, []);
+    const attachHudCircle = useCallback((el: SVGCircleElement | null) => {
+        hudCircleRef.current = el;
+        const pos = screenPosStateRef.current;
+        if (el && pos) {
+            el.setAttribute('cx', String(pos.x));
+            el.setAttribute('cy', String(pos.y));
+        }
+    }, []);
 
     useEffect(() => {
         setLiveDetails(null);
@@ -187,6 +282,33 @@ export default function EntityHUD({
         return () => { cancelled = true; };
     }, [mode, selectedEntityId, selectedEntityData?.type]);
 
+    // Reference enrichment for vessels with a known IMO: Commons photos and
+    // GFW registry identity, served (and cached) by the backend.
+    const [vesselEnrichment, setVesselEnrichment] = useState<{
+        imo: string;
+        photos: { url: string; descriptionUrl: string; title: string; attribution: string | null; license: string | null }[];
+        photosTruncated?: boolean;
+        gfwIdentity: Record<string, any> | null;
+    } | null>(null);
+    const vesselImoRaw = selectedEntityData?.type === 'Vessel' || selectedEntityData?.type === 'AIS Signal Lost'
+        ? (liveDetails?.imo ?? (selectedEntityId ? vesselMetaMap.get(selectedEntityId)?.imo : null))
+        : null;
+    const vesselImo = vesselImoRaw != null && /^\d{7}$/.test(String(vesselImoRaw).trim()) ? String(vesselImoRaw).trim() : null;
+
+    useEffect(() => {
+        setVesselEnrichment(null);
+        if (mode !== 'live' || !vesselImo) return;
+        let cancelled = false;
+        axios.get(`${API_URL}/api/enrichment/vessel/${vesselImo}`, { params: selectedEntityId ? { mmsi: selectedEntityId } : undefined })
+            .then((res) => {
+                if (!cancelled && res.data?.imo === vesselImo) setVesselEnrichment(res.data);
+            })
+            .catch((err) => {
+                if (!cancelled) console.warn('[EntityHUD] vessel enrichment fetch failed:', err.message);
+            });
+        return () => { cancelled = true; };
+    }, [mode, vesselImo, selectedEntityId]);
+
     useEffect(() => {
         if (!selectedEntityId || typeof window === 'undefined') {
             setScreenPos(null);
@@ -198,6 +320,13 @@ export default function EntityHUD({
         if (!cesViewer) return;
 
         let active = true;
+
+        // A new selection (or fresh liveDetails) should publish on the very
+        // first frame instead of waiting out the throttle window from the
+        // previous target.
+        liveThrottleRef.current = 0;
+        lastLiveSerializedRef.current = null;
+        screenPosSyncRef.current = 0;
 
         // Search ALL dataSources for the selected entity
         const findEntity = () => {
@@ -947,15 +1076,16 @@ export default function EntityHUD({
         <div className="absolute inset-0 pointer-events-none overflow-hidden z-20">
             {screenPos && (
                 <svg className="absolute inset-0 w-full h-full opacity-60">
+                    {/* x1/y1 (target end) are driven imperatively by the RAF
+                        loop; only x2/y2 (panel anchor) come from React. */}
                     <line
-                        x1={screenPos.x} y1={screenPos.y}
+                        ref={attachHudLine}
                         x2={panelPlacement.anchorX} y2={panelPlacement.anchorY}
                         stroke="#06b6d4" strokeWidth="1" strokeDasharray="4 4"
                     />
                     <circle
+                        ref={attachHudCircle}
                         data-entity-hud-target="true"
-                        cx={screenPos.x}
-                        cy={screenPos.y}
                         r="6"
                         fill="transparent"
                         stroke="#06b6d4"
@@ -1254,6 +1384,80 @@ export default function EntityHUD({
                                             <div className="text-zinc-300 text-xs font-mono">{live.extra.beam}m</div>
                                         </div>
                                     )}
+                                </div>
+                            )}
+                            {vesselEnrichment && vesselEnrichment.photos.length > 0 && (
+                                <div>
+                                    <div className="text-[10px] text-zinc-500 font-mono mb-1">
+                                        PHOTO
+                                        {vesselEnrichment.photos.length > 1 && (
+                                            <span className="ml-1 text-zinc-600">1/{vesselEnrichment.photos.length}{vesselEnrichment.photosTruncated ? '+' : ''}</span>
+                                        )}
+                                    </div>
+                                    <a href={vesselEnrichment.photos[0].descriptionUrl || undefined} target="_blank" rel="noreferrer">
+                                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                                        <img
+                                            src={vesselEnrichment.photos[0].url}
+                                            alt={vesselEnrichment.photos[0].title}
+                                            className="w-full max-h-36 object-cover rounded border border-zinc-700/50"
+                                        />
+                                    </a>
+                                    {(vesselEnrichment.photos[0].attribution || vesselEnrichment.photos[0].license) && (
+                                        <div className="text-[9px] text-zinc-600 mt-0.5 truncate">
+                                            {[vesselEnrichment.photos[0].attribution, vesselEnrichment.photos[0].license].filter(Boolean).join(' · ')} · Wikimedia Commons
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                            {vesselEnrichment?.gfwIdentity && (
+                                <div className="space-y-1.5">
+                                    <div className="text-[10px] text-zinc-500 font-mono">REGISTRY · GFW</div>
+                                    <div className="grid grid-cols-2 gap-x-2 gap-y-1.5">
+                                        {(vesselEnrichment.gfwIdentity.registry?.flag || vesselEnrichment.gfwIdentity.selfReported?.flag) && (
+                                            <div>
+                                                <div className="text-[10px] text-zinc-500 font-mono">FLAG</div>
+                                                <div className="text-zinc-300 text-xs font-mono">{vesselEnrichment.gfwIdentity.registry?.flag || vesselEnrichment.gfwIdentity.selfReported?.flag}</div>
+                                            </div>
+                                        )}
+                                        {vesselEnrichment.gfwIdentity.registry?.vesselType && (
+                                            <div>
+                                                <div className="text-[10px] text-zinc-500 font-mono">TYPE</div>
+                                                <div className="text-zinc-300 text-xs">{vesselEnrichment.gfwIdentity.registry.vesselType}</div>
+                                            </div>
+                                        )}
+                                        {vesselEnrichment.gfwIdentity.registry?.tonnageGt && (
+                                            <div>
+                                                <div className="text-[10px] text-zinc-500 font-mono">TONNAGE</div>
+                                                <div className="text-zinc-300 text-xs font-mono">{vesselEnrichment.gfwIdentity.registry.tonnageGt} GT</div>
+                                            </div>
+                                        )}
+                                        {vesselEnrichment.gfwIdentity.owner?.name && (
+                                            <div className="col-span-2">
+                                                <div className="text-[10px] text-zinc-500 font-mono">OWNER</div>
+                                                <div className="text-zinc-300 text-xs">{vesselEnrichment.gfwIdentity.owner.name}</div>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+                            {vesselImo && (
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                    {[
+                                        { label: 'Equasis', href: `https://www.equasis.org/EquasisWeb/restricted/ShipInfo?fs=Search&P_IMO=${vesselImo}` },
+                                        { label: 'MarineTraffic', href: `https://www.marinetraffic.com/en/ais/details/ships/imo:${vesselImo}` },
+                                        { label: 'VesselFinder', href: `https://www.vesselfinder.com/vessels?name=${vesselImo}` },
+                                        { label: 'Commons', href: `https://commons.wikimedia.org/wiki/Category:IMO_${vesselImo}` },
+                                    ].map((link) => (
+                                        <a
+                                            key={link.label}
+                                            href={link.href}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="text-[9px] font-mono px-1.5 py-0.5 rounded border border-zinc-700/60 text-zinc-400 hover:text-cyan-300 hover:border-cyan-700/60"
+                                        >
+                                            {link.label} ↗
+                                        </a>
+                                    ))}
                                 </div>
                             )}
                         </div>

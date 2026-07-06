@@ -1,320 +1,187 @@
-# OpenSpy
+<div align="center">
 
-Ask questions about the world and watch the answer unfold on a live 3D globe.
+# 🌍 OpenSpy
 
-OpenSpy is an AI-first OSINT workspace for live world data, replay, satellite imagery, and visual investigations. It turns aircraft, ships, satellites, fires, outages, disasters, infrastructure, traffic, webcams, cables, conflicts, GNSS interference, and satellite imagery into one live scene.
+### The open-source AI intelligence globe
 
-Ask the AI agent what is happening in a region and it works directly with the globe: it queries data, checks coverage, fetches history, moves the camera, builds selections, creates replay steps, and explains the evidence visually.
+**Ask an AI what's happening anywhere on Earth. It runs the investigation and shows you, on a live 3D globe.**
 
-It is built around the product idea behind Bilawal Sidhu's GodEyeView video: an AI analyst working directly on a live globe instead of answering in a disconnected chat box.
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+[![Node](https://img.shields.io/badge/node-20%2B-brightgreen)](package.json)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-orange)](CONTRIBUTING.md)
+[![Stars](https://img.shields.io/github/stars/dimusdim/OpenSpy?style=social)](https://github.com/dimusdim/OpenSpy)
 
-## Contents
+[Quick start](#-quick-start-60-seconds) · [AI agents](#%EF%B8%8F-ai-does-your-osint) · [Satellites](#%EF%B8%8F-satellites--live-orbits) · [Time machine](#-time-machine) · [Image lab](#-ai-image-lab) · [Data sources](#%EF%B8%8F-data-sources)
 
-- [Why OpenSpy](#why-openspy)
-- [What it can do](#what-it-can-do)
-- [Live data snapshot](#live-data-snapshot)
-- [AI workflows](#ai-workflows)
-- [Data sources](#data-sources)
-- [Quick start](#quick-start)
-- [Environment keys](#environment-keys)
-- [Agent harness](#agent-harness)
-- [Architecture](#architecture)
-- [Contributing](#contributing)
-- [License](#license)
+<!-- TODO: 15-second demo GIF here: question typed -> camera flies -> layers light up -> replay scrubs -> briefing appears. This single GIF matters more than any text below. -->
 
-## Why OpenSpy
+</div>
 
-Most OSINT tools show one slice of the world. Aircraft here. Ships there. Fires in another tab. Satellite imagery somewhere else. OpenSpy puts those layers into one scene and gives an AI agent tools to work with them.
+---
 
-You can:
+## ✨ Features
 
-- watch aircraft, vessels, satellites, fires, outages, disasters, traffic, webcams, cables, airspace, and infrastructure on one globe;
-- replay history with timeline controls, trails, selected objects, and presentation steps;
-- search for fresh satellite imagery, show it on the map, compare opacity, and attach it to an investigation;
-- capture a globe view, transform it with an AI image model, and compare the generated result against the original view;
-- let Codex CLI or Claude Code inspect the same data through the versioned OpenSpy agent harness;
-- build visual briefings with camera moves, annotations, selections, replay cards, icon packs, and shader modes.
+- 🕵️ **AI runs your OSINT** — agents investigate live and recorded data, correlate events, deliver intel briefings on the globe
+- 🌐 **40+ data sources, 20 live map layers** — one globe: planes, ships, satellites, fires, wars, disasters, blackouts, airspace, traffic, infrastructure
+- 🛰️ **19,000 satellites, live** — real orbits (SGP4), classes, moving sensor footprints
+- 🖼️ **Satellite imagery on demand** — daily NASA MODIS, fresh Sentinel-2 and Landsat scenes for any area
+- ⏪ **Time machine** — every position recorded; scrub any region back through time
+- 🚢 **Dark ship detection** — vessels that go AIS-silent get flagged automatically, with Global Fishing Watch evidence on top
+- 🪪 **Ship dossiers** — click a vessel: photo, registry identity, owner, flag
+- 📡 **GNSS jamming map** — live GPS interference cells over conflict zones
+- 🧠 **AI image lab** — reconstruct and reimagine any globe view with image models, in full geographic context
+- 📶 **Signals & infrastructure** — Wi-Fi access points, 6K+ live webcams, submarine cables, power grids, pipelines
+- 🗺️ **Photoreal 3D basemaps** — Google 3D cities, terrain, daily satellite imagery
+- 🔌 **AI-extendable by design** — open data contracts: new sources, new agents, new tools plug in fast
 
-## What it can do
-
-### Live world layers
-
-- Aircraft from OpenSky, with altitude, speed, heading, callsign, route lookup, class, and photo enrichment.
-- Vessels from AISStream, with heading, speed, type, tracks, replay, and local AIS gap detection.
-- Satellites from the Space-Track/CelesTrak/Ivan TLE chain, with SGP4 propagation, orbital trails, classes, and moving sensor footprints.
-- Restricted, danger, prohibited, alert, and warning airspace from OpenAIP as altitude-aware 3D volumes.
-- Active fires from NASA FIRMS with brightness, confidence, FRP, time, and area/history fetch.
-- Conflict and security events from GDELT and ACLED.
-- Disasters from GDACS, USGS, and NASA EONET.
-- GPS/GNSS interference cells from GPSJam.
-- Internet outage evidence from IODA and Cloudflare Radar.
-- Webcams from Live-Environment-Streams, Windy, and Caltrans.
-- Submarine cables from TeleGeography.
-- Infrastructure from OpenStreetMap Overpass and Overture Maps: power, pipelines, substations, refineries, desalination, military areas, dams, towers, and related assets.
-- Traffic from TomTom and HERE flow data.
-- Oil and energy context from Yahoo Finance, EIA, Our World in Data, and World Bank data.
-
-### Satellite imagery
-
-- NASA GIBS/Worldview daily global imagery, including MODIS true-color and cloud context.
-- NASA FIRMS WMS and Area API for fire-focused imagery and historical fire context.
-- Copernicus/Sentinel Hub search and render flow for targeted Sentinel evidence overlays.
-- USGS Landsat STAC metadata and browse imagery for historical visual context.
-- Local imagery artifacts so the user and agent can reference the same rendered evidence.
-
-### Replay and presentation
-
-- Local PostgreSQL/PostGIS replay store for aircraft, vessels, events, snapshots, selections, and source metrics.
-- Render chunks for fast timeline playback.
-- Trails, selected object focus, exact-time cards, and detail-on-click.
-- Agent-created presentation steps: fly-to, annotate, highlight, filter, select, open card, seek replay, play window, and draw investigation geometry.
-- Icon packs, layer styles, shader modes, and replay cards for visual demos.
-
-### AI image workflow
-
-OpenSpy can capture the current globe view, send it through an OpenRouter-backed image or vision workflow, store the result, and place it back over the scene for comparison. This is useful for:
-
-- visual what-if exploration;
-- turning a raw satellite/map view into a more legible briefing image;
-- checking generated imagery against the original camera view;
-- building before/after visuals from the same geographic frame.
-
-## Live data snapshot
-
-Measured during an OpenSpy live ingest run on 2026-05-18 14:10 UTC.
-
-| Area | Runtime count |
-|---|---:|
-| Catalog sources exposed by OpenSpy | 42 |
-| Catalog layers | 26 |
-| Live/source-fetch sources | 36 |
-| Sources requiring no OpenSpy key | 26 |
-| Sources requiring a free account, token, or paid provider key | 16 |
-| Aircraft in live snapshot | 11,162 |
-| Vessels in live snapshot | 17,260 |
-| Satellites loaded from TLE chain | 19,059 |
-| OpenAIP airspace zones | 9,976 |
-| NASA FIRMS active fire hotspots | 30,447 |
-| GPSJam interference cells | 963 |
-| GFW AIS gap events | 1,260 |
-| GDELT conflict events in latest fetch | 148 |
-| GDACS/USGS/EONET disaster feed | 542 events |
-| Internet outage alerts/annotations | 3 |
-| Live webcams in current run | 6,172 |
-| Submarine cable features | 712 |
-| Overture cache records | 5,749,234 |
-| Local PostgreSQL database size in this run | 42.9 GB |
-
-The same database retained 16.7M aircraft position fixes, 16.8M vessel position fixes, 552K fire events, 95K GDELT conflict events, 23.5K GFW events, 132K aircraft entities, 72K vessel entities, and 22K satellite entities.
-
-## AI workflows
-
-OpenSpy ships a versioned product-agent harness under `agent-harness/`.
-
-The agent can:
-
-- read the live source capability matrix;
-- query entities, events, assets, tracks, regions, timelines, selections, and layer status;
-- run guarded read-only SQL against the OpenSpy database;
-- fetch source history through backend tool endpoints;
-- inspect freshness and provider metadata;
-- control the globe through OpenSpy map commands;
-- create selections and replay windows;
-- produce evidence-first visual reports in chat.
-
-Agent harness targets:
-
-- Codex CLI
-- Claude Code
-
-OpenSpy provides the product harness, tools, and data contracts. Codex CLI and Claude Code keep using their normal local authentication and model settings.
-
-## Data sources
-
-OpenSpy combines public feeds with user-connected provider accounts.
-
-| Source | Layer / use |
-|---|---|
-| OpenSky Network | Live aircraft |
-| AISStream | Live vessels |
-| Local AIS gap detector | Maritime anomaly signal |
-| Space-Track / CelesTrak / Ivan TLE chain | Satellite TLEs |
-| Space-Track GP_HISTORY | Targeted historical satellite tracks |
-| Spectator Earth | Satellite sensor metadata |
-| GDACS | Disaster alerts |
-| USGS | Earthquakes |
-| NASA EONET | Natural events |
-| GDELT 2.0 | Conflict/security events |
-| ACLED | Conflict events |
-| GPSJam.org | GNSS interference |
-| NASA FIRMS | Active fires and fire history |
-| NASA GIBS / Worldview | MODIS/cloud/true-color imagery |
-| Copernicus / Sentinel Hub | Sentinel imagery search/render |
-| USGS Landsat STAC | Historical browse imagery |
-| TeleGeography | Submarine cables |
-| Natural Earth | Borders/reference |
-| OpenAIP | Restricted airspace |
-| Global Fishing Watch | AIS gap events |
-| IODA / CAIDA | Internet outage alerts |
-| Cloudflare Radar | Internet outages |
-| WiGLE | Wi-Fi observations |
-| OpenStreetMap Overpass | Infrastructure and pipelines |
-| Overture Maps | Infrastructure enrichment |
-| TomTom | Traffic tiles |
-| HERE | Traffic flow |
-| Live-Environment-Streams | Webcams |
-| Caltrans | Traffic cameras |
-| Windy Webcams | Global webcams |
-| Yahoo Finance | Oil prices |
-| EIA | Official energy/oil data |
-| Our World in Data | Country energy statistics |
-| Google Photorealistic 3D Tiles | 3D globe terrain/buildings |
-| OpenStreetMap 3D Buildings | Building fallback |
-| OpenRouter | AI image/vision workflow |
-
-## Quick start
-
-### Local development
-
-Prerequisites:
-
-- Node.js 20+
-- npm
-- PostgreSQL with PostGIS for local non-Docker runs
-- provider accounts for data feeds and AI image workflows
+## 🚀 Quick start (60 seconds)
 
 ```bash
 git clone https://github.com/dimusdim/OpenSpy.git
 cd OpenSpy
-
 npm run install:all
-
 cp backend/.env.example backend/.env
 cp frontend/.env.example frontend/.env.local
-
 npm run dev
 ```
 
-Open `http://localhost:3737`.
+Open **http://localhost:3737** — the globe is already alive. The backend brings up its own PostgreSQL, migrates, and starts live ingest. Or run `npm run docker:up`.
 
-The backend runs on `http://localhost:3055`. The backend dev script starts a project-local PostgreSQL cluster under `.local/postgres`, applies migrations automatically, and starts live ingest.
+## 🕵️ AI does your OSINT
 
-### Docker Compose
+The OpenSpy data layer integrates with any AI agentic harness — **Claude Code** and **Codex CLI** work out of the box, and the integration contract is open for whatever harness you already run.
 
-Docker Compose runs PostgreSQL/PostGIS, backend, and frontend together.
+The AI conducts open-source intelligence for you. It replays everything recorded over time, correlates events across every layer, pulls fresh data from the connected sources, and ships with analyst skills for building intelligence reports — delivered as visual briefings right on the globe, not as a wall of chat text.
 
-```bash
-cp backend/.env.example backend/.env
-cp frontend/.env.example frontend/.env.local
+> **You:** *anything unusual around Suez in the last 12 hours?*
+>
+> The agent pulls AIS tracks, flags vessels with transponder gaps, cross-checks conflict events and this morning's satellite passes, replays the suspicious window on the globe and delivers a briefing where every claim links to a layer, a time window and a source.
 
-npm run docker:up
-```
+## 🛰️ Satellites & live orbits
 
-Open `http://localhost:3737`.
+19,000+ satellites from the Space-Track / CelesTrak TLE chain, propagated live with SGP4 in parallel Web Workers. Classified into military, recon, commercial and civilian, with orbital trails and click-through details.
 
-Stop the stack:
+Imaging satellites get moving sensor footprints projected on the ground, sized to the real sensor swath (Spectator Earth) — not a guessed cone.
 
-```bash
-npm run docker:down
-```
+## 🖼️ Satellite imagery
 
-## Environment keys
+Pull real imagery onto the globe:
 
-Add provider credentials to `backend/.env` and frontend public keys to `frontend/.env.local`.
+- daily global MODIS true-color from NASA GIBS, with cloud cover
+- search and render fresh **Sentinel-2** scenes (Copernicus) for any area, overlay with adjustable opacity, attach to an investigation
+- historical **Landsat** browse imagery for context
 
-Core live layers:
+The agent can fetch a fresh pass for an area on demand and drop it on the scene as evidence.
 
-```bash
-OPENSKY_USERNAME=
-OPENSKY_PASSWORD=
-AISSTREAM_API_KEY=
-OPENAIP_API_KEY=
-TOMTOM_API_KEY=
-GFW_TOKEN=
-CLOUDFLARE_API_TOKEN=
-WINDY_API_KEY=
-```
+## ⏪ Time machine
 
-Imagery, space, enrichment, and AI:
+A specialized geo time-series backend (PostgreSQL + PostGIS, time-partitioned storage, binary playback chunks) records every position the globe sees.
 
-```bash
-FIRMS_MAP_KEY=
-COPERNICUS_CLIENT_ID=
-COPERNICUS_CLIENT_SECRET=
-SPACETRACK_EMAIL=
-SPACETRACK_PASSWORD=
-SPECTATOR_EARTH_API_KEY=
-WIGLE_API_NAME=
-WIGLE_API_TOKEN=
-OPENROUTER_API_KEY=
-```
+- **~600K position updates ingested per hour** → **~200 MB/hour** of database growth (~5 GB/day at full uptime)
+- drag the timeline and any region replays itself, with trails and per-interval data coverage shown right on the scrub bar
+- the AI can build the replay for you: fly to, select, scrub to a moment, leave trails, play a window
 
-Frontend map rendering:
+## 🧠 AI image lab
 
-```bash
-NEXT_PUBLIC_API_URL=http://localhost:3055
-NEXT_PUBLIC_CESIUM_ION_TOKEN=
-NEXT_PUBLIC_GOOGLE_MAPS_KEY=
-```
+Point an image model at the globe itself.
 
-Local agent runtime:
+- capture any camera view and reconstruct it as a high-quality Earth scene
+- build context-aware scenario visuals — the model sees exactly what the globe sees, real geography included
+- overlay the generated result back on the original frame and compare
 
-```bash
-AGENT_ENABLE_CODEX_PROVIDER=true
-AGENT_CODEX_COMMAND=codex
-AGENT_CLAUDE_COMMAND=claude
-```
+Turn a raw satellite chip into a presentation-ready visual, or explore "what would this look like if…" on top of real terrain.
 
-## Agent harness
+## 🚢 Dark ships
 
-The product agent runs from the versioned harness in `agent-harness/`.
+Vessels that were actively transmitting and then go silent for over an hour get flagged automatically by the built-in detector. Global Fishing Watch gap events add independent evidence. Click any flagged ship and the dossier opens: photo, registry identity, owner, flag — assembled live from open registries.
 
-The backend treats the agent as a tool user:
+## 📊 Objects on the globe
 
-- APIs return facts, diagnostics, provider metadata, and tool contracts;
-- product behavior belongs in harness instructions and skills;
-- map and replay actions go through OpenSpy commands;
-- source access is visible through capability metadata.
+| | |
+|---|---:|
+| Aircraft tracked | 11K+ |
+| Vessels tracked | 17K+ |
+| Satellites on orbit | 19K+ |
+| Fire hotspots | 30K+ |
+| Airspace zones | 9K+ |
+| Live webcams | 6K+ |
+| Infrastructure objects | 5M+ |
+| **Live data ingested** | **~600K updates / hr → ~200 MB / hr** |
+| **Database growth** | **~5 GB / day** |
 
-## Architecture
+## 🗂️ Data sources
 
-- `frontend/` - Next.js 14, React, Cesium, Zustand, map layers, replay UI, AI image panel, settings, icon packs, shader controls.
-- `backend/` - Express/TypeScript API, live ingest services, source-fetch tools, replay/query APIs, agent runtime, Postgres persistence.
-- `backend/src/db/migrations/` - database schema for catalog, live states, snapshots, render chunks, selections, agents, and source metrics.
-- `agent-harness/core/` - versioned OpenSpy product-agent instructions and skills.
-- `agent-harness/tools/` - shell entrypoints exposed to local agent harnesses.
-- `config/` - source/layer binding and icon target contracts.
-- `sources-catalog.json` - source manifest used by catalog bootstrap.
-- `layer-settings-schema.json` - layer tree and settings model.
+Access column: ✅ no key · 🆓 free key/account · 💳 paid.
 
-Storage:
+| Source | What OpenSpy gets from it | Where it shows up | Access |
+|---|---|---|---|
+| ✈️ OpenSky Network | live aircraft: position, altitude, speed, heading, callsign, route | aircraft layer, per-class icons, flight cards | 🆓 free account, ~4K credits/day |
+| 🚢 AISStream | live AIS: position, course, speed, vessel class, destination, IMO | vessel layer, vessel cards, tracks | 🆓 free key, unlimited stream |
+| 🕶️ Built-in dark-ship detector | vessels that stop transmitting AIS after being tracked | "AIS signal lost" markers on last known position | ✅ built in |
+| 🎣 Global Fishing Watch | AIS gap events — suspected dark activity at sea | dark vessel event markers with gap details | 🆓 free, non-commercial |
+| 🛰️ Space-Track / CelesTrak | orbital elements for 19K+ satellites | live satellites propagated with SGP4, orbits, classes | 🆓 free account (CelesTrak keyless fallback) |
+| 📷 Spectator Earth | imaging satellite sensor metadata | moving sensor footprints over the ground | 🆓 free account |
+| 🛂 OpenAIP | restricted, prohibited, danger and warning airspace | altitude-aware 3D airspace volumes | 🆓 free key |
+| 🔥 NASA FIRMS | active fire hotspots: brightness, radiative power, confidence, history | fire layer with severity colors | ✅ live feed · 🆓 free key for history (5K req / 10 min) |
+| 🌪️ GDACS | disaster alerts: earthquakes, cyclones, floods, volcanoes, droughts | disaster badges with alert level | ✅ no key |
+| 🌍 USGS | M2.5+ earthquakes worldwide | earthquake events on the globe | ✅ no key |
+| 🌋 NASA EONET | natural events: wildfires, storms, volcanoes, icebergs | disaster layer | ✅ no key |
+| ⚔️ ACLED | armed conflict events: battles, explosions, violence | conflict markers by event type | 🆓 free account |
+| 📰 GDELT 2.0 | global conflict and security events mined from news | conflict layer, agent analytics | ✅ no key |
+| 📡 GPSJam | GNSS interference derived from aircraft navigation integrity | hex jamming cells by severity | ✅ no key |
+| 🌐 IODA | internet outages from BGP and active probing | outage events per country/region | ✅ no key |
+| ☁️ Cloudflare Radar | internet outage annotations from the Cloudflare edge | outage layer | 🆓 free token |
+| 📶 WiGLE | crowdsourced Wi-Fi access point observations | Wi-Fi layer: open / encrypted / unknown points | 🆓 free account, daily query cap |
+| 🎥 Live Environment Streams, Windy, Caltrans | 6K+ live webcams worldwide | camera markers with live view | ✅ no key (Windy: free key) |
+| 🌊 TeleGeography | global submarine cable network | cable routes on the seafloor | ✅ no key |
+| 🏭 Overture Maps + OSM Overpass | 5M+ infrastructure objects: power plants, substations, oil/gas/water pipelines, refineries, dams, military areas, towers | infrastructure layer with per-type icons | ✅ no key |
+| 🚗 TomTom / HERE | live road traffic flow | traffic overlay | 🆓 free tier |
+| 🗺️ NASA GIBS / Worldview | daily MODIS true-color imagery and clouds | satellite basemap and cloud layer | ✅ no key |
+| 🛰️ Copernicus / Sentinel Hub | Sentinel-2 scene search and rendered imagery chips | investigation overlays, before/after evidence | 🆓 free account |
+| 🛰️ USGS Landsat STAC | historical Landsat browse imagery | historical visual context | ✅ no key |
+| 🏙️ Google Photorealistic 3D Tiles | photoreal 3D cities | basemap mode | 💳 Google Cloud billing |
+| 🏔️ Cesium ion | world terrain, aerial imagery, OSM 3D buildings | basemap mode | 🆓 free token |
+| 🪪 Wikimedia Commons | vessel photos keyed by IMO number | ship dossier cards | ✅ no key |
+| 🛢️ Yahoo Finance, EIA, OWID, World Bank | oil prices and energy context | analytics widgets | ✅ no key |
+| 🧠 OpenRouter | image and vision models | AI image lab | 💳 pay-per-use |
+| 🗺️ Natural Earth | country borders and reference geography | border layer | ✅ no key |
 
-- PostgreSQL/PostGIS stores live state, snapshots, source metrics, selections, replay data, and agent sessions.
-- DuckDB stores the local Overture Maps cache.
-- Render chunks and runtime artifacts stay under local runtime paths.
+**More than half the sources need no key at all** — clone and the globe is alive. The rest take free accounts; the settings panel shows the live status of every key (including expired tokens) with a registration link for each.
 
-## Contributing
+## 🏗️ Built with
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+**Frontend** Next.js 14 · React · CesiumJS · Zustand — **Backend** Express + TypeScript · PostgreSQL/PostGIS · DuckDB — **AI** versioned agentic harness, open tool contracts.
 
-Useful areas to work on:
+The whole stack runs on a MacBook Air M4 and scales to the cloud — Docker images included. The backend is a tool provider: it serves data and capabilities, the AI decides what to do with them.
 
-- data source connectors;
-- source quality and provenance metadata;
-- Cesium rendering performance;
-- replay and timeline UX;
-- agent tools and harness behavior;
-- Docker and install flow;
-- examples and product demos.
+## 🧭 Roadmap
 
-## Credits and inspiration
+- more AI harness targets beyond Claude Code and Codex CLI
+- paid API connectors — the source framework is built to plug them in fast
+- cloud deployment recipes
+- temporal joins for moving objects — *"which vessels crossed this zone while it was jammed?"*
+- deeper entity dossiers: aircraft, satellites, per-entity imagery timelines
 
-OpenSpy was inspired by Bilawal Sidhu's GodEyeView concept and the idea of an AI analyst working directly with an interactive globe.
+## 🤝 Contributing
 
-## License
+PRs welcome — highest-value areas: new data connectors, Cesium performance, replay UX, agent tools, example investigations. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-OpenSpy is licensed under the [Apache License 2.0](LICENSE).
+**If OpenSpy is useful or interesting to you, star the repo** — it helps other researchers find it.
 
-## Follow
+## 🙏 Credits
+
+Inspired by [Bilawal Sidhu's](https://x.com/bilawalsidhu) **GodEyeView** — a conceptual demo of a live real-time globe visualization.
+
+## 📜 License
+
+Apache 2.0 — see [LICENSE](LICENSE).
+
+---
+
+<div align="center">
+
+Built by **Dmitry Alekhin** as an AI-first product, end to end: data engineering, 3D rendering, agentic AI.
 
 [LinkedIn](https://www.linkedin.com/in/dmitryalekhin/) · [YouTube](https://www.youtube.com/@DimaAlekhin) · [X / Twitter](https://x.com/Dmitry_Alekhin)
+
+</div>

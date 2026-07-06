@@ -1,12 +1,31 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import { Search, Loader2 } from 'lucide-react';
 
 export default function SearchBar({ variant = 'floating' }: { variant?: 'floating' | 'topbar' }) {
     const [query, setQuery] = useState('');
     const [loading, setLoading] = useState(false);
+    const inputRef = useRef<HTMLInputElement | null>(null);
+
+    // Press "/" anywhere (outside a text field) to focus search — matches the
+    // "/" kbd hint shown in the topbar variant.
+    useEffect(() => {
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
+            const target = e.target as HTMLElement | null;
+            const tag = target?.tagName;
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) return;
+            const input = inputRef.current;
+            if (!input) return;
+            e.preventDefault();
+            input.focus();
+            input.select();
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, []);
 
     const handleSearch = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -34,6 +53,7 @@ export default function SearchBar({ variant = 'floating' }: { variant?: 'floatin
             <form onSubmit={handleSearch} className="os-search">
                 <Search size={14} />
                 <input
+                    ref={inputRef}
                     id="os-search-input"
                     type="text"
                     value={query}
@@ -49,6 +69,7 @@ export default function SearchBar({ variant = 'floating' }: { variant?: 'floatin
         <div className="w-full">
             <form onSubmit={handleSearch} className="relative flex items-center">
                 <input
+                    ref={inputRef}
                     type="text"
                     value={query}
                     onChange={e => setQuery(e.target.value)}

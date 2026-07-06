@@ -130,7 +130,12 @@ const DEFAULT_CLAUDE_DISALLOWED_TOOLS = [
     'Bash(command *)',
 ].join(',');
 const EMPTY_MCP_CONFIG = '{"mcpServers":{}}';
-const DEFAULT_CODEX_SANDBOX = 'danger-full-access';
+// Default to workspace-write, NOT danger-full-access: the product OSINT agent
+// consumes untrusted external content (vessel names, event descriptions), so a
+// prompt-injection must not yield arbitrary filesystem writes / full shell with
+// the backend account. Override with AGENT_CODEX_SANDBOX when a deployment
+// knowingly needs broader access.
+const DEFAULT_CODEX_SANDBOX = 'workspace-write';
 function isCodexProviderEnabled(): boolean {
     return process.env.AGENT_ENABLE_CODEX_PROVIDER !== 'false';
 }
@@ -1042,14 +1047,21 @@ export class AgentRuntimeService {
         }
 
         if (session.provider === 'codex_cli') {
+            const codexSandbox = process.env.AGENT_CODEX_SANDBOX || DEFAULT_CODEX_SANDBOX;
             const codexGlobalArgs = [
                 '--ask-for-approval',
                 process.env.AGENT_CODEX_APPROVAL || 'never',
                 '--sandbox',
-                process.env.AGENT_CODEX_SANDBOX || DEFAULT_CODEX_SANDBOX,
+                codexSandbox,
                 '-C',
                 cwd,
             ];
+            // workspace-write blocks network by default, but the product tools
+            // (source-fetch.sh, backend-api.sh) call the local backend. Re-enable
+            // network for that mode only; full-access already allows it.
+            if (codexSandbox === 'workspace-write') {
+                codexGlobalArgs.push('-c', 'sandbox_workspace_write.network_access=true');
+            }
             if (session.provider_session_id) {
                 return {
                     command: commandForLaunch(process.env.AGENT_CODEX_COMMAND || 'codex', this.repoRoot),

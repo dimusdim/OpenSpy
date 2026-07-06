@@ -1,14 +1,20 @@
 services:
   postgres:
-    image: postgis/postgis:16-3.4
+    # Must bundle BOTH TimescaleDB and PostGIS: migrations 001+ create postgis and
+    # 010 creates the timescaledb extension. The plain postgis/postgis image has no
+    # timescaledb, so 010 failed and the backend silently ran with persistence
+    # disabled. timescaledb-ha ships timescaledb + postgis + toolkit.
+    image: timescale/timescaledb-ha:pg16
     ports:
       - "5432:5432"
     environment:
       POSTGRES_DB: openspy
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
+      # timescaledb-ha keeps PGDATA under /home/postgres/pgdata/data.
+      PGDATA: /home/postgres/pgdata/data
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/home/postgres/pgdata/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d openspy"]
       interval: 5s

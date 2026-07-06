@@ -3,7 +3,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Settings, X, Radio, Database, Eye, EyeOff, Save, ChevronDown, ChevronRight } from 'lucide-react';
 import { useTimelineStore, type LayerName } from '../store/useTimelineStore';
-import { API_URL } from '../lib/config';
+import { API_URL, CESIUM_ION_TOKEN } from '../lib/config';
 
 // ---------------------------------------------------------------------------
 // Status helpers
@@ -147,6 +147,9 @@ const PROVIDERS: ProviderDef[] = [
     // Imagery
     { id: 'nasa-gibs', name: 'NASA GIBS', description: 'MODIS satellite imagery and cloud cover overlays.', url: 'gibs.earthdata.nasa.gov', type: 'WMTS tiles', poll: 'daily', layers: ['clouds', 'satellite_imagery'], free: true },
     { id: 'copernicus', name: 'Copernicus Data Space', description: 'Sentinel scene search and bounded imagery overlays via backend-owned OAuth credentials.', url: 'dataspace.copernicus.eu', type: 'STAC / Sentinel Hub', poll: 'on demand', layers: ['satellite_imagery'], envVars: ['COPERNICUS_CLIENT_ID', 'COPERNICUS_CLIENT_SECRET'], registrationUrl: 'https://shapps.dataspace.copernicus.eu/', registrationLabel: 'Copernicus Data Space' },
+    // Map rendering (frontend NEXT_PUBLIC_* keys — validated client-side, not via /api/keys)
+    { id: 'cesium-ion', name: 'Cesium ion', description: 'World Terrain, ion aerial imagery and OSM 3D Buildings (used by the OSM 3D mode). Without a token the globe falls back to keyless OSM raster.', url: 'ion.cesium.com', type: 'ion assets', poll: 'on load', layers: [], envVarNote: 'Set NEXT_PUBLIC_CESIUM_ION_TOKEN in frontend/.env.local and restart the frontend.', registrationUrl: 'https://ion.cesium.com/tokens', registrationLabel: 'Cesium ion' },
+    { id: 'google-3d', name: 'Google Map Tiles', description: 'Photorealistic 3D Tiles base layer (Google 3D mode). Requires a Google Cloud project with billing; falls back to OSM when missing.', url: 'tile.googleapis.com', type: '3D Tiles', poll: 'on load', layers: [], envVarNote: 'Set NEXT_PUBLIC_GOOGLE_MAPS_KEY in frontend/.env.local and restart the frontend.', registrationUrl: 'https://developers.google.com/maps/documentation/tile/get-api-key', registrationLabel: 'Google Map Tiles API' },
 ];
 
 // ---------------------------------------------------------------------------
@@ -186,6 +189,7 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
     const [tab, setTab] = useState<Tab>('sources');
     const [apiKeys, setApiKeys] = useState<Record<string, KeyInfo>>({});
+    const [mapKeyStatuses, setMapKeyStatuses] = useState<Record<string, ProviderStatus>>({});
 
     useEffect(() => {
         if (!isOpen) return;
@@ -193,6 +197,40 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
             .then(r => r.json())
             .then(data => setApiKeys(data))
             .catch(() => {});
+    }, [isOpen]);
+
+    // Frontend map-rendering keys: validate live against the providers so an
+    // expired/revoked token shows as a real error instead of silently failing.
+    useEffect(() => {
+        if (!isOpen) return;
+        let cancelled = false;
+        const set = (id: string, status: ProviderStatus) => {
+            if (!cancelled) setMapKeyStatuses(prev => ({ ...prev, [id]: status }));
+        };
+
+        if (!CESIUM_ION_TOKEN) {
+            set('cesium-ion', { status: 'auth-missing', count: 0 });
+        } else {
+            set('cesium-ion', { status: 'connecting', count: 0 });
+            fetch(`https://api.cesium.com/v1/assets/2/endpoint?access_token=${encodeURIComponent(CESIUM_ION_TOKEN)}`)
+                .then(r => set('cesium-ion', r.ok
+                    ? { status: 'streaming', count: 0 }
+                    : { status: 'error', count: 0, note: r.status === 401 ? 'Token rejected by Cesium ion (401) — expired or revoked. Generate a new one and update NEXT_PUBLIC_CESIUM_ION_TOKEN.' : `Cesium ion returned HTTP ${r.status}` }))
+                .catch(() => set('cesium-ion', { status: 'error', count: 0, note: 'Cesium ion unreachable' }));
+        }
+
+        const googleKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_KEY;
+        if (!googleKey) {
+            set('google-3d', { status: 'auth-missing', count: 0 });
+        } else {
+            set('google-3d', { status: 'connecting', count: 0 });
+            fetch(`https://tile.googleapis.com/v1/3dtiles/root.json?key=${encodeURIComponent(googleKey)}`)
+                .then(r => set('google-3d', r.ok
+                    ? { status: 'streaming', count: 0 }
+                    : { status: 'error', count: 0, note: `Google Map Tiles rejected the key (HTTP ${r.status}). Check key restrictions and billing in Google Cloud Console.` }))
+                .catch(() => set('google-3d', { status: 'error', count: 0, note: 'Google Map Tiles unreachable' }));
+        }
+        return () => { cancelled = true; };
     }, [isOpen]);
 
     useEffect(() => {
@@ -233,8 +271,11 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
             if (p.free && bestStatus === 'auth-missing') bestStatus = 'streaming';
             result[p.id] = { status: bestStatus, count: totalCount, note };
         }
+        // Frontend map-rendering keys are validated client-side (live probe),
+        // not via backend stream metrics — their probed status wins.
+        Object.assign(result, mapKeyStatuses);
         return result;
-    }, [streamMetrics, apiKeys]);
+    }, [streamMetrics, apiKeys, mapKeyStatuses]);
 
     if (!isOpen) return null;
 

@@ -169,9 +169,35 @@ export function useVisualShader(viewer: Cesium.Viewer | null) {
     useEffect(() => {
         if (!viewer || viewer.isDestroyed()) return;
         if (visualShader === 'normal') return;
-        const interval = window.setInterval(() => {
+
+        // Animated shaders sample czm_frameNumber, so they need a steady
+        // render pulse to keep moving under requestRenderMode. 66ms (~15fps)
+        // is enough for these ambient effects while halving the wasted GPU
+        // work vs the old 33ms/30fps loop, and the pulse pauses entirely
+        // while the tab is hidden.
+        const RENDER_PULSE_MS = 66;
+        let interval: number | null = null;
+        const tick = () => {
             if (!viewer.isDestroyed()) viewer.scene.requestRender();
-        }, 33);
-        return () => window.clearInterval(interval);
+        };
+        const start = () => {
+            if (interval === null) interval = window.setInterval(tick, RENDER_PULSE_MS);
+        };
+        const stop = () => {
+            if (interval !== null) {
+                window.clearInterval(interval);
+                interval = null;
+            }
+        };
+        const syncToVisibility = () => {
+            if (typeof document !== 'undefined' && document.visibilityState === 'hidden') stop();
+            else start();
+        };
+        syncToVisibility();
+        document.addEventListener('visibilitychange', syncToVisibility);
+        return () => {
+            document.removeEventListener('visibilitychange', syncToVisibility);
+            stop();
+        };
     }, [viewer, visualShader]);
 }

@@ -27,7 +27,8 @@ console.log(JSON.stringify({
       "source-fetch.sh gpsjam-history --date 2026-04-01",
       "source-fetch.sh firms-fires --date 2026-04-01 --bbox 54,24,58.5,28.5",
       "source-fetch.sh gdacs-disasters --from 2026-04-01T00:00:00Z --to 2026-04-02T00:00:00Z --bbox 54,24,58.5,28.5",
-      "source-fetch.sh copernicus-sentinel-imagery --bbox 54,24,54.2,24.2 --from 2026-05-01T00:00:00Z --to 2026-05-02T00:00:00Z --limit 1"
+      "source-fetch.sh copernicus-sentinel-imagery --bbox 54,24,54.2,24.2 --from 2026-05-01T00:00:00Z --to 2026-05-02T00:00:00Z --limit 1",
+      "source-fetch.sh vessel-enrichment --imo 9811000"
     ],
     notes: [
       "Call capabilities before source/storage/imagery capability claims.",

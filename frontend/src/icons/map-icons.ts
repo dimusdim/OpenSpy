@@ -57,6 +57,9 @@ export type RuntimeIconPack = {
   id: string;
   name?: string;
   icons: Record<string, RuntimeIconPackIcon>;
+  // Server content revision (max pack-file mtime). Used for icon URL cache
+  // busting so redrawn SVGs and manifest scales always refresh together.
+  revision?: number;
 };
 
 let runtimeIconPack: RuntimeIconPack | null = null;
@@ -79,6 +82,17 @@ function normalizeIconSubtype(layer: string, subtype: string): string {
   if (layer === 'disasters') return subtype || 'XX';
   if (layer === 'satellites' && subtype === 'recon') return 'recon';
   if (layer === 'gfw' || layer === 'webcams' || layer === 'asset') return 'default';
+  // Severity layers must mirror the getMapIcon() fallbacks: replay styles can
+  // carry provider classes (e.g. fires `firms_type_0`) instead of severity,
+  // and an unnormalized subtype made getIconScale()/getIconOpacity() miss the
+  // manifest while the image lookup fell back to a real icon — pack icons
+  // then rendered at the contract fallback scale (huge).
+  if (layer === 'fires') {
+    return subtype === 'low' || subtype === 'medium' || subtype === 'high' ? subtype : 'high';
+  }
+  if (layer === 'jamming') {
+    return subtype === 'low' || subtype === 'high' ? subtype : 'medium';
+  }
   return subtype || 'default';
 }
 
@@ -95,7 +109,8 @@ function runtimeIconUrl(layer: string, subtype: string): string | undefined {
   if (!runtimeIconPack) return undefined;
   const icon = runtimeIconConfig(layer, subtype);
   if (!icon?.file) return undefined;
-  return `/icon-packs/${encodeURIComponent(runtimeIconPack.id)}/${encodeURIComponent(icon.file)}?v=${runtimeIconPackRevision}`;
+  const version = runtimeIconPack.revision ?? runtimeIconPackRevision;
+  return `/icon-packs/${encodeURIComponent(runtimeIconPack.id)}/${encodeURIComponent(icon.file)}?v=${version}`;
 }
 
 export function getIconScale(layer: string, subtype: string, fallback = 1): number {

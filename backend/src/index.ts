@@ -64,6 +64,7 @@ import { LiveProjectionService } from './services/live-projection.service';
 import { ReplayQueryService } from './services/replay-query.service';
 import { ReplayRenderBatchService } from './services/replay-render-batch.service';
 import { SOURCE_BINDINGS } from './services/source-bindings.service';
+import { VesselEnrichmentService } from './services/vessel-enrichment.service';
 
 // CORS origin whitelist — comma-separated list in ALLOWED_ORIGINS env var.
 // Defaults to localhost dev ports if unset.
@@ -892,6 +893,9 @@ type IconPackManifest = {
     id: string;
     name: string;
     icons: Record<string, IconPackIcon>;
+    // Content revision (max file mtime, ms). The frontend appends it to icon
+    // URLs so browser caches refresh together with manifest scale changes.
+    revision?: number;
 };
 
 const ICON_PACK_REPO_ROOT = getRepoRootFromBackend();
@@ -979,11 +983,19 @@ async function readIconPackManifest(packId: string): Promise<IconPackManifest> {
     for (const target of targets) {
         icons[target.id] = normalizeIconManifestIcon(target, parsed?.icons?.[target.id]);
     }
+    let revision = 0;
+    const packDir = iconPackPath(safeId);
+    const files = await fs.promises.readdir(packDir).catch(() => [] as string[]);
+    for (const file of files) {
+        const stat = await fs.promises.stat(path.join(packDir, file)).catch(() => null);
+        if (stat) revision = Math.max(revision, Math.round(stat.mtimeMs));
+    }
     return {
         schemaVersion: 1,
         id: safeId,
         name: typeof parsed?.name === 'string' && parsed.name.trim() ? parsed.name.trim() : safeId,
         icons,
+        revision,
     };
 }
 
@@ -1484,6 +1496,19 @@ const SOURCE_FETCH_CAPABILITIES: Record<string, SourceFetchCapability> = {
         status: process.env.GFW_TOKEN ? 'available' : 'auth_required',
         history: 'Provider can return vessel tracks/events when token and product access allow it.',
         notes: 'Fetches and persists GFW gap events for an explicit date window.',
+    },
+    'vessel-enrichment': {
+        source: 'wikimedia_commons',
+        status: 'available',
+        history: 'Wikimedia Commons keys ship media by IMO number (Category:IMO <imo>, optionally nested in a ship-name subcategory); the GFW Vessels API resolves registry identity for the same IMO.',
+        notes: 'Fetches vessel photos from Wikimedia Commons plus GFW registry identity for a 7-digit --imo and caches the combined result in core.vessel_enrichment. The GFW portion reuses the gfw source GFW_TOKEN and reports per-provider state in provider_status instead of failing the whole operation.',
+        policy: {
+            free_tier: 'Commons MediaWiki API is keyless; GFW identity uses the configured non-commercial GFW token.',
+            cache_ttl_hours_hit: 720,
+            cache_ttl_hours_miss: 24,
+            photos_limit: 20,
+            gfw_identity_status: process.env.GFW_TOKEN ? 'available' : 'auth_required',
+        },
     },
     'acled-conflicts': {
         source: 'acled',
@@ -2751,12 +2776,17 @@ app.post('/api/agent-tools/sql-query', async (req, res) => {
         }
         const limitClause = limit === null ? '' : `LIMIT ${Math.trunc(limit)}`;
 
+        // Always bound the statement: without a timeout a pathological read holds a
+        // pool connection indefinitely and can stall the product. Callers may raise
+        // it via timeout_ms; the default is a measured product ceiling, reported in
+        // meta and overridable via AGENT_SQL_TIMEOUT_MS.
+        const defaultTimeoutMs = Number(process.env.AGENT_SQL_TIMEOUT_MS) || 120_000;
+        const effectiveTimeoutMs = timeoutMs !== null ? Math.trunc(timeoutMs) : defaultTimeoutMs;
+
         const rows = await databaseService.withTransaction(async () => {
             await databaseService.query('SET TRANSACTION READ ONLY');
             await databaseService.query('SET LOCAL ROLE app_agent_readonly');
-            if (timeoutMs !== null) {
-                await databaseService.query(`SET LOCAL statement_timeout = '${Math.trunc(timeoutMs)}ms'`);
-            }
+            await databaseService.query(`SET LOCAL statement_timeout = '${effectiveTimeoutMs}ms'`);
             const result = await databaseService.query(
                 `
                     SELECT *
@@ -2772,7 +2802,8 @@ app.post('/api/agent-tools/sql-query', async (req, res) => {
             data: { rows },
             meta: {
                 limit: limit === null ? null : Math.trunc(limit),
-                timeout_ms: timeoutMs,
+                timeout_ms: effectiveTimeoutMs,
+                timeout_defaulted: timeoutMs === null,
                 reason,
             },
             warnings: [],
@@ -2926,6 +2957,42 @@ app.post('/api/agent-tools/source-fetch', async (req, res) => {
             });
             return false;
         };
+
+        if (operation === 'vessel-enrichment') {
+            const imo = String(args.imo || '').trim();
+            if (!vesselEnrichmentService.isValidImo(imo)) {
+                res.status(400).json({ status: 'error', error: { code: 'BAD_IMO', message: 'vessel-enrichment requires --imo with a 7-digit IMO number' } });
+                return;
+            }
+            const mmsi = args.mmsi != null ? String(args.mmsi) : null;
+            const refresh = args.refresh === true;
+            if (dryRun) {
+                res.json({
+                    status: 'ok',
+                    data: { operation, source: capability.source, imo, mmsi, capability: capabilityWithPolicy },
+                    meta: { executed: false, persisted: false, dry_run: true },
+                });
+                return;
+            }
+            const enrichment = await vesselEnrichmentService.getEnrichment(imo, mmsi, refresh);
+            res.json({
+                status: 'ok',
+                data: {
+                    operation,
+                    source: capability.source,
+                    ...enrichment,
+                    capability: capabilityWithPolicy,
+                },
+                meta: {
+                    executed: true,
+                    persisted: databaseService.isReady(),
+                    cached: enrichment.cached,
+                    photo_count: enrichment.photos.length,
+                    photos_truncated: enrichment.photosTruncated,
+                },
+            });
+            return;
+        }
 
         if (operation === 'opensky-tracks') {
             const icao24 = String(args.icao24 || args.icao || args.entity || '').trim().toLowerCase().replace(/^aircraft:/, '');
@@ -5233,6 +5300,18 @@ function parseOptionalPositiveGridDegrees(value: string | undefined): number | n
     return Math.max(0.1, Math.min(10, parsed));
 }
 
+function parseReplayTimelineResolutionSeconds(value: string | undefined): number {
+    if (!value) return 300;
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 86400) {
+        const err = new Error('Invalid resolutionSeconds (expected integer between 1 and 86400)') as Error & { status?: number; code?: string };
+        err.status = 400;
+        err.code = 'BAD_RESOLUTION_SECONDS';
+        throw err;
+    }
+    return parsed;
+}
+
 function parseIsoDateOrNull(value: string | undefined): string | null {
     if (!value) return null;
     const date = new Date(value);
@@ -5468,6 +5547,7 @@ const gfwService = new GFWService(sourcePersistenceService);
 const cloudflareService = new CloudflareService(sourcePersistenceService);
 const copernicusService = new CopernicusService();
 const wigleService = new WigleService(databaseService);
+const vesselEnrichmentService = new VesselEnrichmentService(databaseService);
 
 // AI Vision — image generation via OpenRouter Gemini Flash Image
 setupAIImageRoutes(app);
@@ -5593,6 +5673,215 @@ app.get('/api/replay/events', async (req, res) => {
     }
 });
 
+app.get('/api/replay/timeline-availability', async (req, res) => {
+    if (!databaseService.isReady()) {
+        res.status(503).json({ error: 'Replay database is not ready' });
+        return;
+    }
+
+    const from = parseIsoDateOrNull(req.query.from as string | undefined);
+    const to = parseIsoDateOrNull(req.query.to as string | undefined);
+    if (!from || !to) {
+        res.status(400).json({ error: 'Missing or invalid from/to timestamp' });
+        return;
+    }
+    const fromMs = new Date(from).getTime();
+    const toMs = new Date(to).getTime();
+    if (fromMs > toMs) {
+        res.status(400).json({ error: 'Invalid from/to timestamp: from must be before to' });
+        return;
+    }
+
+    let resolutionSeconds: number;
+    try {
+        resolutionSeconds = parseReplayTimelineResolutionSeconds(
+            (req.query.resolutionSeconds as string | undefined)
+                || (req.query.bucketSeconds as string | undefined),
+        );
+    } catch (err: any) {
+        sendError(res, err);
+        return;
+    }
+
+    const layers = parseLayerScopeList(req.query.layers as string | undefined);
+    const params: unknown[] = [from, to, resolutionSeconds];
+    if (layers.length > 0) params.push(layers);
+    const layerParam = layers.length > 0 ? `$${params.length}::text[]` : null;
+    const layerFilter = (alias: string) => layerParam ? `AND ${alias}.layer_id = ANY(${layerParam})` : '';
+
+    try {
+        const result = await databaseService.query<{
+            bucket_start: Date | string;
+            sample_count: string;
+            object_count: string;
+            layers: Record<string, number> | null;
+            families: Record<string, number> | null;
+        }>(
+            `
+                WITH raw AS (
+                    SELECT
+                        'position'::text AS family,
+                        pf.layer_id,
+                        pf.observed_at,
+                        'position:' || pf.entity_id AS object_key,
+                        1::bigint AS sample_weight
+                    FROM core.position_fixes pf
+                    WHERE $3::int < 300
+                      AND pf.observed_at >= $1::timestamptz
+                      AND pf.observed_at <= $2::timestamptz
+                      ${layerFilter('pf')}
+
+                    UNION ALL
+
+                    SELECT
+                        'position'::text AS family,
+                        ca.layer_id,
+                        ca.bucket AS observed_at,
+                        'position:' || ca.entity_id AS object_key,
+                        GREATEST(ca.n_samples, 1)::bigint AS sample_weight
+                    FROM app.ca_position_fixes_5min ca
+                    WHERE $3::int >= 300
+                      AND ca.bucket >= $1::timestamptz
+                      AND ca.bucket <= $2::timestamptz
+                      ${layerFilter('ca')}
+
+                    UNION ALL
+
+                    SELECT
+                        'event'::text AS family,
+                        es.layer_id,
+                        COALESCE(es.observed_at, es.valid_from, es.created_at) AS observed_at,
+                        'event:' || es.event_id AS object_key,
+                        1::bigint AS sample_weight
+                    FROM core.event_snapshots es
+                    WHERE COALESCE(es.observed_at, es.valid_from, es.created_at) >= $1::timestamptz
+                      AND COALESCE(es.observed_at, es.valid_from, es.created_at) <= $2::timestamptz
+                      ${layerFilter('es')}
+
+                    UNION ALL
+
+                    SELECT
+                        'asset'::text AS family,
+                        asset.layer_id,
+                        COALESCE(asset.observed_at, asset.created_at) AS observed_at,
+                        'asset:' || asset.asset_id AS object_key,
+                        1::bigint AS sample_weight
+                    FROM core.asset_snapshots asset
+                    WHERE COALESCE(asset.observed_at, asset.created_at) >= $1::timestamptz
+                      AND COALESCE(asset.observed_at, asset.created_at) <= $2::timestamptz
+                      ${layerFilter('asset')}
+
+                    UNION ALL
+
+                    SELECT
+                        'orbital'::text AS family,
+                        oe.layer_id,
+                        oe.observed_at,
+                        'orbital:' || oe.entity_id AS object_key,
+                        1::bigint AS sample_weight
+                    FROM core.orbital_elements oe
+                    WHERE oe.observed_at >= $1::timestamptz
+                      AND oe.observed_at <= $2::timestamptz
+                      ${layerFilter('oe')}
+
+                    UNION ALL
+
+                    SELECT
+                        'observation'::text AS family,
+                        obs.layer_id,
+                        obs.observed_at,
+                        'observation:' || obs.observation_id AS object_key,
+                        1::bigint AS sample_weight
+                    FROM core.observations obs
+                    WHERE obs.observed_at >= $1::timestamptz
+                      AND obs.observed_at <= $2::timestamptz
+                      ${layerFilter('obs')}
+                ),
+                bucketed AS (
+                    SELECT
+                        to_timestamp(floor(extract(epoch FROM observed_at) / $3::int) * $3::int) AS bucket_start,
+                        family,
+                        layer_id,
+                        object_key,
+                        sample_weight
+                    FROM raw
+                    WHERE observed_at IS NOT NULL
+                ),
+                totals AS (
+                    SELECT
+                        bucket_start,
+                        SUM(sample_weight)::text AS sample_count,
+                        COUNT(DISTINCT object_key)::text AS object_count
+                    FROM bucketed
+                    GROUP BY bucket_start
+                ),
+                layer_totals AS (
+                    SELECT
+                        bucket_start,
+                        jsonb_object_agg(layer_id, sample_count ORDER BY layer_id) AS layers
+                    FROM (
+                        SELECT bucket_start, layer_id, SUM(sample_weight) AS sample_count
+                        FROM bucketed
+                        GROUP BY bucket_start, layer_id
+                    ) layer_rows
+                    GROUP BY bucket_start
+                ),
+                family_totals AS (
+                    SELECT
+                        bucket_start,
+                        jsonb_object_agg(family, sample_count ORDER BY family) AS families
+                    FROM (
+                        SELECT bucket_start, family, SUM(sample_weight) AS sample_count
+                        FROM bucketed
+                        GROUP BY bucket_start, family
+                    ) family_rows
+                    GROUP BY bucket_start
+                )
+                SELECT
+                    totals.bucket_start,
+                    totals.sample_count,
+                    totals.object_count,
+                    COALESCE(layer_totals.layers, '{}'::jsonb) AS layers,
+                    COALESCE(family_totals.families, '{}'::jsonb) AS families
+                FROM totals
+                LEFT JOIN layer_totals USING (bucket_start)
+                LEFT JOIN family_totals USING (bucket_start)
+                ORDER BY totals.bucket_start ASC
+            `,
+            params,
+        );
+
+        const buckets = (result?.rows || []).map((row) => {
+            const date = row.bucket_start instanceof Date ? row.bucket_start : new Date(String(row.bucket_start));
+            return {
+                bucket_start: Number.isNaN(date.getTime()) ? String(row.bucket_start) : date.toISOString(),
+                sample_count: Number(row.sample_count || 0),
+                object_count: Number(row.object_count || 0),
+                layers: row.layers || {},
+                families: row.families || {},
+            };
+        });
+
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({
+            mode: 'timeline-availability',
+            time_basis: 'observed',
+            from,
+            to,
+            resolution_seconds: resolutionSeconds,
+            bucket_seconds: resolutionSeconds,
+            filters: {
+                layers,
+            },
+            count: buckets.length,
+            buckets,
+        });
+    } catch (err: any) {
+        console.error('[api/replay/timeline-availability] failed:', err?.message || err);
+        sendError(res, err);
+    }
+});
+
 // Bootstrap snapshot for live mode. Socket.IO drops large WS frames silently
 // in-browser, so initial state must come over plain HTTP. Frontend fetches
 // once on mount; periodic deltas still arrive via socket broadcast.
@@ -5632,6 +5921,27 @@ app.get('/api/live/details/:layer/:id', async (req, res) => {
         res.json(details);
     } catch (err: any) {
         console.error('[api/live/details] failed:', err?.message || err);
+        sendError(res, err);
+    }
+});
+
+// Reference-class vessel enrichment: Commons photos by IMO category plus
+// GFW registry identity. Fetched on demand for an open entity card and
+// cached in core.vessel_enrichment (lazy TTL refresh inside the service).
+app.get('/api/enrichment/vessel/:imo', async (req, res) => {
+    const imo = String(req.params.imo || '').trim();
+    if (!vesselEnrichmentService.isValidImo(imo)) {
+        res.status(400).json({ error: 'IMO must be a 7-digit number' });
+        return;
+    }
+    const mmsi = typeof req.query.mmsi === 'string' ? req.query.mmsi : null;
+    const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
+    try {
+        const enrichment = await vesselEnrichmentService.getEnrichment(imo, mmsi, refresh);
+        res.setHeader('Cache-Control', 'no-store');
+        res.json(enrichment);
+    } catch (err: any) {
+        console.error('[api/enrichment/vessel] failed:', err?.message || err);
         sendError(res, err);
     }
 });

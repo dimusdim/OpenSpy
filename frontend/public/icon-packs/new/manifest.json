@@ -170,7 +170,7 @@
       "layer": "conflicts",
       "subtype": "explosions",
       "file": "conflicts-explosions.svg",
-      "scale": 0.55,
+      "scale": 0.48,
       "opacity": 1
     },
     "conflicts:battles": {
@@ -180,7 +180,7 @@
       "layer": "conflicts",
       "subtype": "battles",
       "file": "conflicts-battles.svg",
-      "scale": 0.55,
+      "scale": 0.48,
       "opacity": 1
     },
     "conflicts:violence": {
@@ -200,7 +200,7 @@
       "layer": "outages",
       "subtype": "critical",
       "file": "outages-critical.svg",
-      "scale": 0.85,
+      "scale": 0.66,
       "opacity": 1
     },
     "outages:warning": {
@@ -210,7 +210,7 @@
       "layer": "outages",
       "subtype": "warning",
       "file": "outages-warning.svg",
-      "scale": 0.7,
+      "scale": 0.55,
       "opacity": 1
     },
     "gfw:default": {
@@ -360,7 +360,7 @@
       "layer": "disasters",
       "subtype": "EQ",
       "file": "disasters-earthquake.svg",
-      "scale": 0.68,
+      "scale": 0.44,
       "opacity": 1
     },
     "disasters:TC": {
@@ -370,7 +370,7 @@
       "layer": "disasters",
       "subtype": "TC",
       "file": "disasters-tropical-cyclone.svg",
-      "scale": 0.68,
+      "scale": 0.52,
       "opacity": 1
     },
     "disasters:FL": {
@@ -380,7 +380,7 @@
       "layer": "disasters",
       "subtype": "FL",
       "file": "disasters-flood.svg",
-      "scale": 0.68,
+      "scale": 0.52,
       "opacity": 1
     },
     "disasters:VO": {
@@ -390,7 +390,7 @@
       "layer": "disasters",
       "subtype": "VO",
       "file": "disasters-volcano.svg",
-      "scale": 0.68,
+      "scale": 0.52,
       "opacity": 1
     },
     "disasters:WF": {
@@ -400,7 +400,7 @@
       "layer": "disasters",
       "subtype": "WF",
       "file": "disasters-wildfire.svg",
-      "scale": 0.68,
+      "scale": 0.44,
       "opacity": 1
     },
     "disasters:DR": {
@@ -410,7 +410,7 @@
       "layer": "disasters",
       "subtype": "DR",
       "file": "disasters-drought.svg",
-      "scale": 0.68,
+      "scale": 0.52,
       "opacity": 1
     },
     "disasters:XX": {
@@ -420,7 +420,7 @@
       "layer": "disasters",
       "subtype": "XX",
       "file": "disasters-other.svg",
-      "scale": 0.68,
+      "scale": 0.52,
       "opacity": 1
     },
     "wifi:open": {
@@ -460,7 +460,7 @@
       "layer": "fires",
       "subtype": "high",
       "file": "fires-high.svg",
-      "scale": 0.28,
+      "scale": 0.26,
       "opacity": 1
     },
     "fires:medium": {
@@ -470,7 +470,7 @@
       "layer": "fires",
       "subtype": "medium",
       "file": "fires-medium.svg",
-      "scale": 0.28,
+      "scale": 0.26,
       "opacity": 1
     },
     "fires:low": {
@@ -480,7 +480,7 @@
       "layer": "fires",
       "subtype": "low",
       "file": "fires-low.svg",
-      "scale": 0.28,
+      "scale": 0.26,
       "opacity": 1
     },
     "jamming:high": {
@@ -490,7 +490,7 @@
       "layer": "jamming",
       "subtype": "high",
       "file": "jamming-high.svg",
-      "scale": 0.55,
+      "scale": 0.48,
       "opacity": 1
     },
     "jamming:medium": {
@@ -500,7 +500,7 @@
       "layer": "jamming",
       "subtype": "medium",
       "file": "jamming-medium.svg",
-      "scale": 0.55,
+      "scale": 0.48,
       "opacity": 1
     },
     "jamming:low": {
@@ -510,7 +510,7 @@
       "layer": "jamming",
       "subtype": "low",
       "file": "jamming-low.svg",
-      "scale": 0.55,
+      "scale": 0.48,
       "opacity": 1
     },
     "asset:default": {
@@ -520,8 +520,9 @@
       "layer": "asset",
       "subtype": "default",
       "file": "asset-default.svg",
-      "scale": 0.55,
+      "scale": 0.5,
       "opacity": 1
     }
-  }
+  },
+  "revision": 1781095727737
 }

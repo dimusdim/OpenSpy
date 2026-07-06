@@ -255,6 +255,9 @@ const REPLAY_STORE_KEY_BY_LAYER = new Map<string, LayerName>(
 const REPLAY_MOTION_APPLY_BUDGET_MS = 4;
 const REPLAY_MOTION_APPLY_CHECK_INTERVAL = 32;
 const REPLAY_AIRCRAFT_SCREEN_ROTATION_INTERVAL_MS = 50;
+// The per-frame preRender handler only needs to refresh diagnostics a couple
+// of times a second; anything faster just re-walks the replay meta maps.
+const REPLAY_PRERENDER_STATS_INTERVAL_MS = 500;
 const REPLAY_FOOTPRINT_UPDATE_MS = 250;
 const REPLAY_FOOTPRINT_RAY_COUNT = 8;
 const REPLAY_POINT_DELTA_FULL_SYNC_EVERY = 10;
@@ -918,13 +921,20 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
         for (const [layerId, count] of Object.entries(renderTotals.layerCounts)) {
             layerCounts[layerId] = (layerCounts[layerId] || 0) + count;
         }
+        // Collect only the first few samples for diagnostics. forEach can't
+        // break, so it used to walk the entire 30k+ entry maps every call;
+        // driving the iterator by hand stops as soon as the quota is met.
+        const SAMPLE_LIMIT = 10;
         const samples: ReplayMeta[] = [];
-        replayMetaMap.forEach((value) => {
-            if (samples.length < 10) samples.push(value);
-        });
-        replayRenderBatchMetaMap.forEach((value) => {
-            if (samples.length < 10) samples.push(value);
-        });
+        const collectSamples = (iterator: Iterator<ReplayMeta>) => {
+            while (samples.length < SAMPLE_LIMIT) {
+                const next = iterator.next();
+                if (next.done) break;
+                samples.push(next.value);
+            }
+        };
+        collectSamples(replayMetaMap.values());
+        collectSamples(replayRenderBatchMetaMap.values());
         window.__openspyReplayStats = {
             pointCount: pointMapRef.current.size + renderTotals.points,
             shapeCount: shapeMapRef.current.size + renderTotals.shapes,
@@ -2307,6 +2317,7 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
         if (!viewer) return;
         const aircraftRotationScratch = createBillboardScreenHeadingScratch();
         let lastAircraftRotationAt = 0;
+        let lastPreRenderStatsAt = 0;
         const refreshAircraftScreenRotations = (force = false): boolean => {
             const state = useTimelineStore.getState();
             if (state.mode !== 'playback' || state.playbackKind !== 'historical') return false;
@@ -2424,7 +2435,18 @@ export function useReplayOverlay(viewer: Cesium.Viewer | null) {
             if (touched) {
                 viewer.scene.requestRender();
             }
-            publishReplayStats();
+            // Only refresh diagnostics from the preRender path during
+            // historical replay, and at most ~2 Hz. In live mode there is no
+            // replay state to report, so the old per-frame publish (which
+            // walked the whole replay meta maps) was pure waste. Event-driven
+            // publishReplayStats() calls elsewhere stay immediate.
+            if (state.mode === 'playback' && state.playbackKind === 'historical') {
+                const nowStats = Date.now();
+                if (nowStats - lastPreRenderStatsAt >= REPLAY_PRERENDER_STATS_INTERVAL_MS) {
+                    lastPreRenderStatsAt = nowStats;
+                    publishReplayStats();
+                }
+            }
             const ms = performance.now() - tStart;
             if (ms > 50) {
                 perfLog('suspect.block', {
